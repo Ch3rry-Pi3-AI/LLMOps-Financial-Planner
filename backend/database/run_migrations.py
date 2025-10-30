@@ -13,25 +13,24 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 # Get config from environment
-cluster_arn = os.environ.get('AURORA_CLUSTER_ARN')
-secret_arn = os.environ.get('AURORA_SECRET_ARN')
-database = os.environ.get('AURORA_DATABASE', 'alex')
-region = os.environ.get('AWS_REGION', 'us-east-1')
+cluster_arn = os.environ.get("AURORA_CLUSTER_ARN")
+secret_arn = os.environ.get("AURORA_SECRET_ARN")
+database = os.environ.get("AURORA_DATABASE", "alex")
+region = os.environ.get("DEFAULT_AWS_REGION", "us-east-1")
 
 if not cluster_arn or not secret_arn:
     raise ValueError("Missing AURORA_CLUSTER_ARN or AURORA_SECRET_ARN in environment variables")
 
-client = boto3.client('rds-data', region_name=region)
+client = boto3.client("rds-data", region_name=region)
 
 # Read migration file
-with open('migrations/001_schema.sql') as f:
+with open("migrations/001_schema.sql") as f:
     sql = f.read()
 
 # Define statements in order (since splitting is complex)
 statements = [
     # Extension
     'CREATE EXTENSION IF NOT EXISTS "uuid-ossp"',
-    
     # Tables
     """CREATE TABLE IF NOT EXISTS users (
         clerk_user_id VARCHAR(255) PRIMARY KEY,
@@ -43,7 +42,6 @@ statements = [
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
     )""",
-    
     """CREATE TABLE IF NOT EXISTS instruments (
         symbol VARCHAR(20) PRIMARY KEY,
         name VARCHAR(255) NOT NULL,
@@ -55,7 +53,6 @@ statements = [
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
     )""",
-    
     """CREATE TABLE IF NOT EXISTS accounts (
         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
         clerk_user_id VARCHAR(255) REFERENCES users(clerk_user_id) ON DELETE CASCADE,
@@ -66,7 +63,6 @@ statements = [
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
     )""",
-    
     """CREATE TABLE IF NOT EXISTS positions (
         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
         account_id UUID REFERENCES accounts(id) ON DELETE CASCADE,
@@ -77,7 +73,6 @@ statements = [
         updated_at TIMESTAMP DEFAULT NOW(),
         UNIQUE(account_id, symbol)
     )""",
-    
     """CREATE TABLE IF NOT EXISTS jobs (
         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
         clerk_user_id VARCHAR(255) REFERENCES users(clerk_user_id) ON DELETE CASCADE,
@@ -94,14 +89,12 @@ statements = [
         completed_at TIMESTAMP,
         updated_at TIMESTAMP DEFAULT NOW()
     )""",
-    
     # Indexes
-    'CREATE INDEX IF NOT EXISTS idx_accounts_user ON accounts(clerk_user_id)',
-    'CREATE INDEX IF NOT EXISTS idx_positions_account ON positions(account_id)',
-    'CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)',
-    'CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(clerk_user_id)',
-    'CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)',
-    
+    "CREATE INDEX IF NOT EXISTS idx_accounts_user ON accounts(clerk_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_positions_account ON positions(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(clerk_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)",
     # Function for timestamps
     """CREATE OR REPLACE FUNCTION update_updated_at_column()
     RETURNS TRIGGER AS $$
@@ -110,20 +103,15 @@ statements = [
         RETURN NEW;
     END;
     $$ LANGUAGE plpgsql""",
-    
     # Triggers
     """CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users
         FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()""",
-    
     """CREATE TRIGGER update_instruments_updated_at BEFORE UPDATE ON instruments
         FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()""",
-    
     """CREATE TRIGGER update_accounts_updated_at BEFORE UPDATE ON accounts
         FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()""",
-    
     """CREATE TRIGGER update_positions_updated_at BEFORE UPDATE ON positions
         FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()""",
-    
     """CREATE TRIGGER update_jobs_updated_at BEFORE UPDATE ON jobs
         FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()""",
 ]
@@ -147,25 +135,22 @@ for i, stmt in enumerate(statements, 1):
         stmt_type = "function"
     elif "CREATE EXTENSION" in stmt.upper():
         stmt_type = "extension"
-    
+
     # First non-empty line for display
-    first_line = next(l for l in stmt.split('\n') if l.strip())[:60]
+    first_line = next(l for l in stmt.split("\n") if l.strip())[:60]
     print(f"\n[{i}/{len(statements)}] Creating {stmt_type}...")
     print(f"    {first_line}...")
-    
+
     try:
         response = client.execute_statement(
-            resourceArn=cluster_arn,
-            secretArn=secret_arn,
-            database=database,
-            sql=stmt
+            resourceArn=cluster_arn, secretArn=secret_arn, database=database, sql=stmt
         )
         print(f"    ✅ Success")
         success_count += 1
-        
+
     except ClientError as e:
-        error_msg = e.response['Error']['Message']
-        if 'already exists' in error_msg.lower():
+        error_msg = e.response["Error"]["Message"]
+        if "already exists" in error_msg.lower():
             print(f"    ⚠️  Already exists (skipping)")
             success_count += 1
         else:
