@@ -1,6 +1,26 @@
 """
-Database package for Alex Financial Planner
-Provides database models, schemas, and Data API client
+Database package initialisation for the **Alex Financial Planner** backend.
+
+This module provides a clean, centralised export surface for all
+database-related components used across the application, including:
+
+• The main `Database` class — high-level interface for queries  
+• The `DataAPIClient` — low-level client for Data API interactions  
+• All Pydantic schemas used for input validation and API responses  
+• Enum types for regions, sectors, asset classes, job types, and more  
+
+It allows other modules to import from `src` directly without needing to know
+the internal structure of the database layer.
+
+Example:
+    from src import Database, UserCreate
+
+The `__all__` list ensures that only the intended public symbols are exposed
+when performing wildcard imports.
+
+This file contributes to the backend by acting as the **public interface**
+for the database subsystem, improving modularity and keeping the import
+surface stable as internal implementation details evolve.
 """
 
 from .client import DataAPIClient
