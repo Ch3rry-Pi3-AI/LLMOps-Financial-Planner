@@ -1,6 +1,23 @@
 """
-FastAPI backend for Alex Financial Advisor
-Handles all API routes with Clerk JWT authentication
+Main FastAPI application for the Alex Financial Advisor backend.
+
+This module exposes a set of authenticated REST endpoints for:
+
+* Managing users and their financial planning preferences.
+* Creating, updating, and deleting investment accounts and positions.
+* Listing and enriching financial instruments used in portfolios.
+* Triggering asynchronous portfolio analysis jobs via AWS SQS.
+* Querying historical and in-flight analysis jobs.
+
+The API is designed to:
+
+* Authenticate all protected routes using Clerk-issued JWTs.
+* Persist data through a `Database` abstraction (`src.Database`).
+* Integrate with AWS services (SQS, Lambda via Mangum) for job processing.
+* Surface clear, user-friendly error messages suitable for a SaaS frontend.
+
+The application can run on AWS Lambda (via Mangum) or directly with Uvicorn
+for local development.
 """
 
 import os
@@ -9,7 +26,8 @@ import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from decimal import Decimal
-import uuid
+
+import uuid  # noqa: F401  # Reserved for potential future usage
 
 from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,27 +43,43 @@ from src.schemas import (
     UserCreate,
     AccountCreate,
     PositionCreate,
-    JobCreate, JobUpdate,
-    JobType, JobStatus
+    JobCreate,
+    JobUpdate,
+    JobType,
+    JobStatus,
 )
 
-# Load environment variables
+# =========================
+# Environment & Logging
+# =========================
+
+# Load environment variables from .env, overriding existing values when present
 load_dotenv(override=True)
 
-# Configure logging
+# Configure root logger with INFO level for structured backend logging
 logging.basicConfig(level=logging.INFO)
+# Create module-level logger for this file
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI app
+# =========================
+# FastAPI Application Setup
+# =========================
+
+# Initialise FastAPI application with basic metadata for OpenAPI docs
 app = FastAPI(
     title="Alex Financial Advisor API",
     description="Backend API for AI-powered financial planning",
-    version="1.0.0"
+    version="1.0.0",
 )
 
-# CORS configuration
-# Get origins from CORS_ORIGINS env var (comma-separated) or fall back to localhost
-cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+# =========================
+# CORS Configuration
+# =========================
+
+# Read allowed CORS origins from environment or default to localhost
+cors_origins: List[str] = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+
+# Attach CORS middleware to allow browser-based frontends to call the API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
@@ -54,576 +88,1235 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Custom exception handlers for better error messages
+# =========================
+# Custom Exception Handlers
+# =========================
+
+
 @app.exception_handler(ValidationError)
-async def validation_exception_handler(request: Request, exc: ValidationError):
-    """Handle Pydantic validation errors with user-friendly messages"""
+async def validation_exception_handler(
+    request: Request, exc: ValidationError
+) -> JSONResponse:
+    """
+    Handle Pydantic validation errors with user-friendly messages.
+
+    Parameters
+    ----------
+    request : fastapi.Request
+        Incoming HTTP request that triggered the validation error.
+    exc : pydantic.ValidationError
+        Validation error raised during request body parsing.
+
+    Returns
+    -------
+    fastapi.responses.JSONResponse
+        Response with HTTP 422 status and a generic user-friendly message.
+    """
+    # Return a simplified error payload instead of raw Pydantic internals
     return JSONResponse(
-        status_code=422,
-        content={"detail": "Invalid input data. Please check your request and try again."}
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "detail": "Invalid input data. Please check your request and try again."
+        },
     )
+
 
 @app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    """Handle HTTP exceptions with improved messages"""
-    # Map technical errors to user-friendly messages
-    user_friendly_messages = {
-        401: "Your session has expired. Please sign in again.",
-        403: "You don't have permission to access this resource.",
-        404: "The requested resource was not found.",
-        429: "Too many requests. Please slow down and try again later.",
-        500: "An internal error occurred. Please try again later.",
-        503: "The service is temporarily unavailable. Please try again later."
+async def http_exception_handler(
+    request: Request, exc: HTTPException
+) -> JSONResponse:
+    """
+    Handle HTTP exceptions and map them to user-friendly messages.
+
+    Parameters
+    ----------
+    request : fastapi.Request
+        Incoming HTTP request that triggered the HTTPException.
+    exc : fastapi.HTTPException
+        HTTP error raised by a route handler or dependency.
+
+    Returns
+    -------
+    fastapi.responses.JSONResponse
+        Response with the original HTTP status code and a friendlier message.
+    """
+    # Map raw status codes to more descriptive and friendly messages
+    user_friendly_messages: Dict[int, str] = {
+        status.HTTP_401_UNAUTHORIZED: "Your session has expired. Please sign in again.",
+        status.HTTP_403_FORBIDDEN: "You don't have permission to access this resource.",
+        status.HTTP_404_NOT_FOUND: "The requested resource was not found.",
+        status.HTTP_429_TOO_MANY_REQUESTS: "Too many requests. Please slow down and try again later.",
+        status.HTTP_500_INTERNAL_SERVER_ERROR: "An internal error occurred. Please try again later.",
+        status.HTTP_503_SERVICE_UNAVAILABLE: "The service is temporarily unavailable. Please try again later.",
     }
 
-    message = user_friendly_messages.get(exc.status_code, exc.detail)
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": message}
-    )
+    # Use friendly message when available, otherwise fall back to the original detail
+    message: str = user_friendly_messages.get(exc.status_code, exc.detail)
+    return JSONResponse(status_code=exc.status_code, content={"detail": message})
+
 
 @app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    """Handle unexpected errors gracefully"""
-    logger.error(f"Unexpected error: {exc}", exc_info=True)
+async def general_exception_handler(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    """
+    Handle unexpected unhandled exceptions gracefully.
+
+    This is a last-resort handler for any exception that was not explicitly
+    caught by more specific handlers.
+
+    Parameters
+    ----------
+    request : fastapi.Request
+        Incoming HTTP request that triggered the error.
+    exc : Exception
+        Unhandled exception instance.
+
+    Returns
+    -------
+    fastapi.responses.JSONResponse
+        Response with HTTP 500 status and a generic user-friendly message.
+    """
+    # Log the full exception with stack trace for diagnostics
+    logger.error("Unexpected error: %s", exc, exc_info=True)
+    # Return a generic error message that is safe to show to end users
     return JSONResponse(
-        status_code=500,
-        content={"detail": "An unexpected error occurred. Our team has been notified."}
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "An unexpected error occurred. Our team has been notified."},
     )
 
-# Initialize services
-db = Database()
 
-# SQS client for job queueing
-sqs_client = boto3.client('sqs', region_name=os.getenv('DEFAULT_AWS_REGION', 'us-east-1'))
-SQS_QUEUE_URL = os.getenv('SQS_QUEUE_URL', '')
+# =========================
+# Infrastructure & Services
+# =========================
 
-# Clerk authentication setup (exactly like saas reference)
-clerk_config = ClerkConfig(jwks_url=os.getenv("CLERK_JWKS_URL"))
-clerk_guard = ClerkHTTPBearer(clerk_config)
+# Instantiate the main database abstraction used by all route handlers
+db: Database = Database()
 
-async def get_current_user_id(creds: HTTPAuthorizationCredentials = Depends(clerk_guard)) -> str:
-    """Extract user ID from validated Clerk token"""
-    # The clerk_guard dependency already validated the token
-    # creds.decoded contains the JWT payload
-    user_id = creds.decoded["sub"]
-    logger.info(f"Authenticated user: {user_id}")
+# Create an SQS client for sending analysis jobs to a background worker queue
+sqs_client = boto3.client(
+    "sqs", region_name=os.getenv("DEFAULT_AWS_REGION", "us-east-1")
+)
+
+# Read the SQS queue URL from environment (may be empty if queue is not configured)
+SQS_QUEUE_URL: str = os.getenv("SQS_QUEUE_URL", "")
+
+# =========================
+# Clerk Authentication Setup
+# =========================
+
+# Build Clerk configuration using JWKS URL for JWT verification
+clerk_config: ClerkConfig = ClerkConfig(jwks_url=os.getenv("CLERK_JWKS_URL", ""))
+
+# Instantiate HTTP bearer guard that validates Clerk JWTs on incoming requests
+clerk_guard: ClerkHTTPBearer = ClerkHTTPBearer(clerk_config)
+
+
+async def get_current_user_id(
+    creds: HTTPAuthorizationCredentials = Depends(clerk_guard),
+) -> str:
+    """
+    Extract the authenticated Clerk user ID from a validated JWT.
+
+    Parameters
+    ----------
+    creds : fastapi_clerk_auth.HTTPAuthorizationCredentials
+        Credentials object produced by `clerk_guard`, containing the decoded JWT.
+
+    Returns
+    -------
+    str
+        Clerk user identifier (`sub` claim) for the current session.
+    """
+    # Read the subject (user id) from the decoded Clerk JWT payload
+    user_id: str = creds.decoded["sub"]
+    # Log the authenticated user for observability and debugging
+    logger.info("Authenticated user: %s", user_id)
     return user_id
 
-# Request/Response models
+
+# =========================
+# Pydantic Models
+# =========================
+
+
 class UserResponse(BaseModel):
+    """
+    API response model for user retrieval or creation.
+
+    Attributes
+    ----------
+    user : dict of str to Any
+        User record as stored in the database, including preferences.
+    created : bool
+        Flag indicating whether a new user was created (`True`) or an existing
+        user was returned (`False`).
+    """
+
     user: Dict[str, Any]
     created: bool
 
+
 class UserUpdate(BaseModel):
-    """Update user settings"""
+    """
+    Payload for updating user-level settings.
+
+    Attributes
+    ----------
+    display_name : str, optional
+        Friendly display name for the user as shown in the UI.
+    years_until_retirement : int, optional
+        Number of years remaining until the user's target retirement date.
+    target_retirement_income : float, optional
+        Desired annual retirement income in the user's base currency.
+    asset_class_targets : dict of str to float, optional
+        Target allocation percentages by asset class (e.g., equity, fixed_income).
+    region_targets : dict of str to float, optional
+        Target allocation percentages by geographic region.
+    """
+
     display_name: Optional[str] = None
     years_until_retirement: Optional[int] = None
     target_retirement_income: Optional[float] = None
     asset_class_targets: Optional[Dict[str, float]] = None
     region_targets: Optional[Dict[str, float]] = None
 
+
 class AccountUpdate(BaseModel):
-    """Update account"""
+    """
+    Payload for updating a single investment account.
+
+    Attributes
+    ----------
+    account_name : str, optional
+        Human-readable name of the account (e.g., 'Brokerage', 'SIPP').
+    account_purpose : str, optional
+        Short description of the account's purpose for planning.
+    cash_balance : float, optional
+        Current cash balance associated with the account.
+    """
+
     account_name: Optional[str] = None
     account_purpose: Optional[str] = None
     cash_balance: Optional[float] = None
 
+
 class PositionUpdate(BaseModel):
-    """Update position"""
+    """
+    Payload for updating a single position within an account.
+
+    Attributes
+    ----------
+    quantity : float, optional
+        New holding quantity for the position (e.g., number of shares).
+    """
+
     quantity: Optional[float] = None
 
+
 class AnalyzeRequest(BaseModel):
-    analysis_type: str = Field(default="portfolio", description="Type of analysis to perform")
-    options: Dict[str, Any] = Field(default_factory=dict, description="Analysis options")
+    """
+    Request body for triggering a portfolio analysis job.
+
+    Attributes
+    ----------
+    analysis_type : str
+        Analysis mode to perform, e.g., 'portfolio' or future variants.
+    options : dict of str to Any
+        Arbitrary analysis options to pass through to the background worker.
+    """
+
+    analysis_type: str = Field(
+        default="portfolio", description="Type of analysis to perform"
+    )
+    options: Dict[str, Any] = Field(
+        default_factory=dict, description="Analysis options"
+    )
+
 
 class AnalyzeResponse(BaseModel):
+    """
+    Response model returned when a portfolio analysis job is created.
+
+    Attributes
+    ----------
+    job_id : str
+        Identifier of the created analysis job in the jobs table.
+    message : str
+        Human-readable confirmation message for the client.
+    """
+
     job_id: str
     message: str
 
-# API Routes
+
+# =========================
+# Health & Utility Endpoints
+# =========================
+
 
 @app.get("/health")
-async def health_check():
-    """Health check endpoint"""
+async def health_check() -> Dict[str, str]:
+    """
+    Simple health check endpoint for uptime monitoring.
+
+    Returns
+    -------
+    dict
+        Dictionary containing a `status` flag and current ISO-8601 timestamp.
+    """
+    # Return a basic health payload indicating the API is responsive
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+
+# =========================
+# User Endpoints
+# =========================
+
 
 @app.get("/api/user", response_model=UserResponse)
 async def get_or_create_user(
     clerk_user_id: str = Depends(get_current_user_id),
-    creds: HTTPAuthorizationCredentials = Depends(clerk_guard)
-):
-    """Get user or create if first time"""
+    creds: HTTPAuthorizationCredentials = Depends(clerk_guard),
+) -> UserResponse:
+    """
+    Retrieve an existing user or create a new one with sensible defaults.
 
+    Parameters
+    ----------
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+    creds : fastapi_clerk_auth.HTTPAuthorizationCredentials
+        Credentials providing access to the decoded Clerk JWT.
+
+    Returns
+    -------
+    UserResponse
+        Metadata about the user and whether a new record was created.
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If the user profile cannot be loaded or created due to an internal error.
+    """
     try:
-        # Check if user exists
-        user = db.users.find_by_clerk_id(clerk_user_id)
+        # Attempt to look up the user by Clerk user identifier
+        user: Optional[Dict[str, Any]] = db.users.find_by_clerk_id(clerk_user_id)
 
+        # If the user already exists, return it without creating a new record
         if user:
             return UserResponse(user=user, created=False)
 
-        # Create new user with defaults from JWT token
-        token_data = creds.decoded
-        display_name = token_data.get('name') or token_data.get('email', '').split('@')[0] or "New User"
+        # Extract token claims for default display name and other metadata
+        token_data: Dict[str, Any] = creds.decoded
 
-        # Create user with ALL defaults in one operation
-        user_data = {
-            'clerk_user_id': clerk_user_id,
-            'display_name': display_name,
-            'years_until_retirement': 20,
-            'target_retirement_income': 60000,
-            'asset_class_targets': {"equity": 70, "fixed_income": 30},
-            'region_targets': {"north_america": 50, "international": 50}
+        # Derive a sensible default display name from name/email or fallback value
+        display_name: str = (
+            token_data.get("name")
+            or token_data.get("email", "").split("@")[0]
+            or "New User"
+        )
+
+        # Prepare default user preferences to insert in a single operation
+        user_data: Dict[str, Any] = {
+            "clerk_user_id": clerk_user_id,
+            "display_name": display_name,
+            "years_until_retirement": 20,
+            "target_retirement_income": 60000,
+            "asset_class_targets": {"equity": 70, "fixed_income": 30},
+            "region_targets": {"north_america": 50, "international": 50},
         }
 
-        # Insert directly with all data
-        created_clerk_id = db.users.db.insert('users', user_data, returning='clerk_user_id')
+        # Insert user into database using Clerk user id as the primary key
+        db.users.db.insert("users", user_data, returning="clerk_user_id")
 
-        # Fetch the created user
-        created_user = db.users.find_by_clerk_id(clerk_user_id)
-        logger.info(f"Created new user: {clerk_user_id}")
+        # Retrieve the freshly created user record for confirmation
+        created_user: Dict[str, Any] = db.users.find_by_clerk_id(clerk_user_id)
+        # Log creation event for observability
+        logger.info("Created new user: %s", clerk_user_id)
 
         return UserResponse(user=created_user, created=True)
 
     except Exception as e:
-        logger.error(f"Error in get_or_create_user: {e}")
-        raise HTTPException(status_code=500, detail="Failed to load user profile")
+        # Log any unexpected failure to create or fetch the user
+        logger.error("Error in get_or_create_user: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to load user profile",
+        ) from e
+
 
 @app.put("/api/user")
-async def update_user(user_update: UserUpdate, clerk_user_id: str = Depends(get_current_user_id)):
-    """Update user settings"""
+async def update_user(
+    user_update: UserUpdate, clerk_user_id: str = Depends(get_current_user_id)
+) -> Dict[str, Any]:
+    """
+    Update user settings for the authenticated Clerk user.
 
+    Parameters
+    ----------
+    user_update : UserUpdate
+        Partial update payload containing only fields that should change.
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+
+    Returns
+    -------
+    dict
+        Updated user record as stored in the database.
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If the user cannot be found or an internal error occurs.
+    """
     try:
-        # Get user
-        user = db.users.find_by_clerk_id(clerk_user_id)
+        # Attempt to fetch the existing user record from the database
+        user: Optional[Dict[str, Any]] = db.users.find_by_clerk_id(clerk_user_id)
 
+        # If no user is found, return a 404 response
         if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-        # Update user - users table uses clerk_user_id as primary key
-        update_data = user_update.model_dump(exclude_unset=True)
+        # Extract only the fields that were explicitly provided in the request
+        update_data: Dict[str, Any] = user_update.model_dump(exclude_unset=True)
 
-        # Use the database client directly since users table has clerk_user_id as PK
+        # Apply the partial update using Clerk user id as the primary key
         db.users.db.update(
-            'users',
-            update_data,
-            "clerk_user_id = :clerk_user_id",
-            {'clerk_user_id': clerk_user_id}
+            "users", update_data, "clerk_user_id = :clerk_user_id", {"clerk_user_id": clerk_user_id}
         )
 
-        # Return updated user
-        updated_user = db.users.find_by_clerk_id(clerk_user_id)
+        # Fetch the updated user to return to the client
+        updated_user: Dict[str, Any] = db.users.find_by_clerk_id(clerk_user_id)
         return updated_user
 
+    except HTTPException:
+        # Re-raise explicitly raised HTTP exceptions unchanged
+        raise
     except Exception as e:
-        logger.error(f"Error updating user: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log an unexpected error while updating the user
+        logger.error("Error updating user: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+
+
+# =========================
+# Account Endpoints
+# =========================
+
 
 @app.get("/api/accounts")
-async def list_accounts(clerk_user_id: str = Depends(get_current_user_id)):
-    """List user's accounts"""
+async def list_accounts(
+    clerk_user_id: str = Depends(get_current_user_id),
+) -> List[Dict[str, Any]]:
+    """
+    List all investment accounts belonging to the current user.
 
+    Parameters
+    ----------
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+
+    Returns
+    -------
+    list of dict
+        List of account records owned by the user.
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If an internal error occurs while querying the database.
+    """
     try:
-        # Get accounts for user
-        accounts = db.accounts.find_by_user(clerk_user_id)
+        # Retrieve all accounts associated with the authenticated user
+        accounts: List[Dict[str, Any]] = db.accounts.find_by_user(clerk_user_id)
         return accounts
-
     except Exception as e:
-        logger.error(f"Error listing accounts: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log any unexpected error during account retrieval
+        logger.error("Error listing accounts: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+
 
 @app.post("/api/accounts")
-async def create_account(account: AccountCreate, clerk_user_id: str = Depends(get_current_user_id)):
-    """Create new account"""
+async def create_account(
+    account: AccountCreate, clerk_user_id: str = Depends(get_current_user_id)
+) -> Dict[str, Any]:
+    """
+    Create a new investment account for the current user.
 
+    Parameters
+    ----------
+    account : src.schemas.AccountCreate
+        Payload describing the account name, purpose, and optional cash balance.
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+
+    Returns
+    -------
+    dict
+        Newly created account record.
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If the user cannot be found or an internal error occurs.
+    """
     try:
-        # Verify user exists
-        user = db.users.find_by_clerk_id(clerk_user_id)
+        # Verify that the user exists before creating an account
+        user: Optional[Dict[str, Any]] = db.users.find_by_clerk_id(clerk_user_id)
         if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-        # Create account
-        account_id = db.accounts.create_account(
+        # Determine starting cash balance as Decimal for financial accuracy
+        cash_balance: Decimal = getattr(account, "cash_balance", Decimal("0"))
+
+        # Create the account record within the database
+        account_id: str = db.accounts.create_account(
             clerk_user_id=clerk_user_id,
             account_name=account.account_name,
             account_purpose=account.account_purpose,
-            cash_balance=getattr(account, 'cash_balance', Decimal('0'))
+            cash_balance=cash_balance,
         )
 
-        # Return created account
-        created_account = db.accounts.find_by_id(account_id)
+        # Fetch the created account for the response payload
+        created_account: Dict[str, Any] = db.accounts.find_by_id(account_id)
         return created_account
 
+    except HTTPException:
+        # Re-raise expected HTTP errors
+        raise
     except Exception as e:
-        logger.error(f"Error creating account: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log unanticipated errors when creating an account
+        logger.error("Error creating account: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+
 
 @app.put("/api/accounts/{account_id}")
-async def update_account(account_id: str, account_update: AccountUpdate, clerk_user_id: str = Depends(get_current_user_id)):
-    """Update account"""
+async def update_account(
+    account_id: str,
+    account_update: AccountUpdate,
+    clerk_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    """
+    Update an existing investment account owned by the current user.
 
+    Parameters
+    ----------
+    account_id : str
+        Unique identifier of the account to update.
+    account_update : AccountUpdate
+        Partial update payload for the account fields.
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+
+    Returns
+    -------
+    dict
+        Updated account record.
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If the account is not found, ownership does not match,
+        or an internal error occurs.
+    """
     try:
-        # Verify account belongs to user
-        account = db.accounts.find_by_id(account_id)
+        # Retrieve the target account to confirm existence and ownership
+        account: Optional[Dict[str, Any]] = db.accounts.find_by_id(account_id)
         if not account:
-            raise HTTPException(status_code=404, detail="Account not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
 
-        # Verify ownership - accounts table stores clerk_user_id directly
-        if account.get('clerk_user_id') != clerk_user_id:
-            raise HTTPException(status_code=403, detail="Not authorized")
+        # Enforce that the account belongs to the authenticated user
+        if account.get("clerk_user_id") != clerk_user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
 
-        # Update account
-        update_data = account_update.model_dump(exclude_unset=True)
+        # Construct a dict of fields that the client intends to update
+        update_data: Dict[str, Any] = account_update.model_dump(exclude_unset=True)
+
+        # Apply the update via the account repository
         db.accounts.update(account_id, update_data)
 
-        # Return updated account
-        updated_account = db.accounts.find_by_id(account_id)
+        # Return the updated account from the database
+        updated_account: Dict[str, Any] = db.accounts.find_by_id(account_id)
         return updated_account
 
     except HTTPException:
+        # Let expected HTTP error propagate unchanged
         raise
     except Exception as e:
-        logger.error(f"Error updating account: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log any unexpected error during account update
+        logger.error("Error updating account: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+
 
 @app.delete("/api/accounts/{account_id}")
-async def delete_account(account_id: str, clerk_user_id: str = Depends(get_current_user_id)):
-    """Delete an account and all its positions"""
+async def delete_account(
+    account_id: str, clerk_user_id: str = Depends(get_current_user_id)
+) -> Dict[str, str]:
+    """
+    Delete an investment account and all its positions for the current user.
 
+    Parameters
+    ----------
+    account_id : str
+        Unique identifier of the account to delete.
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+
+    Returns
+    -------
+    dict
+        Confirmation message indicating successful deletion.
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If the account is not found, ownership does not match,
+        or an internal error occurs.
+    """
     try:
-        # Verify account belongs to user
-        account = db.accounts.find_by_id(account_id)
+        # Retrieve the account record to verify existence and ownership
+        account: Optional[Dict[str, Any]] = db.accounts.find_by_id(account_id)
         if not account:
-            raise HTTPException(status_code=404, detail="Account not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
 
-        # Verify ownership - accounts table stores clerk_user_id directly
-        if account.get('clerk_user_id') != clerk_user_id:
-            raise HTTPException(status_code=403, detail="Not authorized")
+        # Ensure that the account belongs to the requesting user
+        if account.get("clerk_user_id") != clerk_user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
 
-        # Delete all positions first (due to foreign key constraint)
-        positions = db.positions.find_by_account(account_id)
+        # Fetch all positions in this account to remove them first
+        positions: List[Dict[str, Any]] = db.positions.find_by_account(account_id)
         for position in positions:
-            db.positions.delete(position['id'])
+            # Delete each position associated with this account
+            db.positions.delete(position["id"])
 
-        # Delete the account
+        # Delete the account itself after positions have been removed
         db.accounts.delete(account_id)
 
         return {"message": "Account deleted successfully"}
 
     except HTTPException:
+        # Propagate known HTTPError instances
         raise
     except Exception as e:
-        logger.error(f"Error deleting account: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log errors encountered when deleting the account
+        logger.error("Error deleting account: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+
+
+# =========================
+# Position Endpoints
+# =========================
+
 
 @app.get("/api/accounts/{account_id}/positions")
-async def list_positions(account_id: str, clerk_user_id: str = Depends(get_current_user_id)):
-    """Get positions for account"""
+async def list_positions(
+    account_id: str, clerk_user_id: str = Depends(get_current_user_id)
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    List all positions for a specific account owned by the current user.
 
+    Parameters
+    ----------
+    account_id : str
+        Identifier of the account whose positions should be returned.
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+
+    Returns
+    -------
+    dict
+        Dictionary with a single `positions` key containing enriched positions.
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If the account is not found, ownership does not match,
+        or an internal error occurs.
+    """
     try:
-        # Verify account belongs to user
-        account = db.accounts.find_by_id(account_id)
+        # Retrieve the account record to ensure it exists
+        account: Optional[Dict[str, Any]] = db.accounts.find_by_id(account_id)
         if not account:
-            raise HTTPException(status_code=404, detail="Account not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
 
-        # Verify ownership - accounts table stores clerk_user_id directly
-        if account.get('clerk_user_id') != clerk_user_id:
-            raise HTTPException(status_code=403, detail="Not authorized")
+        # Ensure the account belongs to the user making the request
+        if account.get("clerk_user_id") != clerk_user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
 
-        positions = db.positions.find_by_account(account_id)
+        # Fetch all positions associated with this account
+        positions: List[Dict[str, Any]] = db.positions.find_by_account(account_id)
 
-        # Format positions with instrument data for frontend
-        formatted_positions = []
+        # Build a list of positions augmented with instrument metadata
+        formatted_positions: List[Dict[str, Any]] = []
         for pos in positions:
-            # Get full instrument data
-            instrument = db.instruments.find_by_symbol(pos['symbol'])
-            formatted_positions.append({
-                **pos,
-                'instrument': instrument
-            })
+            # Look up instrument details to enrich the position for the frontend
+            instrument: Optional[Dict[str, Any]] = db.instruments.find_by_symbol(
+                pos["symbol"]
+            )
+            formatted_positions.append({**pos, "instrument": instrument})
 
         return {"positions": formatted_positions}
 
     except HTTPException:
+        # Forward specific HTTP exceptions as is
         raise
     except Exception as e:
-        logger.error(f"Error listing positions: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log any unexpected error while listing positions
+        logger.error("Error listing positions: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+
 
 @app.post("/api/positions")
-async def create_position(position: PositionCreate, clerk_user_id: str = Depends(get_current_user_id)):
-    """Create position"""
+async def create_position(
+    position: PositionCreate, clerk_user_id: str = Depends(get_current_user_id)
+) -> Dict[str, Any]:
+    """
+    Create a new position within one of the user's accounts.
 
+    If the referenced instrument does not exist, a minimal instrument record
+    is created using sensible defaults.
+
+    Parameters
+    ----------
+    position : src.schemas.PositionCreate
+        Payload describing the account id, symbol, and quantity.
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+
+    Returns
+    -------
+    dict
+        Newly created position record.
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If the account is not found, ownership does not match,
+        or an internal error occurs.
+    """
     try:
-        # Verify account belongs to user
-        account = db.accounts.find_by_id(position.account_id)
+        # Check that the target account exists
+        account: Optional[Dict[str, Any]] = db.accounts.find_by_id(position.account_id)
         if not account:
-            raise HTTPException(status_code=404, detail="Account not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
 
-        # Verify ownership - accounts table stores clerk_user_id directly
-        if account.get('clerk_user_id') != clerk_user_id:
-            raise HTTPException(status_code=403, detail="Not authorized")
+        # Verify that the account belongs to the current user
+        if account.get("clerk_user_id") != clerk_user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
 
-        # Check if instrument exists, if not create it
-        instrument = db.instruments.find_by_symbol(position.symbol.upper())
+        # Normalise symbol to uppercase for consistent instrument lookups
+        symbol_upper: str = position.symbol.upper()
+
+        # Attempt to find an existing instrument for this symbol
+        instrument: Optional[Dict[str, Any]] = db.instruments.find_by_symbol(symbol_upper)
         if not instrument:
-            logger.info(f"Creating new instrument: {position.symbol.upper()}")
-            # Create a basic instrument entry with default allocations
-            # Import the schema from database
+            # Log that a new instrument is being created on the fly
+            logger.info("Creating new instrument: %s", symbol_upper)
+
+            # Import the instrument creation schema lazily to avoid circular imports
             from src.schemas import InstrumentCreate
 
-            # Determine type based on common patterns
-            symbol_upper = position.symbol.upper()
+            # Infer a simple instrument type based on symbol structure
             if len(symbol_upper) <= 5 and symbol_upper.isalpha():
-                instrument_type = "stock"
+                instrument_type: str = "stock"
             else:
                 instrument_type = "etf"
 
-            # Create instrument with basic default allocations
-            # These can be updated later by the tagger agent
+            # Compose basic default allocations and zero starting price
             new_instrument = InstrumentCreate(
                 symbol=symbol_upper,
-                name=f"{symbol_upper} - User Added",  # Basic name, can be updated later
+                name=f"{symbol_upper} - User Added",
                 instrument_type=instrument_type,
-                current_price=Decimal("0.00"),  # Price will be updated by background processes
-                allocation_regions={"north_america": 100.0},  # Default to 100% NA
-                allocation_sectors={"other": 100.0},  # Default to 100% other
-                allocation_asset_class={"equity": 100.0} if instrument_type == "stock" else {"fixed_income": 100.0}
+                current_price=Decimal("0.00"),
+                allocation_regions={"north_america": 100.0},
+                allocation_sectors={"other": 100.0},
+                allocation_asset_class=(
+                    {"equity": 100.0}
+                    if instrument_type == "stock"
+                    else {"fixed_income": 100.0}
+                ),
             )
 
+            # Persist the new instrument in the instrument repository
             db.instruments.create_instrument(new_instrument)
 
-        # Add position
-        position_id = db.positions.add_position(
-            account_id=position.account_id,
-            symbol=position.symbol.upper(),
-            quantity=position.quantity
+        # Insert the position into the positions repository
+        position_id: str = db.positions.add_position(
+            account_id=position.account_id, symbol=symbol_upper, quantity=position.quantity
         )
 
-        # Return created position
-        created_position = db.positions.find_by_id(position_id)
+        # Retrieve the created position for the response payload
+        created_position: Dict[str, Any] = db.positions.find_by_id(position_id)
         return created_position
 
     except HTTPException:
+        # Re-emit known HTTP exceptions
         raise
     except Exception as e:
-        logger.error(f"Error creating position: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log unexpected failures when creating a position
+        logger.error("Error creating position: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+
 
 @app.put("/api/positions/{position_id}")
-async def update_position(position_id: str, position_update: PositionUpdate, clerk_user_id: str = Depends(get_current_user_id)):
-    """Update position"""
+async def update_position(
+    position_id: str,
+    position_update: PositionUpdate,
+    clerk_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    """
+    Update a position in one of the user's accounts.
 
+    Parameters
+    ----------
+    position_id : str
+        Identifier of the position to update.
+    position_update : PositionUpdate
+        Partial update payload containing new quantity values.
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+
+    Returns
+    -------
+    dict
+        Updated position record.
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If the position or account cannot be found, ownership does not match,
+        or an internal error occurs.
+    """
     try:
-        # Get position and verify ownership
-        position = db.positions.find_by_id(position_id)
+        # Retrieve the existing position record
+        position: Optional[Dict[str, Any]] = db.positions.find_by_id(position_id)
         if not position:
-            raise HTTPException(status_code=404, detail="Position not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Position not found")
 
-        account = db.accounts.find_by_id(position['account_id'])
+        # Fetch the related account to confirm existence and validate ownership
+        account: Optional[Dict[str, Any]] = db.accounts.find_by_id(position["account_id"])
         if not account:
-            raise HTTPException(status_code=404, detail="Account not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
 
-        # Verify ownership - accounts table stores clerk_user_id directly
-        if account.get('clerk_user_id') != clerk_user_id:
-            raise HTTPException(status_code=403, detail="Not authorized")
+        # Ensure the account belongs to the currently authenticated user
+        if account.get("clerk_user_id") != clerk_user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
 
-        # Update position
-        update_data = position_update.model_dump(exclude_unset=True)
+        # Collect fields explicitly supplied in the update payload
+        update_data: Dict[str, Any] = position_update.model_dump(exclude_unset=True)
+
+        # Apply the update through the positions repository
         db.positions.update(position_id, update_data)
 
-        # Return updated position
-        updated_position = db.positions.find_by_id(position_id)
+        # Fetch and return the updated position for confirmation
+        updated_position: Dict[str, Any] = db.positions.find_by_id(position_id)
         return updated_position
 
     except HTTPException:
+        # Pass through expected HTTP exceptions
         raise
     except Exception as e:
-        logger.error(f"Error updating position: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log unanticipated errors during position update
+        logger.error("Error updating position: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+
 
 @app.delete("/api/positions/{position_id}")
-async def delete_position(position_id: str, clerk_user_id: str = Depends(get_current_user_id)):
-    """Delete position"""
+async def delete_position(
+    position_id: str, clerk_user_id: str = Depends(get_current_user_id)
+) -> Dict[str, str]:
+    """
+    Delete a position belonging to one of the user's accounts.
 
+    Parameters
+    ----------
+    position_id : str
+        Identifier of the position to delete.
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+
+    Returns
+    -------
+    dict
+        Confirmation message indicating the position was removed.
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If the position or account is not found, ownership does not match,
+        or an internal error occurs.
+    """
     try:
-        # Get position and verify ownership
-        position = db.positions.find_by_id(position_id)
+        # Retrieve the existing position record to validate existence
+        position: Optional[Dict[str, Any]] = db.positions.find_by_id(position_id)
         if not position:
-            raise HTTPException(status_code=404, detail="Position not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Position not found")
 
-        account = db.accounts.find_by_id(position['account_id'])
+        # Retrieve the related account record for ownership verification
+        account: Optional[Dict[str, Any]] = db.accounts.find_by_id(position["account_id"])
         if not account:
-            raise HTTPException(status_code=404, detail="Account not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
 
-        # Verify ownership - accounts table stores clerk_user_id directly
-        if account.get('clerk_user_id') != clerk_user_id:
-            raise HTTPException(status_code=403, detail="Not authorized")
+        # Ensure that the account is owned by the authenticated user
+        if account.get("clerk_user_id") != clerk_user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
 
+        # Remove the position from the database
         db.positions.delete(position_id)
         return {"message": "Position deleted"}
 
     except HTTPException:
+        # Forward recognised HTTP errors
         raise
     except Exception as e:
-        logger.error(f"Error deleting position: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log unexpected errors during position deletion
+        logger.error("Error deleting position: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+
+
+# =========================
+# Instrument Endpoints
+# =========================
+
 
 @app.get("/api/instruments")
-async def list_instruments(clerk_user_id: str = Depends(get_current_user_id)):
-    """Get all available instruments for autocomplete"""
+async def list_instruments(
+    clerk_user_id: str = Depends(get_current_user_id),
+) -> List[Dict[str, Any]]:
+    """
+    List all available instruments for autocomplete and selection.
 
+    Parameters
+    ----------
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+        (Currently unused but enforces authentication.)
+
+    Returns
+    -------
+    list of dict
+        Simplified instrument records suitable for UI autocomplete controls.
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If an internal error occurs while querying instruments.
+    """
     try:
-        instruments = db.instruments.find_all()
-        # Return simplified list for autocomplete
+        # Fetch all instrument records from the instrument repository
+        instruments: List[Dict[str, Any]] = db.instruments.find_all()
+
+        # Transform raw instruments into a simplified structure for the frontend
         return [
             {
                 "symbol": inst["symbol"],
                 "name": inst["name"],
                 "instrument_type": inst["instrument_type"],
-                "current_price": float(inst["current_price"]) if inst.get("current_price") else None
+                "current_price": float(inst["current_price"])
+                if inst.get("current_price") is not None
+                else None,
             }
             for inst in instruments
         ]
     except Exception as e:
-        logger.error(f"Error fetching instruments: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log any unexpected error encountered while listing instruments
+        logger.error("Error fetching instruments: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+
+
+# =========================
+# Analysis / Job Endpoints
+# =========================
+
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
-async def trigger_analysis(request: AnalyzeRequest, clerk_user_id: str = Depends(get_current_user_id)):
-    """Trigger portfolio analysis"""
+async def trigger_analysis(
+    request: AnalyzeRequest, clerk_user_id: str = Depends(get_current_user_id)
+) -> AnalyzeResponse:
+    """
+    Trigger an asynchronous portfolio analysis job via SQS.
 
+    Parameters
+    ----------
+    request : AnalyzeRequest
+        Analysis configuration, including type and any custom options.
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+
+    Returns
+    -------
+    AnalyzeResponse
+        Response including the new job identifier and confirmation message.
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If the user is not found or an internal error occurs while
+        creating or dispatching the job.
+    """
     try:
-        # Get user
-        user = db.users.find_by_clerk_id(clerk_user_id)
-
+        # Ensure the requesting user exists in the users table
+        user: Optional[Dict[str, Any]] = db.users.find_by_clerk_id(clerk_user_id)
         if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-        # Create job
-        job_id = db.jobs.create_job(
+        # Create a job record representing this analysis request
+        job_id: str = db.jobs.create_job(
             clerk_user_id=clerk_user_id,
             job_type="portfolio_analysis",
-            request_payload=request.model_dump()
+            request_payload=request.model_dump(),
         )
 
-        # Get the created job
-        job = db.jobs.find_by_id(job_id)
+        # Retrieve the created job (not strictly required but useful for debugging)
+        job: Optional[Dict[str, Any]] = db.jobs.find_by_id(job_id)
+        logger.info("Created analysis job: %s", job)
 
-        # Send to SQS
+        # If an SQS queue is configured, enqueue a message for background processing
         if SQS_QUEUE_URL:
-            message = {
-                'job_id': str(job_id),
-                'clerk_user_id': clerk_user_id,
-                'analysis_type': request.analysis_type,
-                'options': request.options
+            message: Dict[str, Any] = {
+                "job_id": str(job_id),
+                "clerk_user_id": clerk_user_id,
+                "analysis_type": request.analysis_type,
+                "options": request.options,
             }
 
-            sqs_client.send_message(
-                QueueUrl=SQS_QUEUE_URL,
-                MessageBody=json.dumps(message)
-            )
-            logger.info(f"Sent analysis job to SQS: {job_id}")
+            # Send the job message to the SQS queue
+            sqs_client.send_message(QueueUrl=SQS_QUEUE_URL, MessageBody=json.dumps(message))
+            logger.info("Sent analysis job to SQS: %s", job_id)
         else:
-            logger.warning("SQS_QUEUE_URL not configured, job created but not queued")
+            # Log a warning if no SQS queue is configured to handle jobs
+            logger.warning(
+                "SQS_QUEUE_URL not configured, job created but not queued for processing"
+            )
 
         return AnalyzeResponse(
             job_id=str(job_id),
-            message="Analysis started. Check job status for results."
+            message="Analysis started. Check job status for results.",
         )
 
     except Exception as e:
-        logger.error(f"Error triggering analysis: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log the error that occurred while triggering analysis
+        logger.error("Error triggering analysis: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+
 
 @app.get("/api/jobs/{job_id}")
-async def get_job_status(job_id: str, clerk_user_id: str = Depends(get_current_user_id)):
-    """Get job status and results"""
+async def get_job_status(
+    job_id: str, clerk_user_id: str = Depends(get_current_user_id)
+) -> Dict[str, Any]:
+    """
+    Retrieve the status and results for a specific analysis job.
 
+    Parameters
+    ----------
+    job_id : str
+        Identifier of the job to fetch.
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+
+    Returns
+    -------
+    dict
+        Job record including current status and, if available, results.
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If the job is not found, ownership does not match,
+        or an internal error occurs.
+    """
     try:
-        # Get job
-        job = db.jobs.find_by_id(job_id)
+        # Attempt to fetch the job by its identifier
+        job: Optional[Dict[str, Any]] = db.jobs.find_by_id(job_id)
         if not job:
-            raise HTTPException(status_code=404, detail="Job not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
-        # Verify job belongs to user - jobs table stores clerk_user_id directly
-        if job.get('clerk_user_id') != clerk_user_id:
-            raise HTTPException(status_code=403, detail="Not authorized")
+        # Ensure the job belongs to the requesting user
+        if job.get("clerk_user_id") != clerk_user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
 
         return job
 
     except HTTPException:
+        # Allow previously raised HTTP exceptions to bubble up
         raise
     except Exception as e:
-        logger.error(f"Error getting job status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log any unexpected failures while fetching job status
+        logger.error("Error getting job status: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+
 
 @app.get("/api/jobs")
-async def list_jobs(clerk_user_id: str = Depends(get_current_user_id)):
-    """List user's analysis jobs"""
+async def list_jobs(
+    clerk_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    List recent analysis jobs belonging to the current user.
 
+    Parameters
+    ----------
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+
+    Returns
+    -------
+    dict
+        Dictionary containing the user's jobs sorted by creation time
+        (most recent first).
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If an internal error occurs while listing jobs.
+    """
     try:
-        # Get jobs for this user (with higher limit to avoid missing recent jobs)
-        user_jobs = db.jobs.find_by_user(clerk_user_id, limit=100)
-        # Sort by created_at descending (most recent first)
-        user_jobs.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        # Fetch up to 100 jobs associated with the user
+        user_jobs: List[Dict[str, Any]] = db.jobs.find_by_user(clerk_user_id, limit=100)
+
+        # Sort jobs by created_at timestamp in descending order
+        user_jobs.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
         return {"jobs": user_jobs}
 
     except Exception as e:
-        logger.error(f"Error listing jobs: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log unexpected issues when listing jobs
+        logger.error("Error listing jobs: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+
+
+# =========================
+# Test Data Utilities
+# =========================
+
 
 @app.delete("/api/reset-accounts")
-async def reset_accounts(clerk_user_id: str = Depends(get_current_user_id)):
-    """Delete all accounts for the current user"""
+async def reset_accounts(
+    clerk_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    """
+    Delete all accounts (and their positions) for the current user.
 
+    This is primarily intended as a utility/debug endpoint to allow users to
+    wipe their portfolio state and start again.
+
+    Parameters
+    ----------
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+
+    Returns
+    -------
+    dict
+        Summary including the count of deleted accounts.
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If the user cannot be found or an internal error occurs.
+    """
     try:
-        # Get user
-        user = db.users.find_by_clerk_id(clerk_user_id)
+        # Ensure the requesting user exists
+        user: Optional[Dict[str, Any]] = db.users.find_by_clerk_id(clerk_user_id)
         if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-        # Get all accounts for user
-        accounts = db.accounts.find_by_user(clerk_user_id)
+        # Retrieve all accounts belonging to this user
+        accounts: List[Dict[str, Any]] = db.accounts.find_by_user(clerk_user_id)
 
-        # Delete each account (positions will cascade delete)
-        deleted_count = 0
+        # Counter for the number of accounts successfully deleted
+        deleted_count: int = 0
         for account in accounts:
             try:
-                # Positions are deleted automatically via CASCADE
-                db.accounts.delete(account['id'])
+                # Delete the account; positions should be cascaded by DB constraints
+                db.accounts.delete(account["id"])
                 deleted_count += 1
             except Exception as e:
-                logger.warning(f"Could not delete account {account['id']}: {e}")
+                # Warn when an individual account cannot be removed
+                logger.warning("Could not delete account %s: %s", account["id"], e)
 
         return {
             "message": f"Deleted {deleted_count} account(s)",
-            "accounts_deleted": deleted_count
+            "accounts_deleted": deleted_count,
         }
 
     except Exception as e:
-        logger.error(f"Error resetting accounts: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log any unexpected failure during bulk account reset
+        logger.error("Error resetting accounts: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+
 
 @app.post("/api/populate-test-data")
-async def populate_test_data(clerk_user_id: str = Depends(get_current_user_id)):
-    """Populate test data for the current user"""
+async def populate_test_data(
+    clerk_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    """
+    Populate rich test data (accounts and positions) for the current user.
 
+    This endpoint is intended for demos and development. It will:
+
+    * Ensure a set of well-known instruments exist (e.g., AAPL, AMZN).
+    * Create several example accounts (401k, Roth IRA, Brokerage).
+    * Populate each account with plausible positions.
+
+    Parameters
+    ----------
+    clerk_user_id : str
+        Authenticated Clerk user identifier injected by dependency.
+
+    Returns
+    -------
+    dict
+        Summary of created accounts and their positions.
+
+    Raises
+    ------
+    fastapi.HTTPException
+        If the user cannot be found or an internal error occurs while
+        inserting instruments, accounts, or positions.
+    """
     try:
-        # Get user
-        user = db.users.find_by_clerk_id(clerk_user_id)
+        # Verify that the user exists before seeding data
+        user: Optional[Dict[str, Any]] = db.users.find_by_clerk_id(clerk_user_id)
         if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-        # Define missing instruments that might not be in the database
-        missing_instruments = {
+        # Define a set of key instruments that must exist for the demo to work
+        missing_instruments: Dict[str, Dict[str, Any]] = {
             "AAPL": {
                 "name": "Apple Inc.",
                 "type": "stock",
                 "current_price": 195.89,
                 "allocation_regions": {"north_america": 100},
                 "allocation_sectors": {"technology": 100},
-                "allocation_asset_class": {"equity": 100}
+                "allocation_asset_class": {"equity": 100},
             },
             "AMZN": {
                 "name": "Amazon.com Inc.",
@@ -631,7 +1324,7 @@ async def populate_test_data(clerk_user_id: str = Depends(get_current_user_id)):
                 "current_price": 178.35,
                 "allocation_regions": {"north_america": 100},
                 "allocation_sectors": {"consumer_discretionary": 100},
-                "allocation_asset_class": {"equity": 100}
+                "allocation_asset_class": {"equity": 100},
             },
             "NVDA": {
                 "name": "NVIDIA Corporation",
@@ -639,7 +1332,7 @@ async def populate_test_data(clerk_user_id: str = Depends(get_current_user_id)):
                 "current_price": 522.74,
                 "allocation_regions": {"north_america": 100},
                 "allocation_sectors": {"technology": 100},
-                "allocation_asset_class": {"equity": 100}
+                "allocation_asset_class": {"equity": 100},
             },
             "MSFT": {
                 "name": "Microsoft Corporation",
@@ -647,7 +1340,7 @@ async def populate_test_data(clerk_user_id: str = Depends(get_current_user_id)):
                 "current_price": 430.82,
                 "allocation_regions": {"north_america": 100},
                 "allocation_sectors": {"technology": 100},
-                "allocation_asset_class": {"equity": 100}
+                "allocation_asset_class": {"equity": 100},
             },
             "GOOGL": {
                 "name": "Alphabet Inc. Class A",
@@ -655,17 +1348,19 @@ async def populate_test_data(clerk_user_id: str = Depends(get_current_user_id)):
                 "current_price": 173.69,
                 "allocation_regions": {"north_america": 100},
                 "allocation_sectors": {"technology": 100},
-                "allocation_asset_class": {"equity": 100}
+                "allocation_asset_class": {"equity": 100},
             },
         }
 
-        # Check and add missing instruments
+        # Ensure each instrument exists, creating it if necessary
         for symbol, info in missing_instruments.items():
-            existing = db.instruments.find_by_symbol(symbol)
+            existing: Optional[Dict[str, Any]] = db.instruments.find_by_symbol(symbol)
             if not existing:
                 try:
+                    # Import the creation schema lazily to avoid circular dependencies
                     from src.schemas import InstrumentCreate
 
+                    # Build the instrument model from the info dictionary
                     instrument_data = InstrumentCreate(
                         symbol=symbol,
                         name=info["name"],
@@ -673,99 +1368,117 @@ async def populate_test_data(clerk_user_id: str = Depends(get_current_user_id)):
                         current_price=Decimal(str(info["current_price"])),
                         allocation_regions=info["allocation_regions"],
                         allocation_sectors=info["allocation_sectors"],
-                        allocation_asset_class=info["allocation_asset_class"]
+                        allocation_asset_class=info["allocation_asset_class"],
                     )
+                    # Store the instrument in the database
                     db.instruments.create_instrument(instrument_data)
-                    logger.info(f"Added missing instrument: {symbol}")
+                    logger.info("Added missing instrument: %s", symbol)
                 except Exception as e:
-                    logger.warning(f"Could not add instrument {symbol}: {e}")
+                    # Log a warning if a single instrument cannot be created
+                    logger.warning("Could not add instrument %s: %s", symbol, e)
 
-        # Create accounts with test data
-        accounts_data = [
+        # Define example accounts and positions to seed the user's portfolio
+        accounts_data: List[Dict[str, Any]] = [
             {
                 "name": "401k Long-term",
                 "purpose": "Primary retirement savings account with employer match",
                 "cash": 5000.00,
                 "positions": [
-                    ("SPY", 150),   # S&P 500 ETF
-                    ("VTI", 100),   # Total Stock Market ETF
-                    ("BND", 200),   # Bond ETF
-                    ("QQQ", 75),    # Nasdaq ETF
-                    ("IWM", 50),    # Small Cap ETF
-                ]
+                    ("SPY", 150),
+                    ("VTI", 100),
+                    ("BND", 200),
+                    ("QQQ", 75),
+                    ("IWM", 50),
+                ],
             },
             {
                 "name": "Roth IRA",
                 "purpose": "Tax-free retirement growth account",
                 "cash": 2500.00,
                 "positions": [
-                    ("VTI", 80),    # Total Stock Market ETF
-                    ("VXUS", 60),   # International Stock ETF
-                    ("VNQ", 40),    # Real Estate ETF
-                    ("GLD", 25),    # Gold ETF
-                    ("TLT", 30),    # Long-term Treasury ETF
-                    ("VIG", 45),    # Dividend Growth ETF
-                ]
+                    ("VTI", 80),
+                    ("VXUS", 60),
+                    ("VNQ", 40),
+                    ("GLD", 25),
+                    ("TLT", 30),
+                    ("VIG", 45),
+                ],
             },
             {
                 "name": "Brokerage Account",
                 "purpose": "Taxable investment account for individual stocks",
                 "cash": 10000.00,
                 "positions": [
-                    ("TSLA", 15),   # Tesla
-                    ("AAPL", 50),   # Apple
-                    ("AMZN", 10),   # Amazon
-                    ("NVDA", 25),   # Nvidia
-                    ("MSFT", 30),   # Microsoft
-                    ("GOOGL", 20),  # Google
-                ]
-            }
+                    ("TSLA", 15),
+                    ("AAPL", 50),
+                    ("AMZN", 10),
+                    ("NVDA", 25),
+                    ("MSFT", 30),
+                    ("GOOGL", 20),
+                ],
+            },
         ]
 
-        created_accounts = []
+        # Keep track of the newly created account ids
+        created_accounts: List[str] = []
         for account_data in accounts_data:
-            # Create account
-            account_id = db.accounts.create_account(
+            # Create each test account with its initial cash balance
+            account_id: str = db.accounts.create_account(
                 clerk_user_id=clerk_user_id,
                 account_name=account_data["name"],
                 account_purpose=account_data["purpose"],
-                cash_balance=Decimal(str(account_data["cash"]))
+                cash_balance=Decimal(str(account_data["cash"])),
             )
 
-            # Add positions
+            # Insert associated positions for this account
             for symbol, quantity in account_data["positions"]:
                 try:
                     db.positions.add_position(
                         account_id=account_id,
                         symbol=symbol,
-                        quantity=Decimal(str(quantity))
+                        quantity=Decimal(str(quantity)),
                     )
                 except Exception as e:
-                    logger.warning(f"Could not add position {symbol}: {e}")
+                    # Log non-fatal errors for individual position insertions
+                    logger.warning("Could not add position %s: %s", symbol, e)
 
             created_accounts.append(account_id)
 
-        # Get all accounts with their positions for summary
-        all_accounts = []
+        # Build a summary that includes all created accounts and their positions
+        all_accounts: List[Dict[str, Any]] = []
         for account_id in created_accounts:
-            account = db.accounts.find_by_id(account_id)
-            positions = db.positions.find_by_account(account_id)
-            account['positions'] = positions
+            # Retrieve the account record
+            account: Dict[str, Any] = db.accounts.find_by_id(account_id)
+            # Retrieve positions for this account
+            positions: List[Dict[str, Any]] = db.positions.find_by_account(account_id)
+            # Attach positions to the account object for a richer response
+            account["positions"] = positions
             all_accounts.append(account)
 
         return {
             "message": "Test data populated successfully",
             "accounts_created": len(created_accounts),
-            "accounts": all_accounts
+            "accounts": all_accounts,
         }
 
     except Exception as e:
-        logger.error(f"Error populating test data: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log any unexpected error while seeding test data
+        logger.error("Error populating test data: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
 
-# Lambda handler
+
+# =========================
+# AWS Lambda Entry Point
+# =========================
+
+# Create a Mangum handler so this FastAPI app can run on AWS Lambda
 handler = Mangum(app)
 
+# Entrypoint for running the app locally with Uvicorn (development only)
 if __name__ == "__main__":
     import uvicorn
+
+    # Start Uvicorn HTTP server on all interfaces for local testing
     uvicorn.run(app, host="0.0.0.0", port=8000)
