@@ -1,7 +1,19 @@
 #!/usr/bin/env python3
 """
-Package the FastAPI API for Lambda deployment using Docker.
-This ensures binary compatibility with Lambda's runtime environment.
+Docker-based packaging utility for the Alex Financial Advisor FastAPI API.
+
+This script builds an **AWS Lambda–compatible** deployment package for the
+backend API by:
+
+* Copying the API and database source code into a temporary build directory.
+* Generating a minimal `requirements.txt` file for runtime dependencies.
+* Building a Docker image based on the official Lambda Python 3.12 base image.
+* Installing dependencies into `/var/task` inside the container.
+* Copying the resulting `/var/task` tree out of the container.
+* Zipping the extracted files into `api_lambda.zip` for direct Lambda upload.
+
+The use of Docker ensures binary compatibility with Lambda's Linux/amd64
+runtime, even when this script is executed on a different host OS.
 """
 
 import os
@@ -11,65 +23,121 @@ import subprocess
 from pathlib import Path
 import tempfile
 import zipfile
+from typing import List, Optional
 
-def run_command(cmd, cwd=None):
-    """Run a shell command and handle errors."""
+
+def run_command(cmd: List[str], cwd: Optional[Path] = None) -> str:
+    """
+    Run a shell command and terminate the process on failure.
+
+    Parameters
+    ----------
+    cmd : list of str
+        Command and arguments to execute, e.g. ``["docker", "info"]``.
+    cwd : pathlib.Path, optional
+        Optional working directory in which to execute the command.
+
+    Returns
+    -------
+    str
+        Standard output captured from the command.
+
+    Raises
+    ------
+    SystemExit
+        If the command returns a non-zero exit status, the script exits with
+        status code 1 after printing the error output.
+    """
+    # Log the command being executed for transparency
     print(f"Running: {' '.join(cmd)}")
+
+    # Execute the command and capture stdout/stderr for diagnostics
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+
+    # If the command failed, print stderr and exit the script
     if result.returncode != 0:
         print(f"Error: {result.stderr}")
         sys.exit(1)
+
+    # Return the captured standard output for further processing
     return result.stdout
 
-def main():
-    # Get the API directory
-    api_dir = Path(__file__).parent.absolute()
-    backend_dir = api_dir.parent
-    project_root = backend_dir.parent
 
+def main() -> None:
+    """
+    Build an AWS Lambda–compatible deployment package using Docker.
+
+    This function:
+
+    1. Validates that Docker is available and running.
+    2. Copies the API and database source code into a temporary staging area.
+    3. Writes a minimal `requirements.txt` file for the Lambda runtime.
+    4. Builds a Docker image targeting ``linux/amd64`` using the Lambda base.
+    5. Extracts the `/var/task` contents from the image into a local directory.
+    6. Zips the extracted tree into ``api_lambda.zip`` under the API folder.
+    """
+    # Resolve key directories relative to this script
+    api_dir: Path = Path(__file__).parent.absolute()
+    backend_dir: Path = api_dir.parent
+    project_root: Path = backend_dir.parent  # noqa: F841  # Reserved if needed later
+
+    # Print resolved paths to help debug path-related issues
     print(f"API directory: {api_dir}")
     print(f"Backend directory: {backend_dir}")
 
-    # Check if Docker is running
+    # Verify that Docker is installed and the daemon is running
     try:
         run_command(["docker", "info"])
-    except Exception as e:
-        print("Error: Docker is not running or not installed")
-        print("Please ensure Docker Desktop is running and try again")
+    except SystemExit:
+        # Provide a clearer message if Docker is not available
+        print("Error: Docker is not running or not installed.")
+        print("Please ensure Docker Desktop is running and try again.")
         sys.exit(1)
 
-    # Create temp directory for packaging
+    # Create a temporary working directory for building the package
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        package_dir = temp_path / "package"
-        package_dir.mkdir()
 
+        # Create the root package directory inside the temporary area
+        package_dir: Path = temp_path / "package"
+        package_dir.mkdir(parents=True, exist_ok=True)
+
+        # Log the location where the packaging will occur
         print(f"Packaging in: {package_dir}")
 
-        # Copy API code
-        api_package = package_dir / "api"
-        shutil.copytree(api_dir, api_package, ignore=shutil.ignore_patterns(
-            "__pycache__", "*.pyc", ".env*", "*.zip", "package_docker.py", "test_*.py"
-        ))
+        # Copy the API code into a nested 'api' directory
+        api_package: Path = package_dir / "api"
+        shutil.copytree(
+            api_dir,
+            api_package,
+            ignore=shutil.ignore_patterns(
+                "__pycache__", "*.pyc", ".env*", "*.zip", "package_docker.py", "test_*.py"
+            ),
+        )
 
-        # Copy lambda_handler.py to root level for Lambda to find it
+        # Copy the Lambda handler entry point to the root for Lambda discovery
         shutil.copy2(api_dir / "lambda_handler.py", package_dir / "lambda_handler.py")
 
-        # Copy database package
-        database_src = backend_dir / "database" / "src"
-        database_dst = package_dir / "src"
+        # Determine the source and destination of the shared database package
+        database_src: Path = backend_dir / "database" / "src"
+        database_dst: Path = package_dir / "src"
+
+        # Copy the database source package if it exists
         if database_src.exists():
-            shutil.copytree(database_src, database_dst, ignore=shutil.ignore_patterns(
-                "__pycache__", "*.pyc"
-            ))
+            shutil.copytree(
+                database_src,
+                database_dst,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
             print(f"Copied database package from {database_src}")
         else:
+            # Warn if the expected database package is missing
             print(f"Warning: Database package not found at {database_src}")
 
-        # Create requirements.txt from pyproject.toml
-        requirements_file = package_dir / "requirements.txt"
-        with open(requirements_file, "w") as f:
-            # Core dependencies
+        # Build a minimal requirements.txt containing runtime dependencies
+        requirements_file: Path = package_dir / "requirements.txt"
+        with requirements_file.open("w", encoding="utf-8") as f:
+            # Core dependencies required at runtime inside the Lambda environment
             f.write("fastapi>=0.116.0\n")
             f.write("uvicorn>=0.35.0\n")
             f.write("mangum>=0.19.0\n")
@@ -78,8 +146,8 @@ def main():
             f.write("pydantic>=2.0.0\n")
             f.write("python-dotenv>=1.0.0\n")
 
-        # Create Dockerfile
-        dockerfile_content = """
+        # Define the Dockerfile content targeting the Lambda Python 3.12 base image
+        dockerfile_content: str = """
 FROM public.ecr.aws/lambda/python:3.12
 
 # Copy requirements and install dependencies
@@ -93,76 +161,92 @@ COPY . /var/task/
 CMD ["api.main.handler"]
 """
 
-        dockerfile = package_dir / "Dockerfile"
-        with open(dockerfile, "w") as f:
+        # Write the Dockerfile into the package directory
+        dockerfile: Path = package_dir / "Dockerfile"
+        with dockerfile.open("w", encoding="utf-8") as f:
             f.write(dockerfile_content)
 
-        # Build Docker image for x86_64 architecture (Lambda runtime)
-        print("Building Docker image for x86_64 architecture...")
-        run_command([
-            "docker", "build",
-            "--platform", "linux/amd64",
-            "-t", "alex-api-packager",
-            "."
-        ], cwd=package_dir)
+        # Build the Docker image for the Lambda-compatible linux/amd64 platform
+        print("Building Docker image for x86_64 (linux/amd64) architecture...")
+        run_command(
+            [
+                "docker",
+                "build",
+                "--platform",
+                "linux/amd64",
+                "-t",
+                "alex-api-packager",
+                ".",
+            ],
+            cwd=package_dir,
+        )
 
-        # Create container and extract files
-        print("Extracting Lambda package...")
-        container_name = "alex-api-extract"
+        # Name the container used for extracting the /var/task directory
+        container_name: str = "alex-api-extract"
 
-        # Remove container if it exists
+        # Attempt to remove any stale container with the same name
         run_command(["docker", "rm", "-f", container_name], cwd=package_dir)
 
-        # Create container
-        run_command([
-            "docker", "create",
-            "--name", container_name,
-            "alex-api-packager"
-        ], cwd=package_dir)
+        # Create a new container instance from the built image
+        run_command(
+            [
+                "docker",
+                "create",
+                "--name",
+                container_name,
+                "alex-api-packager",
+            ],
+            cwd=package_dir,
+        )
 
-        # Extract /var/task contents
-        extract_dir = temp_path / "lambda"
-        extract_dir.mkdir()
+        # Create a directory to receive the extracted Lambda /var/task contents
+        extract_dir: Path = temp_path / "lambda"
+        extract_dir.mkdir(parents=True, exist_ok=True)
 
-        run_command([
-            "docker", "cp",
-            f"{container_name}:/var/task/.",
-            str(extract_dir)
-        ])
+        # Copy the /var/task contents from the container into the extract directory
+        run_command(
+            ["docker", "cp", f"{container_name}:/var/task/.", str(extract_dir)]
+        )
 
-        # Clean up container
+        # Remove the temporary container now that files have been extracted
         run_command(["docker", "rm", "-f", container_name])
 
-        # Create the final zip
-        zip_path = api_dir / "api_lambda.zip"
+        # Define the final zip file path within the API directory
+        zip_path: Path = api_dir / "api_lambda.zip"
         print(f"Creating zip file: {zip_path}")
 
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        # Walk the extracted tree and bundle files into the Lambda zip package
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(extract_dir):
-                # Skip __pycache__ directories
-                dirs[:] = [d for d in dirs if d != '__pycache__']
+                # Filter out __pycache__ directories during traversal
+                dirs[:] = [d for d in dirs if d != "__pycache__"]
 
                 for file in files:
-                    # Skip .pyc files
-                    if file.endswith('.pyc'):
+                    # Skip compiled Python bytecode files
+                    if file.endswith(".pyc"):
                         continue
 
+                    # Compute the archive-relative path for each file
                     file_path = Path(root) / file
                     arcname = file_path.relative_to(extract_dir)
+
+                    # Add the file to the zip archive
                     zipf.write(file_path, arcname)
 
-        # Get file size
-        size_mb = zip_path.stat().st_size / (1024 * 1024)
+        # Compute and display the size of the created Lambda package
+        size_mb: float = zip_path.stat().st_size / (1024 * 1024)
         print(f"✅ Lambda package created: {zip_path} ({size_mb:.2f} MB)")
 
-        # Verify the package
+        # Print a small preview of the package contents for quick inspection
         print("\nPackage contents (first 20 files):")
-        with zipfile.ZipFile(zip_path, 'r') as zipf:
+        with zipfile.ZipFile(zip_path, "r") as zipf:
             files = zipf.namelist()[:20]
-            for f in files:
-                print(f"  - {f}")
+            for filename in files:
+                print(f"  - {filename}")
             if len(zipf.namelist()) > 20:
                 print(f"  ... and {len(zipf.namelist()) - 20} more files")
 
+
+# Execute the packaging process when the script is run directly
 if __name__ == "__main__":
     main()
