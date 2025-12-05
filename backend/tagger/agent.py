@@ -1,21 +1,61 @@
+#!/usr/bin/env python3
 """
-InstrumentTagger Agent - Classifies financial instruments using OpenAI Agents SDK.
+Alex Financial Planner – Instrument Tagger Agent.
+
+This module implements the **InstrumentTagger** agent, which classifies
+financial instruments using the OpenAI Agents SDK (via LiteLLM / Bedrock).
+
+Its responsibilities are:
+
+* Calling an LLM to classify an instrument’s:
+  - Basic metadata (symbol, name, type, current price)
+  - Asset-class allocation
+  - Regional allocation
+  - Sector allocation
+* Validating that all allocation breakdowns sum (approximately) to 100%
+* Providing convenience helpers for:
+  - Batch-tagging multiple instruments with retry & backoff
+  - Converting the structured classification into a database-ready
+    `InstrumentCreate` payload
+
+Typical usage (inside a scheduler / job runner):
+
+    from backend.scheduler.agent import classify_instrument, tag_instruments, classification_to_db_format
+
+    # Single instrument
+    classification = await classify_instrument("SPY", "SPDR S&P 500 ETF")
+    instrument_row = classification_to_db_format(classification)
+
+    # Multiple instruments
+    instruments = [
+        {"symbol": "SPY", "name": "SPDR S&P 500 ETF"},
+        {"symbol": "QQQ", "name": "Invesco QQQ Trust"},
+    ]
+    classifications = await tag_instruments(instruments)
+    db_rows = [classification_to_db_format(c) for c in classifications]
 """
 
-import os
-from typing import List
+from __future__ import annotations
+
+import asyncio
 import logging
+import os
 from decimal import Decimal
+from typing import List
 
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from dotenv import load_dotenv
+from litellm.exceptions import RateLimitError
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
 from agents import Agent, Runner, trace
 from agents.extensions.models.litellm_model import LitellmModel
-from dotenv import load_dotenv
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from litellm.exceptions import RateLimitError
-
 from src.schemas import InstrumentCreate
-from templates import TAGGER_INSTRUCTIONS, CLASSIFICATION_PROMPT
+from templates import CLASSIFICATION_PROMPT, TAGGER_INSTRUCTIONS
+
+# ============================================================
+# Environment / Configuration
+# ============================================================
 
 # Load environment variables (dotenv automatically searches up the tree)
 load_dotenv(override=True)
@@ -23,17 +63,24 @@ load_dotenv(override=True)
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Get configuration
-BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-7-sonnet-20250219-v1:0")
+# Model configuration for Bedrock via LiteLLM
+BEDROCK_MODEL_ID = os.getenv(
+    "BEDROCK_MODEL_ID",
+    "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+)
 BEDROCK_REGION = os.getenv("BEDROCK_REGION", "us-west-2")
 
 
+# ============================================================
+# Pydantic Models – Structured Allocations
+# ============================================================
+
+
 class AllocationBreakdown(BaseModel):
-    """Allocation percentages that must sum to 100"""
+    """Allocation percentages across asset classes (must sum to ~100%)."""
 
     model_config = ConfigDict(extra="forbid")
 
-    # We'll use a simplified approach with specific fields
     # Asset classes
     equity: float = Field(default=0.0, ge=0, le=100, description="Equity percentage")
     fixed_income: float = Field(default=0.0, ge=0, le=100, description="Fixed income percentage")
@@ -44,7 +91,7 @@ class AllocationBreakdown(BaseModel):
 
 
 class RegionAllocation(BaseModel):
-    """Regional allocation percentages"""
+    """Regional allocation percentages (must sum to ~100%)."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -56,15 +103,22 @@ class RegionAllocation(BaseModel):
     middle_east: float = Field(default=0.0, ge=0, le=100)
     oceania: float = Field(default=0.0, ge=0, le=100)
     global_: float = Field(
-        default=0.0, ge=0, le=100, alias="global", description="Global or diversified"
+        default=0.0,
+        ge=0,
+        le=100,
+        alias="global",
+        description="Global or diversified allocation",
     )
     international: float = Field(
-        default=0.0, ge=0, le=100, description="International developed markets"
+        default=0.0,
+        ge=0,
+        le=100,
+        description="International developed markets",
     )
 
 
 class SectorAllocation(BaseModel):
-    """Sector allocation percentages"""
+    """Sector allocation percentages (must sum to ~100%)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -83,7 +137,10 @@ class SectorAllocation(BaseModel):
     corporate: float = Field(default=0.0, ge=0, le=100, description="Corporate bonds")
     mortgage: float = Field(default=0.0, ge=0, le=100, description="Mortgage-backed securities")
     government_related: float = Field(
-        default=0.0, ge=0, le=100, description="Government-related bonds"
+        default=0.0,
+        ge=0,
+        le=100,
+        description="Government-related bonds",
     )
     commodities: float = Field(default=0.0, ge=0, le=100, description="Commodities")
     diversified: float = Field(default=0.0, ge=0, le=100, description="Diversified sectors")
@@ -91,29 +148,47 @@ class SectorAllocation(BaseModel):
 
 
 class InstrumentClassification(BaseModel):
-    """Structured output for instrument classification"""
+    """Structured LLM output for instrument classification."""
 
     model_config = ConfigDict(extra="forbid")
 
+    # Core instrument fields
     symbol: str = Field(description="Ticker symbol of the instrument")
     name: str = Field(description="Name of the instrument")
     instrument_type: str = Field(description="Type: etf, stock, mutual_fund, bond_fund, etc.")
     current_price: float = Field(description="Current price per share in USD", gt=0)
 
-    # Separate allocation objects
-    allocation_asset_class: AllocationBreakdown = Field(description="Asset class breakdown")
-    allocation_regions: RegionAllocation = Field(description="Regional breakdown")
-    allocation_sectors: SectorAllocation = Field(description="Sector breakdown")
+    # Allocation breakdowns
+    allocation_asset_class: AllocationBreakdown = Field(
+        description="Asset class breakdown",
+    )
+    allocation_regions: RegionAllocation = Field(
+        description="Regional breakdown",
+    )
+    allocation_sectors: SectorAllocation = Field(
+        description="Sector breakdown",
+    )
+
+    # ------------------------------
+    # Validators – sum to 100 checks
+    # ------------------------------
 
     @field_validator("allocation_asset_class")
-    def validate_asset_class_sum(cls, v: AllocationBreakdown):
-        total = v.equity + v.fixed_income + v.real_estate + v.commodities + v.cash + v.alternatives
+    def validate_asset_class_sum(cls, v: AllocationBreakdown) -> AllocationBreakdown:
+        total = (
+            v.equity
+            + v.fixed_income
+            + v.real_estate
+            + v.commodities
+            + v.cash
+            + v.alternatives
+        )
         if abs(total - 100.0) > 3:  # Allow small floating point errors
             raise ValueError(f"Asset class allocations must sum to 100.0, got {total}")
         return v
 
     @field_validator("allocation_regions")
-    def validate_regions_sum(cls, v: RegionAllocation):
+    def validate_regions_sum(cls, v: RegionAllocation) -> RegionAllocation:
         total = (
             v.north_america
             + v.europe
@@ -130,7 +205,7 @@ class InstrumentClassification(BaseModel):
         return v
 
     @field_validator("allocation_sectors")
-    def validate_sectors_sum(cls, v: SectorAllocation):
+    def validate_sectors_sum(cls, v: SectorAllocation) -> SectorAllocation:
         total = (
             v.technology
             + v.healthcare
@@ -156,113 +231,168 @@ class InstrumentClassification(BaseModel):
         return v
 
 
+# ============================================================
+# Core Agent Logic – Single-Instrument Classification
+# ============================================================
+
+
 async def classify_instrument(
-    symbol: str, name: str, instrument_type: str = "etf"
+    symbol: str,
+    name: str,
+    instrument_type: str = "etf",
 ) -> InstrumentClassification:
     """
-    Classify a financial instrument using OpenAI Agents SDK.
+    Classify a single financial instrument using the InstrumentTagger agent.
 
-    Args:
-        symbol: Ticker symbol
-        name: Instrument name
-        instrument_type: Type of instrument
+    Parameters
+    ----------
+    symbol :
+        Ticker symbol for the instrument (e.g. "SPY").
+    name :
+        Human-readable instrument name.
+    instrument_type :
+        High-level type (e.g. "etf", "stock", "mutual_fund"). Defaults to "etf".
 
-    Returns:
-        Complete classification with allocations
+    Returns
+    -------
+    InstrumentClassification
+        Fully structured classification including price and all allocation breakdowns.
+
+    Raises
+    ------
+    Exception
+        Propagates any unexpected agent / model errors after logging.
     """
     try:
-        # Initialize the model
-        model_id = BEDROCK_MODEL_ID
-
         # Set region for LiteLLM Bedrock calls
-        bedrock_region = os.getenv("BEDROCK_REGION", "us-west-2")
-        os.environ["AWS_REGION_NAME"] = bedrock_region
+        os.environ["AWS_REGION_NAME"] = BEDROCK_REGION
 
-        model = LitellmModel(model=f"bedrock/{model_id}")
+        # Initialise the model wrapper
+        model = LitellmModel(model=f"bedrock/{BEDROCK_MODEL_ID}")
 
-        # Create the classification task
+        # Create the classification task from the prompt template
         task = CLASSIFICATION_PROMPT.format(
-            symbol=symbol, name=name, instrument_type=instrument_type
+            symbol=symbol,
+            name=name,
+            instrument_type=instrument_type,
         )
 
-        # Run the agent (following gameplan pattern exactly)
+        # Run the agent (gameplan pattern)
         with trace(f"Classify {symbol}"):
             agent = Agent(
                 name="InstrumentTagger",
                 instructions=TAGGER_INSTRUCTIONS,
                 model=model,
-                tools=[],  # No tools needed for classification
-                output_type=InstrumentClassification,  # Specify structured output type
+                tools=[],  # No tools needed for this classification task
+                output_type=InstrumentClassification,  # Structured output type
             )
 
             result = await Runner.run(agent, input=task, max_turns=5)
 
-            # Extract the structured output from RunResult using final_output_as
-            return result.final_output_as(InstrumentClassification)
+        # Extract the structured output via final_output_as
+        return result.final_output_as(InstrumentClassification)
 
-    except Exception as e:
-        logger.error(f"Error classifying {symbol}: {e}")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error classifying %s: %s", symbol, exc)
         raise
+
+
+# ============================================================
+# Batch Classification – Retry / Backoff & Orchestration
+# ============================================================
 
 
 async def tag_instruments(instruments: List[dict]) -> List[InstrumentClassification]:
     """
-    Tag multiple instruments with simple retry logic.
+    Tag (classify) multiple instruments with retry logic for rate limits.
 
-    Args:
-        instruments: List of dicts with symbol, name, and optionally instrument_type
+    Parameters
+    ----------
+    instruments :
+        List of dictionaries with at least:
+        - ``symbol``: ticker symbol
+        - ``name``: instrument name
+        Optionally:
+        - ``instrument_type``: instrument type string, defaults to "etf" if missing.
 
-    Returns:
-        List of classifications
+    Returns
+    -------
+    List[InstrumentClassification]
+        Successful classifications. Any instruments that fail after all retries
+        are silently dropped from the returned list (but logged as errors).
     """
-    import asyncio
 
-    # Add retry decorator to classify_instrument calls
     @retry(
         retry=retry_if_exception_type(RateLimitError),
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=4, max=60),
         before_sleep=lambda retry_state: logger.info(
-            f"Tagger: Rate limit hit, retrying in {retry_state.next_action.sleep} seconds..."
+            "Tagger: Rate limit hit, retrying in %s seconds...",
+            getattr(retry_state.next_action, "sleep", "unknown"),
         ),
     )
-    async def classify_with_retry(symbol, name, instrument_type):
+    async def classify_with_retry(
+        symbol: str,
+        name: str,
+        instrument_type: str,
+    ) -> InstrumentClassification:
+        """Wrapper around `classify_instrument` with retry and backoff."""
         return await classify_instrument(symbol, name, instrument_type)
 
-    # Process instruments sequentially with small delay
-    results = []
-    for i, instrument in enumerate(instruments):
-        # Small delay between requests to avoid rate limits
-        if i > 0:
+    results: List[InstrumentClassification | None] = []
+
+    # Process instruments sequentially with a small delay to reduce rate limit issues
+    for idx, instrument in enumerate(instruments):
+        if idx > 0:
             await asyncio.sleep(0.5)
+
+        symbol = instrument["symbol"]
+        name = instrument.get("name", "")
+        instrument_type = instrument.get("instrument_type", "etf")
 
         try:
             classification = await classify_with_retry(
-                symbol=instrument["symbol"],
-                name=instrument.get("name", ""),
-                instrument_type=instrument.get("instrument_type", "etf"),
+                symbol=symbol,
+                name=name,
+                instrument_type=instrument_type,
             )
-            logger.info(f"Successfully classified {instrument['symbol']}")
+            logger.info("Successfully classified %s", symbol)
             results.append(classification)
-        except Exception as e:
-            logger.error(f"Failed to classify {instrument['symbol']}: {e}")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Failed to classify %s: %s", symbol, exc)
             results.append(None)
 
-    # Filter out None values
+    # Filter out failed classifications
     return [r for r in results if r is not None]
 
 
-def classification_to_db_format(classification: InstrumentClassification) -> InstrumentCreate:
-    """
-    Convert classification to database format.
+# ============================================================
+# Helpers – Convert to Database Schema
+# ============================================================
 
-    Args:
-        classification: The AI classification
 
-    Returns:
-        Database-ready instrument data
+def classification_to_db_format(
+    classification: InstrumentClassification,
+) -> InstrumentCreate:
     """
-    # Convert allocation objects to dicts
+    Convert a structured classification into a database-ready `InstrumentCreate`.
+
+    This flattens the nested allocation objects into JSON-serialisable
+    dictionaries and removes any zero-valued allocation keys.
+
+    Parameters
+    ----------
+    classification :
+        Completed `InstrumentClassification` object from the agent.
+
+    Returns
+    -------
+    InstrumentCreate
+        Pydantic schema ready to insert into the database layer.
+    """
+    # -------------------------
+    # Asset class allocations
+    # -------------------------
     asset_class_dict = {
         "equity": classification.allocation_asset_class.equity,
         "fixed_income": classification.allocation_asset_class.fixed_income,
@@ -271,9 +401,11 @@ def classification_to_db_format(classification: InstrumentClassification) -> Ins
         "cash": classification.allocation_asset_class.cash,
         "alternatives": classification.allocation_asset_class.alternatives,
     }
-    # Remove zero values
     asset_class_dict = {k: v for k, v in asset_class_dict.items() if v > 0}
 
+    # -------------------------
+    # Regional allocations
+    # -------------------------
     regions_dict = {
         "north_america": classification.allocation_regions.north_america,
         "europe": classification.allocation_regions.europe,
@@ -285,9 +417,11 @@ def classification_to_db_format(classification: InstrumentClassification) -> Ins
         "global": classification.allocation_regions.global_,
         "international": classification.allocation_regions.international,
     }
-    # Remove zero values
     regions_dict = {k: v for k, v in regions_dict.items() if v > 0}
 
+    # -------------------------
+    # Sector allocations
+    # -------------------------
     sectors_dict = {
         "technology": classification.allocation_sectors.technology,
         "healthcare": classification.allocation_sectors.healthcare,
@@ -308,16 +442,17 @@ def classification_to_db_format(classification: InstrumentClassification) -> Ins
         "diversified": classification.allocation_sectors.diversified,
         "other": classification.allocation_sectors.other,
     }
-    # Remove zero values
     sectors_dict = {k: v for k, v in sectors_dict.items() if v > 0}
 
+    # -------------------------
+    # Build InstrumentCreate
+    # -------------------------
     return InstrumentCreate(
         symbol=classification.symbol,
         name=classification.name,
         instrument_type=classification.instrument_type,
-        current_price=Decimal(
-            str(classification.current_price)
-        ),  # Use actual price from classification
+        # Use actual price from classification (convert to Decimal for DB)
+        current_price=Decimal(str(classification.current_price)),
         allocation_asset_class=asset_class_dict,
         allocation_regions=regions_dict,
         allocation_sectors=sectors_dict,
