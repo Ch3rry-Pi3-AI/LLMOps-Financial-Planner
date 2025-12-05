@@ -1,21 +1,44 @@
+#!/usr/bin/env python3
 """
-Financial Planner Orchestrator Agent - coordinates portfolio analysis across specialized agents.
+Alex Financial Planner – Orchestrator Agent
+
+This module defines the **Planner Orchestrator Agent**, which coordinates
+portfolio analysis across several specialised Lambda-based agents:
+
+* **Tagger** – classifies instruments and populates allocation data
+* **Reporter** – generates a natural-language portfolio analysis narrative
+* **Charter** – produces chart specifications for visualising portfolios
+* **Retirement** – computes retirement projections and scenario analysis
+
+High-level responsibilities
+---------------------------
+1. Ensure instruments missing allocation data are detected and tagged
+2. Build a concise portfolio summary for LLM context
+3. Invoke downstream Lambda agents in a controlled, logged manner
+4. Expose tool functions (via `@function_tool`) for the planner LLM
 """
 
-import os
+from __future__ import annotations
+
 import json
-import boto3
 import logging
-from typing import Dict, List, Any, Optional
-from datetime import datetime
+import os
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
-from agents import function_tool, RunContextWrapper
+import boto3
+
+from agents import RunContextWrapper, function_tool
 from agents.extensions.models.litellm_model import LitellmModel
 
-logger = logging.getLogger()
+# ============================================================
+# Logging & AWS Configuration
+# ============================================================
 
-# Initialize Lambda client
+logger = logging.getLogger(__name__)
+
+# Shared Lambda client for all downstream invocations
 lambda_client = boto3.client("lambda")
 
 # Lambda function names from environment
@@ -23,27 +46,70 @@ TAGGER_FUNCTION = os.getenv("TAGGER_FUNCTION", "alex-tagger")
 REPORTER_FUNCTION = os.getenv("REPORTER_FUNCTION", "alex-reporter")
 CHARTER_FUNCTION = os.getenv("CHARTER_FUNCTION", "alex-charter")
 RETIREMENT_FUNCTION = os.getenv("RETIREMENT_FUNCTION", "alex-retirement")
+
+# When true, Lambda invocations are mocked for local development
 MOCK_LAMBDAS = os.getenv("MOCK_LAMBDAS", "false").lower() == "true"
 
 
+# ============================================================
+# Planner Context
+# ============================================================
+
 @dataclass
 class PlannerContext:
-    """Context for planner agent tools."""
+    """
+    Context object passed into planner tools.
+
+    Attributes
+    ----------
+    job_id :
+        The ID of the analysis job in the backend database.
+    """
     job_id: str
 
 
-async def invoke_lambda_agent(
-    agent_name: str, function_name: str, payload: Dict[str, Any]
-) -> Dict[str, Any]:
-    """Invoke a Lambda function for an agent."""
+# ============================================================
+# Core Lambda Invocation Utilities
+# ============================================================
 
-    # For local testing with mocked agents
+async def invoke_lambda_agent(
+    agent_name: str,
+    function_name: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Invoke a Lambda-based agent and normalise its response.
+
+    Parameters
+    ----------
+    agent_name :
+        Human-readable name of the agent (for logging only).
+    function_name :
+        Deployed Lambda function name or ARN.
+    payload :
+        JSON-serialisable payload to send to the Lambda.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Parsed JSON body of the Lambda response, or a dict containing
+        an `"error"` key when invocation fails.
+    """
+    # Local development shortcut – no real Lambda call
     if MOCK_LAMBDAS:
-        logger.info(f"[MOCK] Would invoke {agent_name} with payload: {json.dumps(payload)[:200]}")
-        return {"success": True, "message": f"[Mock] {agent_name} completed", "mock": True}
+        logger.info(
+            "[MOCK] Would invoke %s with payload: %s",
+            agent_name,
+            json.dumps(payload)[:200],
+        )
+        return {
+            "success": True,
+            "message": f"[Mock] {agent_name} completed",
+            "mock": True,
+        }
 
     try:
-        logger.info(f"Invoking {agent_name} Lambda: {function_name}")
+        logger.info("Invoking %s Lambda: %s", agent_name, function_name)
 
         response = lambda_client.invoke(
             FunctionName=function_name,
@@ -51,92 +117,154 @@ async def invoke_lambda_agent(
             Payload=json.dumps(payload),
         )
 
-        result = json.loads(response["Payload"].read())
+        raw = response["Payload"].read()
+        result: Any = json.loads(raw)
 
-        # Unwrap Lambda response if it has the standard format
+        # Unwrap API Gateway-style responses if present
         if isinstance(result, dict) and "statusCode" in result and "body" in result:
-            if isinstance(result["body"], str):
+            body = result["body"]
+            if isinstance(body, str):
                 try:
-                    result = json.loads(result["body"])
+                    result = json.loads(body)
                 except json.JSONDecodeError:
-                    result = {"message": result["body"]}
+                    result = {"message": body}
             else:
-                result = result["body"]
+                result = body
 
-        logger.info(f"{agent_name} completed successfully")
+        logger.info("%s completed successfully", agent_name)
         return result
 
-    except Exception as e:
-        logger.error(f"Error invoking {agent_name}: {e}")
-        return {"error": str(e)}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error invoking %s: %s", agent_name, exc)
+        return {"error": str(exc)}
 
 
-def handle_missing_instruments(job_id: str, db) -> None:
+# ============================================================
+# Instrument Allocation Pre-check
+# ============================================================
+
+def handle_missing_instruments(job_id: str, db: Any) -> None:
     """
-    Check for and tag any instruments missing allocation data.
-    This is done automatically before the agent runs.
+    Detect and tag instruments that are missing allocation metadata.
+
+    This step should be run before orchestrating a full portfolio analysis,
+    so that downstream agents (Reporter, Charter, Retirement) have access
+    to complete allocation data.
+
+    Parameters
+    ----------
+    job_id :
+        The ID of the analysis job in the backend database.
+    db :
+        Database abstraction exposing `.jobs`, `.accounts`, `.positions`,
+        and `.instruments` repositories.
     """
     logger.info("Planner: Checking for instruments missing allocation data...")
 
-    # Get job and portfolio data
     job = db.jobs.find_by_id(job_id)
     if not job:
-        logger.error(f"Job {job_id} not found")
+        logger.error("Job %s not found", job_id)
         return
 
     user_id = job["clerk_user_id"]
     accounts = db.accounts.find_by_user(user_id)
 
-    missing = []
+    missing: List[Dict[str, str]] = []
+
     for account in accounts:
         positions = db.positions.find_by_account(account["id"])
         for position in positions:
             instrument = db.instruments.find_by_symbol(position["symbol"])
+
             if instrument:
                 has_allocations = bool(
                     instrument.get("allocation_regions")
                     and instrument.get("allocation_sectors")
                     and instrument.get("allocation_asset_class")
                 )
+
                 if not has_allocations:
                     missing.append(
-                        {"symbol": position["symbol"], "name": instrument.get("name", "")}
+                        {
+                            "symbol": position["symbol"],
+                            "name": instrument.get("name", ""),
+                        }
                     )
             else:
                 missing.append({"symbol": position["symbol"], "name": ""})
 
-    if missing:
-        logger.info(
-            f"Planner: Found {len(missing)} instruments needing classification: {[m['symbol'] for m in missing]}"
+    if not missing:
+        logger.info("Planner: All instruments have allocation data")
+        return
+
+    logger.info(
+        "Planner: Found %d instruments needing classification: %s",
+        len(missing),
+        [m["symbol"] for m in missing],
+    )
+
+    try:
+        response = lambda_client.invoke(
+            FunctionName=TAGGER_FUNCTION,
+            InvocationType="RequestResponse",
+            Payload=json.dumps({"instruments": missing}),
         )
 
-        try:
-            response = lambda_client.invoke(
-                FunctionName=TAGGER_FUNCTION,
-                InvocationType="RequestResponse",
-                Payload=json.dumps({"instruments": missing}),
-            )
+        raw = response["Payload"].read()
+        result: Any = json.loads(raw)
 
-            result = json.loads(response["Payload"].read())
+        if isinstance(result, dict) and "statusCode" in result:
+            status_code = result["statusCode"]
+            if status_code == 200:
+                logger.info(
+                    "Planner: InstrumentTagger completed – tagged %d instruments",
+                    len(missing),
+                )
+            else:
+                logger.error(
+                    "Planner: InstrumentTagger failed with status %s",
+                    status_code,
+                )
 
-            if isinstance(result, dict) and "statusCode" in result:
-                if result["statusCode"] == 200:
-                    logger.info(
-                        f"Planner: InstrumentTagger completed - Tagged {len(missing)} instruments"
-                    )
-                else:
-                    logger.error(
-                        f"Planner: InstrumentTagger failed with status {result['statusCode']}"
-                    )
-
-        except Exception as e:
-            logger.error(f"Planner: Error tagging instruments: {e}")
-    else:
-        logger.info("Planner: All instruments have allocation data")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Planner: Error tagging instruments: %s", exc)
 
 
-def load_portfolio_summary(job_id: str, db) -> Dict[str, Any]:
-    """Load basic portfolio summary statistics only."""
+# ============================================================
+# Portfolio Summary for LLM Context
+# ============================================================
+
+def load_portfolio_summary(job_id: str, db: Any) -> Dict[str, Any]:
+    """
+    Load a compact portfolio summary for use as LLM context.
+
+    This function intentionally avoids pulling full position or instrument
+    detail. Instead, it calculates a small set of statistics that help
+    the planner agent decide which specialised tools to call.
+
+    Parameters
+    ----------
+    job_id :
+        The ID of the analysis job in the backend database.
+    db :
+        Database abstraction exposing `.jobs`, `.users`, `.accounts`,
+        `.positions`, and `.instruments` repositories.
+
+    Returns
+    -------
+    Dict[str, Any]
+        A dictionary with:
+        * ``total_value`` – estimated total portfolio value (including cash)
+        * ``num_accounts`` – number of investment accounts
+        * ``num_positions`` – total number of positions across accounts
+        * ``years_until_retirement`` – user-configured retirement horizon
+        * ``target_retirement_income`` – annual income target at retirement
+
+    Raises
+    ------
+    ValueError
+        If the job or user cannot be found.
+    """
     try:
         job = db.jobs.find_by_id(job_id)
         if not job:
@@ -148,123 +276,208 @@ def load_portfolio_summary(job_id: str, db) -> Dict[str, Any]:
             raise ValueError(f"User {user_id} not found")
 
         accounts = db.accounts.find_by_user(user_id)
-        
-        # Calculate simple summary statistics
+
         total_value = 0.0
         total_positions = 0
         total_cash = 0.0
-        
+
         for account in accounts:
-            total_cash += float(account.get("cash_balance", 0))
+            total_cash += float(account.get("cash_balance", 0.0))
             positions = db.positions.find_by_account(account["id"])
             total_positions += len(positions)
-            
-            # Add position values
+
             for position in positions:
                 instrument = db.instruments.find_by_symbol(position["symbol"])
                 if instrument and instrument.get("current_price"):
                     price = float(instrument["current_price"])
                     quantity = float(position["quantity"])
                     total_value += price * quantity
-        
+
         total_value += total_cash
-        
-        # Return only summary statistics
+
         return {
             "total_value": total_value,
             "num_accounts": len(accounts),
             "num_positions": total_positions,
             "years_until_retirement": user.get("years_until_retirement", 30),
-            "target_retirement_income": float(user.get("target_retirement_income", 80000))
+            "target_retirement_income": float(
+                user.get("target_retirement_income", 80_000)
+            ),
         }
 
-    except Exception as e:
-        logger.error(f"Error loading portfolio summary: {e}")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error loading portfolio summary for job %s: %s", job_id, exc)
         raise
 
 
+# ============================================================
+# Internal Agent Invocation Helpers
+# ============================================================
+
 async def invoke_reporter_internal(job_id: str) -> str:
     """
-    Invoke the Report Writer Lambda to generate portfolio analysis narrative.
+    Invoke the Report Writer Lambda to generate a portfolio narrative.
 
-    Args:
-        job_id: The job ID for the analysis
+    Parameters
+    ----------
+    job_id :
+        The ID of the analysis job whose results should be narrated.
 
-    Returns:
-        Confirmation message
+    Returns
+    -------
+    str
+        Human-readable confirmation message describing the outcome.
     """
-    result = await invoke_lambda_agent("Reporter", REPORTER_FUNCTION, {"job_id": job_id})
+    result = await invoke_lambda_agent(
+        "Reporter",
+        REPORTER_FUNCTION,
+        {"job_id": job_id},
+    )
 
     if "error" in result:
         return f"Reporter agent failed: {result['error']}"
 
-    return "Reporter agent completed successfully. Portfolio analysis narrative has been generated and saved."
+    return (
+        "Reporter agent completed successfully. "
+        "Portfolio analysis narrative has been generated and saved."
+    )
 
 
 async def invoke_charter_internal(job_id: str) -> str:
     """
-    Invoke the Chart Maker Lambda to create portfolio visualizations.
+    Invoke the Chart Maker Lambda to create portfolio visualisations.
 
-    Args:
-        job_id: The job ID for the analysis
+    Parameters
+    ----------
+    job_id :
+        The ID of the analysis job whose charts should be generated.
 
-    Returns:
-        Confirmation message
+    Returns
+    -------
+    str
+        Human-readable confirmation message describing the outcome.
     """
     result = await invoke_lambda_agent(
-        "Charter", CHARTER_FUNCTION, {"job_id": job_id}
+        "Charter",
+        CHARTER_FUNCTION,
+        {"job_id": job_id},
     )
 
     if "error" in result:
         return f"Charter agent failed: {result['error']}"
 
-    return "Charter agent completed successfully. Portfolio visualizations have been created and saved."
+    return (
+        "Charter agent completed successfully. "
+        "Portfolio visualisations have been created and saved."
+    )
 
 
 async def invoke_retirement_internal(job_id: str) -> str:
     """
     Invoke the Retirement Specialist Lambda for retirement projections.
 
-    Args:
-        job_id: The job ID for the analysis
+    Parameters
+    ----------
+    job_id :
+        The ID of the analysis job for which retirement projections are computed.
 
-    Returns:
-        Confirmation message
+    Returns
+    -------
+    str
+        Human-readable confirmation message describing the outcome.
     """
-    result = await invoke_lambda_agent("Retirement", RETIREMENT_FUNCTION, {"job_id": job_id})
+    result = await invoke_lambda_agent(
+        "Retirement",
+        RETIREMENT_FUNCTION,
+        {"job_id": job_id},
+    )
 
     if "error" in result:
         return f"Retirement agent failed: {result['error']}"
 
-    return "Retirement agent completed successfully. Retirement projections have been calculated and saved."
+    return (
+        "Retirement agent completed successfully. "
+        "Retirement projections have been calculated and saved."
+    )
 
 
+# ============================================================
+# Tool-wrapped Planner Functions
+# ============================================================
 
 @function_tool
 async def invoke_reporter(wrapper: RunContextWrapper[PlannerContext]) -> str:
-    """Invoke the Report Writer agent to generate portfolio analysis narrative."""
+    """
+    Planner tool – call the Report Writer agent.
+
+    This tool triggers the narrative generation Lambda, using the
+    current planner context (specifically the `job_id`).
+    """
     return await invoke_reporter_internal(wrapper.context.job_id)
+
 
 @function_tool
 async def invoke_charter(wrapper: RunContextWrapper[PlannerContext]) -> str:
-    """Invoke the Chart Maker agent to create portfolio visualizations."""
+    """
+    Planner tool – call the Chart Maker agent.
+
+    This tool triggers the chart-generation Lambda for the portfolio
+    associated with the current `job_id`.
+    """
     return await invoke_charter_internal(wrapper.context.job_id)
+
 
 @function_tool
 async def invoke_retirement(wrapper: RunContextWrapper[PlannerContext]) -> str:
-    """Invoke the Retirement Specialist agent for retirement projections."""
+    """
+    Planner tool – call the Retirement Specialist agent.
+
+    This tool triggers the Lambda responsible for retirement projections
+    for the current `job_id`.
+    """
     return await invoke_retirement_internal(wrapper.context.job_id)
 
 
-def create_agent(job_id: str, portfolio_summary: Dict[str, Any], db):
-    """Create the orchestrator agent with tools."""
-    
-    # Create context for tools
+# ============================================================
+# Planner Agent Factory
+# ============================================================
+
+def create_agent(
+    job_id: str,
+    portfolio_summary: Dict[str, Any],
+    db: Any,  # noqa: ARG001  (reserved for future use if needed)
+) -> Tuple[LitellmModel, List[Any], str, PlannerContext]:
+    """
+    Construct the planner agent model, available tools, and task prompt.
+
+    Parameters
+    ----------
+    job_id :
+        The ID of the analysis job being orchestrated.
+    portfolio_summary :
+        Compact summary statistics for the portfolio, as returned by
+        :func:`load_portfolio_summary`.
+    db :
+        Database abstraction (currently unused, reserved for future use).
+
+    Returns
+    -------
+    (model, tools, task, context) :
+        * ``model`` – configured :class:`LitellmModel` instance
+        * ``tools`` – list of tool callables exposed to the planner LLM
+        * ``task`` – natural-language instruction string for the planner
+        * ``context`` – :class:`PlannerContext` with the active ``job_id``
+    """
+    # Create context for tool invocations
     context = PlannerContext(job_id=job_id)
 
-    # Get model configuration
-    model_id = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-7-sonnet-20250219-v1:0")
-    # Set region for LiteLLM Bedrock calls
+    # Get Bedrock model configuration
+    model_id = os.getenv(
+        "BEDROCK_MODEL_ID",
+        "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+    )
+
+    # Region for LiteLLM Bedrock calls
     bedrock_region = os.getenv("BEDROCK_REGION", "us-west-2")
     os.environ["AWS_REGION_NAME"] = bedrock_region
 
@@ -276,10 +489,17 @@ def create_agent(job_id: str, portfolio_summary: Dict[str, Any], db):
         invoke_retirement,
     ]
 
-    # Create minimal task context
-    task = f"""Job {job_id} has {portfolio_summary['num_positions']} positions.
-Retirement: {portfolio_summary['years_until_retirement']} years.
-
-Call the appropriate agents."""
+    # Minimal, structured task context for the planner LLM
+    task = (
+        f"Job {job_id} currently has {portfolio_summary['num_positions']} positions "
+        f"spread across {portfolio_summary['num_accounts']} accounts.\n"
+        f"Estimated total portfolio value (including cash): "
+        f"{portfolio_summary['total_value']:.2f}.\n"
+        f"The user has approximately {portfolio_summary['years_until_retirement']} "
+        f"years until retirement with a target annual retirement income of "
+        f"{portfolio_summary['target_retirement_income']:.2f}.\n\n"
+        "Decide which specialised agents to call (Reporter, Charter, Retirement) "
+        "and in which order to best serve the user. Call the appropriate tools."
+    )
 
     return model, tools, task, context
