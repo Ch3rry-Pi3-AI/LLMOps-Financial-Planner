@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 """
-Package the Charter Lambda function using Docker for AWS compatibility.
+Packaging and deployment utility for the Charter Lambda function.
+
+This module provides a small CLI tool to:
+
+* Build an AWS Lambda–compatible deployment package for the **Charter** service
+  (chart-making agent) using Docker and `uv` dependency export.
+* Zip the Lambda handler, agent, templates, observability, and all required
+  dependencies into `charter_lambda.zip`.
+* Optionally deploy the resulting ZIP file directly to an existing Lambda
+  function (`alex-charter`) using `boto3`.
+
+The use of Docker ensures that all dependencies are compiled for the correct
+Linux/amd64 environment used by AWS Lambda, independent of the host OS that
+runs this script.
 """
 
 import os
@@ -10,40 +23,105 @@ import tempfile
 import subprocess
 import argparse
 from pathlib import Path
+from typing import List, Optional, Union
 
-def run_command(cmd, cwd=None):
-    """Run a command and capture output."""
+
+# =========================
+# Shell Command Utilities
+# =========================
+
+def run_command(cmd: List[str], cwd: Optional[Union[str, Path]] = None) -> str:
+    """
+    Run a shell command and exit the process on failure.
+
+    Parameters
+    ----------
+    cmd : list of str
+        Command and its arguments, e.g. ``["docker", "info"]``.
+    cwd : str or pathlib.Path, optional
+        Working directory in which to execute the command. If ``None``,
+        the current process directory is used.
+
+    Returns
+    -------
+    str
+        Standard output produced by the command.
+
+    Raises
+    ------
+    SystemExit
+        If the command returns a non-zero exit status, the script exits with
+        status code 1 after printing the error output.
+    """
+    # Show the command being executed for transparency
     print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+
+    # Ensure cwd is a string path if provided
+    cwd_str = str(cwd) if cwd is not None else None
+
+    # Execute the command and capture stdout/stderr
+    result = subprocess.run(cmd, cwd=cwd_str, capture_output=True, text=True)
+
+    # If the command failed, print stderr and exit
     if result.returncode != 0:
         print(f"Error: {result.stderr}")
         sys.exit(1)
+
+    # Return captured stdout for further use
     return result.stdout
 
-def package_lambda():
-    """Package the Lambda function with all dependencies."""
-    
-    # Get the directory containing this script
-    charter_dir = Path(__file__).parent.absolute()
-    backend_dir = charter_dir.parent
-    
-    # Create a temporary directory for packaging
+
+# =========================
+# Lambda Packaging Logic
+# =========================
+
+def package_lambda() -> Path:
+    """
+    Build the Charter Lambda deployment ZIP using Docker and `uv`.
+
+    Steps performed:
+
+    1. Determine the Charter and backend directories.
+    2. Create a temporary build directory.
+    3. Export pinned dependencies from `uv.lock` into a `requirements.txt`.
+    4. Filter out packages not required in Lambda (e.g. `pyperclip`).
+    5. Use a Docker container based on the Lambda Python 3.12 image to:
+       * Install dependencies into a `/build/package` folder.
+       * Install the local `database` package into the same target.
+    6. Copy Charter Lambda source files (`lambda_handler.py`, `agent.py`,
+       `templates.py`, `observability.py`) into the package folder.
+    7. Zip the entire `package` directory into `charter_lambda.zip`.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the generated ZIP file in the Charter directory.
+    """
+    # Resolve directory that contains this script (charter module root)
+    charter_dir: Path = Path(__file__).parent.absolute()
+
+    # Resolve backend directory one level above charter
+    backend_dir: Path = charter_dir.parent
+
+    # Create a temporary directory that will hold build artifacts
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        package_dir = temp_path / "package"
-        package_dir.mkdir()
-        
+
+        # Directory into which all Lambda files and dependencies will be staged
+        package_dir: Path = temp_path / "package"
+        package_dir.mkdir(parents=True, exist_ok=True)
+
         print("Creating Lambda package using Docker...")
-        
-        # Export exact requirements from uv.lock (excluding the editable database package)
+
+        # Export pinned requirements from uv.lock for reproducible builds
         print("Exporting requirements from uv.lock...")
-        requirements_result = run_command(
+        requirements_result: str = run_command(
             ["uv", "export", "--no-hashes", "--no-emit-project"],
-            cwd=str(charter_dir)
+            cwd=charter_dir,
         )
 
-        # Filter out packages that don't work in Lambda
-        filtered_requirements = []
+        # Filter out packages that are unnecessary or problematic in Lambda
+        filtered_requirements: List[str] = []
         for line in requirements_result.splitlines():
             # Skip pyperclip (clipboard library not needed in Lambda)
             if line.startswith("pyperclip"):
@@ -51,92 +129,169 @@ def package_lambda():
                 continue
             filtered_requirements.append(line)
 
-        req_file = temp_path / "requirements.txt"
-        req_file.write_text("\n".join(filtered_requirements))
-        
-        # Use Docker to install dependencies for Lambda's architecture
-        docker_cmd = [
-            "docker", "run", "--rm",
-            "--platform", "linux/amd64",
-            "-v", f"{temp_path}:/build",
-            "-v", f"{backend_dir}/database:/database",
-            "--entrypoint", "/bin/bash",
+        # Write filtered requirements to a temporary requirements.txt
+        req_file: Path = temp_path / "requirements.txt"
+        req_file.write_text("\n".join(filtered_requirements), encoding="utf-8")
+
+        # Construct Docker command to install dependencies into /build/package
+        docker_cmd: List[str] = [
+            "docker",
+            "run",
+            "--rm",
+            "--platform",
+            "linux/amd64",
+            "-v",
+            f"{temp_path}:/build",
+            "-v",
+            f"{backend_dir}/database:/database",
+            "--entrypoint",
+            "/bin/bash",
             "public.ecr.aws/lambda/python:3.12",
             "-c",
-            """cd /build && pip install --target ./package -r requirements.txt && pip install --target ./package --no-deps /database"""
+            (
+                "cd /build && "
+                "pip install --target ./package -r requirements.txt && "
+                "pip install --target ./package --no-deps /database"
+            ),
         ]
-        
+
+        # Execute Docker to perform the dependency installation
         run_command(docker_cmd)
-        
-        # Copy Lambda handler, agent, templates, and observability
+
+        # Copy Charter Lambda source modules into the package directory
         shutil.copy(charter_dir / "lambda_handler.py", package_dir)
         shutil.copy(charter_dir / "agent.py", package_dir)
         shutil.copy(charter_dir / "templates.py", package_dir)
         shutil.copy(charter_dir / "observability.py", package_dir)
-        
-        # Create the zip file
-        zip_path = charter_dir / "charter_lambda.zip"
-        
-        # Remove old zip if it exists
+
+        # Define the final ZIP file location in the Charter directory
+        zip_path: Path = charter_dir / "charter_lambda.zip"
+
+        # Remove any existing ZIP file to avoid stale artefacts
         if zip_path.exists():
             zip_path.unlink()
-        
-        # Create new zip
+
+        # Create a new ZIP archive containing everything under package_dir
         print(f"Creating zip file: {zip_path}")
         run_command(
             ["zip", "-r", str(zip_path), "."],
-            cwd=str(package_dir)
+            cwd=package_dir,
         )
-        
-        # Get file size
-        size_mb = zip_path.stat().st_size / (1024 * 1024)
+
+        # Calculate human-readable ZIP size in MB
+        size_mb: float = zip_path.stat().st_size / (1024 * 1024)
         print(f"Package created: {zip_path} ({size_mb:.1f} MB)")
-        
+
         return zip_path
 
-def deploy_lambda(zip_path):
-    """Deploy the Lambda function to AWS."""
+
+# =========================
+# Lambda Deployment Logic
+# =========================
+
+def deploy_lambda(zip_path: Path) -> None:
+    """
+    Deploy the packaged Charter Lambda ZIP to AWS.
+
+    This function updates the code of an existing Lambda function named
+    ``alex-charter`` using the provided ZIP file. The function must already
+    exist (for example, provisioned via Terraform or CloudFormation).
+
+    Parameters
+    ----------
+    zip_path : pathlib.Path
+        Path to the ZIP file containing the Lambda deployment package.
+
+    Raises
+    ------
+    SystemExit
+        If the function does not exist, or if an error occurs while calling
+        the AWS Lambda API.
+    """
+    # Lazy import boto3 to avoid adding it as a hard runtime dependency
     import boto3
-    
-    lambda_client = boto3.client('lambda')
-    function_name = 'alex-charter'
-    
+
+    # Create a Lambda client using default AWS credentials/config
+    lambda_client = boto3.client("lambda")
+
+    # Name of the Lambda function to update
+    function_name: str = "alex-charter"
+
     print(f"Deploying to Lambda function: {function_name}")
-    
+
     try:
-        # Try to update existing function
-        with open(zip_path, 'rb') as f:
+        # Read the ZIP bytes and send an update_function_code request
+        with zip_path.open("rb") as f:
             response = lambda_client.update_function_code(
                 FunctionName=function_name,
-                ZipFile=f.read()
+                ZipFile=f.read(),
             )
+
         print(f"Successfully updated Lambda function: {function_name}")
         print(f"Function ARN: {response['FunctionArn']}")
     except lambda_client.exceptions.ResourceNotFoundException:
-        print(f"Lambda function {function_name} not found. Please deploy via Terraform first.")
+        # If the function cannot be found, prompt the user to deploy infra first
+        print(
+            f"Lambda function {function_name} not found. "
+            "Please deploy via Terraform (or other IaC) first."
+        )
         sys.exit(1)
     except Exception as e:
+        # Catch any other error and exit with a useful message
         print(f"Error deploying Lambda: {e}")
         sys.exit(1)
 
-def main():
-    parser = argparse.ArgumentParser(description='Package Charter Lambda for deployment')
-    parser.add_argument('--deploy', action='store_true', help='Deploy to AWS after packaging')
+
+# =========================
+# Command-Line Interface
+# =========================
+
+def main() -> None:
+    """
+    CLI entry point for packaging (and optionally deploying) Charter Lambda.
+
+    Flags
+    -----
+    --deploy : bool
+        If provided, the script will deploy the generated ZIP to the
+        ``alex-charter`` Lambda function after packaging.
+
+    Behaviour
+    ---------
+    1. Verifies that Docker is available in the local environment.
+    2. Creates a Lambda-compatible ZIP by calling :func:`package_lambda`.
+    3. If ``--deploy`` is set, calls :func:`deploy_lambda` on the ZIP.
+    """
+    # Parse CLI arguments
+    parser = argparse.ArgumentParser(
+        description="Package Charter Lambda for deployment"
+    )
+    parser.add_argument(
+        "--deploy",
+        action="store_true",
+        help="Deploy to AWS after packaging",
+    )
     args = parser.parse_args()
-    
-    # Check if Docker is available
+
+    # Ensure Docker is installed and accessible on PATH
     try:
         run_command(["docker", "--version"])
-    except FileNotFoundError:
-        print("Error: Docker is not installed or not in PATH")
+    except SystemExit:
+        # run_command will already have printed a helpful error message
+        print("Error: Docker is not installed, not running, or not in PATH.")
         sys.exit(1)
-    
-    # Package the Lambda
-    zip_path = package_lambda()
-    
-    # Deploy if requested
+
+    # Build the Lambda deployment package
+    zip_path: Path = package_lambda()
+
+    # Optionally deploy the newly built ZIP to AWS Lambda
     if args.deploy:
         deploy_lambda(zip_path)
+
+
+# =========================
+# Script Entrypoint
+# =========================
 
 if __name__ == "__main__":
     main()
