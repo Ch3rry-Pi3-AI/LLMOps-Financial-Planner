@@ -1,24 +1,68 @@
+#!/usr/bin/env python3
 """
-Retirement Specialist Agent - provides retirement planning analysis and projections.
+Alex Financial Planner – Retirement Specialist Agent
+
+This module implements the **Retirement Specialist Agent**, responsible for
+analysing a user's investment portfolio and generating retirement-readiness
+insights.
+
+The agent:
+
+* Calculates current portfolio value from accounts and positions
+* Derives a simplified asset allocation profile (equity, bonds, real estate, cash, commodities)
+* Runs a Monte Carlo simulation to estimate retirement success probability
+* Builds milestone-based projections through accumulation and retirement phases
+* Packages all metrics into a rich, markdown-friendly analysis prompt for the LLM
+
+Typical usage (inside a Lambda / backend service):
+
+    model, tools, task = create_agent(
+        job_id="job-123",
+        portfolio_data=portfolio_payload,
+        user_preferences=user_prefs,
+        db=db_models,  # optional, currently unused
+    )
+    response = model.run(task, tools=tools)
+
+The agent is intentionally **tool-free** at this stage: it produces a single,
+final markdown analysis based on the computed metrics.
 """
 
-import os
+from __future__ import annotations
+
 import json
 import logging
+import os
 import random
-from typing import Dict, Any
 from datetime import datetime
+from typing import Any, Dict, List, Tuple
 
-# No tools needed - simplified agent
 from agents.extensions.models.litellm_model import LitellmModel
 
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 
-# Context removed - no longer needed without tools
+
+# ============================================================
+# Portfolio Aggregation Helpers
+# ============================================================
 
 
 def calculate_portfolio_value(portfolio_data: Dict[str, Any]) -> float:
-    """Calculate current portfolio value."""
+    """
+    Calculate the current total portfolio value from cash and positions.
+
+    Parameters
+    ----------
+    portfolio_data : dict
+        Portfolio payload containing a list of accounts. Each account may have:
+        - ``cash_balance``: current cash balance
+        - ``positions``: list of positions with quantity and instrument price
+
+    Returns
+    -------
+    float
+        Total portfolio value in currency units.
+    """
     total_value = 0.0
 
     for account in portfolio_data.get("accounts", []):
@@ -35,7 +79,28 @@ def calculate_portfolio_value(portfolio_data: Dict[str, Any]) -> float:
 
 
 def calculate_asset_allocation(portfolio_data: Dict[str, Any]) -> Dict[str, float]:
-    """Calculate asset allocation percentages."""
+    """
+    Estimate asset allocation percentages across major asset classes.
+
+    The allocation is computed by:
+
+    * Converting each position to a value (quantity × price)
+    * Applying its instrument-level allocation breakdown
+    * Normalising by total portfolio value
+
+    Parameters
+    ----------
+    portfolio_data : dict
+        Portfolio payload containing accounts and positions, where each
+        instrument may expose an ``allocation_asset_class`` mapping with keys:
+        ``equity``, ``fixed_income``, ``real_estate``, ``commodities``.
+
+    Returns
+    -------
+    dict
+        Normalised allocation weights (0–1) with keys:
+        ``equity``, ``bonds``, ``real_estate``, ``commodities``, ``cash``.
+    """
     total_equity = 0.0
     total_bonds = 0.0
     total_real_estate = 0.0
@@ -55,7 +120,6 @@ def calculate_asset_allocation(portfolio_data: Dict[str, Any]) -> Dict[str, floa
             value = quantity * price
             total_value += value
 
-            # Get asset class allocation
             asset_allocation = instrument.get("allocation_asset_class", {})
             if asset_allocation:
                 total_equity += value * asset_allocation.get("equity", 0) / 100
@@ -64,7 +128,13 @@ def calculate_asset_allocation(portfolio_data: Dict[str, Any]) -> Dict[str, floa
                 total_commodities += value * asset_allocation.get("commodities", 0) / 100
 
     if total_value == 0:
-        return {"equity": 0, "bonds": 0, "real_estate": 0, "commodities": 0, "cash": 0}
+        return {
+            "equity": 0.0,
+            "bonds": 0.0,
+            "real_estate": 0.0,
+            "commodities": 0.0,
+            "cash": 0.0,
+        }
 
     return {
         "equity": total_equity / total_value,
@@ -75,6 +145,11 @@ def calculate_asset_allocation(portfolio_data: Dict[str, Any]) -> Dict[str, floa
     }
 
 
+# ============================================================
+# Monte Carlo Retirement Simulation
+# ============================================================
+
+
 def run_monte_carlo_simulation(
     current_value: float,
     years_until_retirement: int,
@@ -82,9 +157,44 @@ def run_monte_carlo_simulation(
     asset_allocation: Dict[str, float],
     num_simulations: int = 500,
 ) -> Dict[str, Any]:
-    """Run Monte Carlo simulation for retirement planning."""
+    """
+    Run a simplified Monte Carlo simulation for retirement planning.
 
-    # Historical return parameters (annualized)
+    The simulation has two phases:
+
+    1. **Accumulation phase** – portfolio grows for ``years_until_retirement``,
+       with annual contributions.
+    2. **Retirement phase** – the portfolio supports withdrawals for up to
+       30 years, with inflation-adjusted income.
+
+    In each scenario:
+
+    * Asset-class returns are drawn from normal distributions
+    * Portfolio returns are computed via the allocation mix
+    * Annual contributions and withdrawals are applied
+    * We track whether the portfolio survives the full retirement horizon
+
+    Parameters
+    ----------
+    current_value : float
+        Starting portfolio value.
+    years_until_retirement : int
+        Number of years remaining until retirement.
+    target_annual_income : float
+        Target retirement income (starting annual withdrawal level).
+    asset_allocation : dict
+        Allocation weights (0–1) for ``equity``, ``bonds``, ``real_estate``,
+        and ``cash``.
+    num_simulations : int, optional
+        Number of Monte Carlo scenarios to run, by default 500.
+
+    Returns
+    -------
+    dict
+        Summary statistics including success rate, percentiles, and expected
+        value at retirement.
+    """
+    # Historical return assumptions (annualised)
     equity_return_mean = 0.07
     equity_return_std = 0.18
     bond_return_mean = 0.04
@@ -93,8 +203,8 @@ def run_monte_carlo_simulation(
     real_estate_return_std = 0.12
 
     successful_scenarios = 0
-    final_values = []
-    years_lasted = []
+    final_values: List[float] = []
+    years_lasted: List[int] = []
 
     for _ in range(num_simulations):
         portfolio_value = current_value
@@ -106,21 +216,21 @@ def run_monte_carlo_simulation(
             real_estate_return = random.gauss(real_estate_return_mean, real_estate_return_std)
 
             portfolio_return = (
-                asset_allocation["equity"] * equity_return
-                + asset_allocation["bonds"] * bond_return
-                + asset_allocation["real_estate"] * real_estate_return
-                + asset_allocation["cash"] * 0.02
+                asset_allocation.get("equity", 0.0) * equity_return
+                + asset_allocation.get("bonds", 0.0) * bond_return
+                + asset_allocation.get("real_estate", 0.0) * real_estate_return
+                + asset_allocation.get("cash", 0.0) * 0.02
             )
 
             portfolio_value = portfolio_value * (1 + portfolio_return)
-            portfolio_value += 10000  # Annual contribution
+            portfolio_value += 10_000  # Annual contribution
 
         # Retirement phase
         retirement_years = 30
-        annual_withdrawal = target_annual_income
+        annual_withdrawal = float(target_annual_income)
         years_income_lasted = 0
 
-        for year in range(retirement_years):
+        for _year in range(retirement_years):
             if portfolio_value <= 0:
                 break
 
@@ -132,10 +242,10 @@ def run_monte_carlo_simulation(
             real_estate_return = random.gauss(real_estate_return_mean, real_estate_return_std)
 
             portfolio_return = (
-                asset_allocation["equity"] * equity_return
-                + asset_allocation["bonds"] * bond_return
-                + asset_allocation["real_estate"] * real_estate_return
-                + asset_allocation["cash"] * 0.02
+                asset_allocation.get("equity", 0.0) * equity_return
+                + asset_allocation.get("bonds", 0.0) * bond_return
+                + asset_allocation.get("real_estate", 0.0) * real_estate_return
+                + asset_allocation.get("cash", 0.0) * 0.02
             )
 
             portfolio_value = portfolio_value * (1 + portfolio_return) - annual_withdrawal
@@ -143,36 +253,48 @@ def run_monte_carlo_simulation(
             if portfolio_value > 0:
                 years_income_lasted += 1
 
-        final_values.append(max(0, portfolio_value))
+        final_values.append(max(0.0, portfolio_value))
         years_lasted.append(years_income_lasted)
 
         if years_income_lasted >= retirement_years:
             successful_scenarios += 1
 
-    # Calculate statistics
+    # Sort for percentile extraction
     final_values.sort()
-    success_rate = (successful_scenarios / num_simulations) * 100
+    success_rate = (successful_scenarios / num_simulations) * 100 if num_simulations > 0 else 0.0
 
-    # Calculate expected value at retirement
+    # Expected value at retirement using deterministic expected return
     expected_return = (
-        asset_allocation["equity"] * equity_return_mean
-        + asset_allocation["bonds"] * bond_return_mean
-        + asset_allocation["real_estate"] * real_estate_return_mean
-        + asset_allocation["cash"] * 0.02
+        asset_allocation.get("equity", 0.0) * equity_return_mean
+        + asset_allocation.get("bonds", 0.0) * bond_return_mean
+        + asset_allocation.get("real_estate", 0.0) * real_estate_return_mean
+        + asset_allocation.get("cash", 0.0) * 0.02
     )
+
     expected_value_at_retirement = current_value
     for _ in range(years_until_retirement):
         expected_value_at_retirement *= 1 + expected_return
-        expected_value_at_retirement += 10000
+        expected_value_at_retirement += 10_000
 
     return {
         "success_rate": round(success_rate, 1),
-        "median_final_value": round(final_values[num_simulations // 2], 2),
-        "percentile_10": round(final_values[num_simulations // 10], 2),
-        "percentile_90": round(final_values[9 * num_simulations // 10], 2),
-        "average_years_lasted": round(sum(years_lasted) / len(years_lasted), 1),
+        "median_final_value": round(final_values[num_simulations // 2], 2)
+        if final_values
+        else 0.0,
+        "percentile_10": round(final_values[num_simulations // 10], 2) if final_values else 0.0,
+        "percentile_90": round(final_values[9 * num_simulations // 10], 2)
+        if final_values
+        else 0.0,
+        "average_years_lasted": round(sum(years_lasted) / len(years_lasted), 1)
+        if years_lasted
+        else 0.0,
         "expected_value_at_retirement": round(expected_value_at_retirement, 2),
     }
+
+
+# ============================================================
+# Long-Term Projections (Milestones)
+# ============================================================
 
 
 def generate_projections(
@@ -180,35 +302,56 @@ def generate_projections(
     years_until_retirement: int,
     asset_allocation: Dict[str, float],
     current_age: int,
-) -> list:
-    """Generate simplified retirement projections."""
+) -> List[Dict[str, Any]]:
+    """
+    Generate simplified milestone projections for the retirement journey.
 
-    # Expected returns
+    Projections are computed at 5-year intervals, covering:
+
+    * Accumulation phase – compounding returns and contributions
+    * Retirement phase – ongoing withdrawals at a fixed withdrawal rate
+
+    Parameters
+    ----------
+    current_value : float
+        Starting portfolio value.
+    years_until_retirement : int
+        Years remaining until retirement.
+    asset_allocation : dict
+        Allocation weights used to derive an expected return.
+    current_age : int
+        Current age of the user.
+
+    Returns
+    -------
+    list of dict
+        Projection points containing ``year``, ``age``, ``portfolio_value``,
+        ``annual_income``, and ``phase``.
+    """
     expected_return = (
-        asset_allocation["equity"] * 0.07
-        + asset_allocation["bonds"] * 0.04
-        + asset_allocation["real_estate"] * 0.06
-        + asset_allocation["cash"] * 0.02
+        asset_allocation.get("equity", 0.0) * 0.07
+        + asset_allocation.get("bonds", 0.0) * 0.04
+        + asset_allocation.get("real_estate", 0.0) * 0.06
+        + asset_allocation.get("cash", 0.0) * 0.02
     )
 
-    projections = []
+    projections: List[Dict[str, Any]] = []
     portfolio_value = current_value
 
-    # Only show key milestones (every 5 years)
     milestone_years = list(range(0, years_until_retirement + 31, 5))
 
     for year in milestone_years:
         age = current_age + year
 
         if year <= years_until_retirement:
-            # Calculate accumulation
+            # Accumulation phase – approximate 5-year blocks
             for _ in range(min(5, year)):
                 portfolio_value *= 1 + expected_return
-                portfolio_value += 10000
+                portfolio_value += 10_000
             phase = "accumulation"
-            annual_income = 0
+            annual_income = 0.0
         else:
-            # Calculate retirement withdrawals
+            # Retirement phase – approximate 5-year blocks with 4% withdrawals
             withdrawal_rate = 0.04
             annual_income = portfolio_value * withdrawal_rate
             years_in_retirement = min(5, year - years_until_retirement)
@@ -230,53 +373,105 @@ def generate_projections(
     return projections
 
 
-# Tool removed - analysis is now saved directly in lambda_handler
+# ============================================================
+# Agent Construction
+# ============================================================
 
 
 def create_agent(
-    job_id: str, portfolio_data: Dict[str, Any], user_preferences: Dict[str, Any], db=None
-):
-    """Create the retirement agent with tools and context."""
+    job_id: str,
+    portfolio_data: Dict[str, Any],
+    user_preferences: Dict[str, Any],
+    db: Any = None,
+) -> Tuple[LitellmModel, List[Any], str]:
+    """
+    Construct the Retirement Specialist Agent model and task prompt.
 
-    # Get model configuration
-    model_id = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-7-sonnet-20250219-v1:0")
-    # Set region for LiteLLM Bedrock calls
+    This function:
+
+    * Reads model configuration from environment variables
+    * Computes portfolio value and asset allocation
+    * Runs a Monte Carlo simulation for retirement success
+    * Generates milestone projections
+    * Assembles a rich markdown task to be sent to the LLM
+
+    Parameters
+    ----------
+    job_id : str
+        Identifier for the current retirement analysis job (currently unused,
+        but useful for logging or future extensions).
+    portfolio_data : dict
+        Portfolio payload with accounts, positions, and instrument data.
+    user_preferences : dict
+        User-level preferences including:
+        - ``years_until_retirement``
+        - ``target_retirement_income``
+        - ``current_age``
+    db : Any, optional
+        Optional database handle for future extensions. Not used in the
+        current implementation.
+
+    Returns
+    -------
+    (LitellmModel, list, str)
+        A tuple containing:
+        - The configured LiteLLM model wrapper
+        - An empty tools list (no tool-calling required)
+        - The fully formatted markdown task string
+    """
+    # Model configuration (Bedrock via LiteLLM)
+    model_id = os.getenv(
+        "BEDROCK_MODEL_ID",
+        "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+    )
     bedrock_region = os.getenv("BEDROCK_REGION", "us-west-2")
     os.environ["AWS_REGION_NAME"] = bedrock_region
 
     model = LitellmModel(model=f"bedrock/{model_id}")
 
-    # Extract user preferences
-    years_until_retirement = user_preferences.get("years_until_retirement", 30)
-    target_income = user_preferences.get("target_retirement_income", 80000)
-    current_age = user_preferences.get("current_age", 40)
+    # Extract user preferences with sensible defaults
+    years_until_retirement = int(user_preferences.get("years_until_retirement", 30))
+    target_income = float(user_preferences.get("target_retirement_income", 80_000))
+    current_age = int(user_preferences.get("current_age", 40))
 
-    # Calculate portfolio metrics
+    # Portfolio metrics
     portfolio_value = calculate_portfolio_value(portfolio_data)
     allocation = calculate_asset_allocation(portfolio_data)
 
-    # Run Monte Carlo simulation
+    # Monte Carlo simulation
     monte_carlo = run_monte_carlo_simulation(
-        portfolio_value, years_until_retirement, target_income, allocation, num_simulations=500
+        current_value=portfolio_value,
+        years_until_retirement=years_until_retirement,
+        target_annual_income=target_income,
+        asset_allocation=allocation,
+        num_simulations=500,
     )
 
-    # Generate projections
+    # Long-term projections
     projections = generate_projections(
-        portfolio_value, years_until_retirement, allocation, current_age
+        current_value=portfolio_value,
+        years_until_retirement=years_until_retirement,
+        asset_allocation=allocation,
+        current_age=current_age,
     )
 
-    # No context needed anymore - simplified agent
+    tools: List[Any] = []  # No tools – final-answer-only agent
 
-    # No tools needed - agent will return analysis as final output
-    tools = []
+    # Build rich markdown task for the LLM
+    allocation_summary = ", ".join(
+        [
+            f"{k.title()}: {v:.0%}"
+            for k, v in allocation.items()
+            if v and v > 0
+        ]
+    )
 
-    # Format comprehensive context for the agent
     task = f"""
 # Portfolio Analysis Context
 
 ## Current Situation
 - Portfolio Value: ${portfolio_value:,.0f}
-- Asset Allocation: {", ".join([f"{k.title()}: {v:.0%}" for k, v in allocation.items() if v > 0])}
+- Asset Allocation: {allocation_summary or "No allocation data available"}
 - Years to Retirement: {years_until_retirement}
 - Target Annual Income: ${target_income:,.0f}
 - Current Age: {current_age}
@@ -294,9 +489,16 @@ def create_agent(
 
     for proj in projections[:6]:
         if proj["phase"] == "accumulation":
-            task += f"- Age {proj['age']}: ${proj['portfolio_value']:,.0f} (building wealth)\n"
+            task += (
+                f"- Age {proj['age']}: "
+                f"${proj['portfolio_value']:,.0f} (building wealth)\n"
+            )
         else:
-            task += f"- Age {proj['age']}: ${proj['portfolio_value']:,.0f} (annual income: ${proj['annual_income']:,.0f})\n"
+            task += (
+                f"- Age {proj['age']}: "
+                f"${proj['portfolio_value']:,.0f} "
+                f"(annual income: ${proj['annual_income']:,.0f})\n"
+            )
 
     task += f"""
 
@@ -305,18 +507,18 @@ def create_agent(
 - Inflation impact (3% assumed)
 - Healthcare costs in retirement
 - Longevity risk (living beyond 30 years)
-- Market volatility (equity standard deviation: 18%)
+- Market volatility (e.g. equity standard deviation around 18%)
 
 ## Safe Withdrawal Rate Analysis
 - 4% Rule: ${portfolio_value * 0.04:,.0f} initial annual income
 - Target Income: ${target_income:,.0f}
 - Gap: ${target_income - (portfolio_value * 0.04):,.0f}
 
-Your task: Analyze this retirement readiness data and provide a comprehensive retirement analysis including:
+Your task: Analyse this retirement readiness data and provide a comprehensive retirement analysis including:
 1. Clear assessment of retirement readiness
-2. Specific recommendations to improve success rate
+2. Specific recommendations to improve the success rate
 3. Risk mitigation strategies
-4. Action items with timeline
+4. Action items with a realistic timeline
 
 Provide your analysis in clear markdown format with specific numbers and actionable recommendations.
 """

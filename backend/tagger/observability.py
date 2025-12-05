@@ -1,31 +1,78 @@
+#!/usr/bin/env python3
 """
-Observability module for LangFuse integration.
-Provides a simple context manager for setting up and flushing traces.
+Alex Financial Planner – Observability / LangFuse Integration.
+
+This module provides a small, Lambda-friendly observability wrapper around
+LangFuse + Logfire + the OpenAI Agents SDK.
+
+Responsibilities
+----------------
+* Check whether LangFuse and OpenAI are configured via environment variables
+* Lazily configure:
+  - Logfire instrumentation for the OpenAI Agents SDK
+  - A LangFuse client for trace export
+* Expose a simple context manager, ``observe()``, that:
+  - Sets up observability (if configured)
+  - Yields control to the caller
+  - Flushes and shuts down the LangFuse client on exit, including a short delay
+    to give network traffic time to complete in AWS Lambda
+
+Typical usage
+-------------
+    from observability import observe
+
+    def lambda_handler(event, context):
+        with observe():
+            # Code that uses the OpenAI Agents SDK or your agents
+            result = some_agent_call(...)
+            return {"statusCode": 200, "body": ...}
 """
 
-import os
+from __future__ import annotations
+
 import logging
+import os
+import time
 from contextlib import contextmanager
+from typing import Iterator, Optional
 
-# Use root logger for Lambda compatibility
+# ============================================================
+# Logger Configuration
+# ============================================================
+
+# Use the root logger for AWS Lambda compatibility
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
+# ============================================================
+# Context Manager – Observability Wrapper
+# ============================================================
+
+
 @contextmanager
-def observe():
+def observe() -> Iterator[None]:
     """
-    Context manager for observability with LangFuse.
+    Context manager for observability with LangFuse (and Logfire).
 
-    Sets up LangFuse observability if environment variables are configured,
-    and ensures traces are flushed on exit.
+    This helper:
+    * Checks whether LangFuse / OpenAI environment variables are configured
+    * Attempts to configure Logfire + LangFuse if available
+    * Ensures traces are flushed and the client is shut down on exit
 
-    Usage:
+    Usage
+    -----
         from observability import observe
 
         with observe():
             # Your code that uses OpenAI Agents SDK
             result = await agent.run(...)
+
+    Notes
+    -----
+    * If ``LANGFUSE_SECRET_KEY`` is not set, setup is skipped entirely.
+    * If LangFuse or Logfire imports fail, processing continues without
+      observability but errors are logged.
     """
     logger.info("🔍 Observability: Checking configuration...")
 
@@ -33,31 +80,33 @@ def observe():
     has_langfuse = bool(os.getenv("LANGFUSE_SECRET_KEY"))
     has_openai = bool(os.getenv("OPENAI_API_KEY"))
 
-    logger.info(f"🔍 Observability: LANGFUSE_SECRET_KEY exists: {has_langfuse}")
-    logger.info(f"🔍 Observability: OPENAI_API_KEY exists: {has_openai}")
+    logger.info("🔍 Observability: LANGFUSE_SECRET_KEY exists: %s", has_langfuse)
+    logger.info("🔍 Observability: OPENAI_API_KEY exists: %s", has_openai)
 
+    # If LangFuse is not configured, do nothing but still yield control
     if not has_langfuse:
         logger.info("🔍 Observability: LangFuse not configured, skipping setup")
         yield
         return
 
     if not has_openai:
-        logger.warning("⚠️  Observability: OPENAI_API_KEY not set, traces may not export")
+        logger.warning("⚠️ Observability: OPENAI_API_KEY not set, traces may not export")
 
-    # Local variable for the client (no global needed)
-    langfuse_client = None
+    langfuse_client: Optional[object] = None
 
-    # Try to set up LangFuse
+    # --------------------------------------------------------
+    # Setup phase – Logfire + LangFuse initialisation
+    # --------------------------------------------------------
     try:
         logger.info("🔍 Observability: Setting up LangFuse...")
 
         import logfire
         from langfuse import get_client
 
-        # Configure logfire to instrument OpenAI Agents SDK
+        # Configure Logfire for OpenAI Agents SDK instrumentation
         logfire.configure(
             service_name="alex_tagger_agent",
-            send_to_logfire=False,  # Don't send to Logfire cloud
+            send_to_logfire=False,  # Do not send to Logfire cloud
         )
         logger.info("✅ Observability: Logfire configured")
 
@@ -65,48 +114,54 @@ def observe():
         logfire.instrument_openai_agents()
         logger.info("✅ Observability: OpenAI Agents SDK instrumented")
 
-        # Initialize LangFuse client
+        # Initialise LangFuse client
         langfuse_client = get_client()
         logger.info("✅ Observability: LangFuse client initialized")
 
-        # Optional: Check authentication (blocking call, use sparingly)
+        # Optional authentication check (blocking; use sparingly)
         try:
             auth_result = langfuse_client.auth_check()
             logger.info(
-                f"✅ Observability: LangFuse authentication check passed (result: {auth_result})"
+                "✅ Observability: LangFuse authentication check passed (result: %s)",
+                auth_result,
             )
-        except Exception as auth_error:
-            logger.warning(f"⚠️  Observability: Auth check failed but continuing: {auth_error}")
+        except Exception as auth_error:  # noqa: BLE001
+            logger.warning(
+                "⚠️ Observability: Auth check failed but continuing: %s",
+                auth_error,
+            )
 
-        logger.info("🎯 Observability: Setup complete - traces will be sent to LangFuse")
+        logger.info("🎯 Observability: Setup complete – traces will be sent to LangFuse")
 
-    except ImportError as e:
-        logger.error(f"❌ Observability: Missing required package: {e}")
+    except ImportError as exc:
+        logger.error("❌ Observability: Missing required package: %s", exc)
         langfuse_client = None
-    except Exception as e:
-        logger.error(f"❌ Observability: Setup failed: {e}")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("❌ Observability: Setup failed: %s", exc)
         langfuse_client = None
 
+    # --------------------------------------------------------
+    # Execution phase – yield to caller
+    # --------------------------------------------------------
     try:
-        # Yield control back to the calling code
         yield
     finally:
-        # Flush traces on exit
-        if langfuse_client:
+        # ----------------------------------------------------
+        # Teardown phase – flush and shutdown LangFuse client
+        # ----------------------------------------------------
+        if langfuse_client is not None:
             try:
                 logger.info("🔍 Observability: Flushing traces to LangFuse...")
                 langfuse_client.flush()
                 langfuse_client.shutdown()
 
-                # Add a 10 second delay to ensure network requests complete
-                # This is a workaround for Lambda's immediate termination
-                import time
-
+                # Add a 10 second delay to ensure network requests complete.
+                # This is a workaround for Lambda's immediate termination.
                 logger.info("🔍 Observability: Waiting 10 seconds for flush to complete...")
                 time.sleep(10)
 
                 logger.info("✅ Observability: Traces flushed successfully")
-            except Exception as e:
-                logger.error(f"❌ Observability: Failed to flush traces: {e}")
+            except Exception as exc:  # noqa: BLE001
+                logger.error("❌ Observability: Failed to flush traces: %s", exc)
         else:
             logger.debug("🔍 Observability: No client to flush")

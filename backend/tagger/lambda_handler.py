@@ -1,133 +1,209 @@
+#!/usr/bin/env python3
 """
-InstrumentTagger Lambda Handler
-Classifies financial instruments and updates the database.
-"""
+Alex Financial Planner – Instrument Tagger Lambda.
 
-import os
-import json
-import asyncio
-import logging
-from typing import List, Dict, Any
+This Lambda function orchestrates the end-to-end classification of financial
+instruments using the InstrumentTagger agent and persists the results into
+the database.
 
-from src import Database
-from src.schemas import InstrumentCreate
-from agent import tag_instruments, classification_to_db_format
-from observability import observe
+Responsibilities
+---------------
+* Receive a batch of instruments from an AWS Lambda event payload
+* Call the async `tag_instruments` agent helper to classify them
+* Upsert each classified instrument into the `instruments` table
+  - Update existing rows if the symbol already exists
+  - Insert new rows otherwise
+* Return a structured JSON response with:
+  - Counts of tagged / updated symbols
+  - Any errors encountered during DB updates
+  - A lightweight view of the instrument classifications
 
-# Configure logging
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+Typical event payload
+---------------------
+The Lambda expects an event in the following format:
 
-# Initialize database
-db = Database()
-
-async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, Any]:
-    """
-    Process and classify instruments asynchronously.
-    
-    Args:
-        instruments: List of instruments to classify
-        
-    Returns:
-        Processing results
-    """
-    # Run the classification
-    logger.info(f"Classifying {len(instruments)} instruments")
-    classifications = await tag_instruments(instruments)
-    
-    # Update database with classifications
-    updated = []
-    errors = []
-    
-    for classification in classifications:
-        try:
-            # Convert to database format
-            db_instrument = classification_to_db_format(classification)
-            
-            # Check if instrument exists
-            existing = db.instruments.find_by_symbol(classification.symbol)
-            
-            if existing:
-                # Update existing instrument
-                update_data = db_instrument.model_dump()
-                # Remove symbol as it's the key
-                del update_data['symbol']
-                
-                rows = db.client.update(
-                    'instruments',
-                    update_data,
-                    "symbol = :symbol",
-                    {'symbol': classification.symbol}
-                )
-                logger.info(f"Updated {classification.symbol} in database ({rows} rows)")
-            else:
-                # Create new instrument
-                db.instruments.create_instrument(db_instrument)
-                logger.info(f"Created {classification.symbol} in database")
-            
-            updated.append(classification.symbol)
-            
-        except Exception as e:
-            logger.error(f"Error updating {classification.symbol}: {e}")
-            errors.append({
-                'symbol': classification.symbol,
-                'error': str(e)
-            })
-    
-    # Prepare response (convert Pydantic models to dicts)
-    return {
-        'tagged': len(classifications),
-        'updated': updated,
-        'errors': errors,
-        'classifications': [
-            {
-                'symbol': c.symbol,
-                'name': c.name,
-                'type': c.instrument_type,
-                'current_price': c.current_price,
-                'asset_class': c.allocation_asset_class.model_dump(),
-                'regions': c.allocation_regions.model_dump(),
-                'sectors': c.allocation_sectors.model_dump()
-            }
-            for c in classifications
+    {
+        "instruments": [
+            {"symbol": "VTI", "name": "Vanguard Total Stock Market ETF"},
+            {"symbol": "BND", "name": "Vanguard Total Bond Market ETF"}
         ]
     }
 
-def lambda_handler(event, context):
-    """
-    Lambda handler for instrument tagging.
+The response body will include the number of instruments tagged, the list of
+symbols successfully updated, any per-symbol errors, and a summary of each
+classification.
+"""
 
-    Expected event format:
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from typing import Any, Dict, List
+
+from agent import classification_to_db_format, tag_instruments
+from observability import observe
+from src import Database
+
+# ============================================================
+# Logging / Database Initialisation
+# ============================================================
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Initialise database client (reused across Lambda invocations)
+db = Database()
+
+
+# ============================================================
+# Core Async Processing Logic
+# ============================================================
+
+
+async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, Any]:
+    """
+    Asynchronously classify and upsert a list of instruments.
+
+    Parameters
+    ----------
+    instruments :
+        List of dictionaries, each containing at least:
+        - ``symbol``: instrument ticker
+        - ``name``: instrument name
+
+    Returns
+    -------
+    Dict[str, Any]
+        Summary of processing, including:
+        - ``tagged``: number of successfully classified instruments
+        - ``updated``: list of symbols that were inserted/updated in the DB
+        - ``errors``: list of per-symbol error details
+        - ``classifications``: serialisable view of the classifications
+    """
+    logger.info("Classifying %d instruments", len(instruments))
+
+    # Run the agent classification for all instruments
+    classifications = await tag_instruments(instruments)
+
+    updated: List[str] = []
+    errors: List[Dict[str, str]] = []
+
+    # Upsert classified instruments into the database
+    for classification in classifications:
+        try:
+            # Convert agent output into InstrumentCreate (DB schema)
+            db_instrument = classification_to_db_format(classification)
+
+            # Check if the instrument already exists
+            existing = db.instruments.find_by_symbol(classification.symbol)
+
+            if existing:
+                # Update existing instrument (symbol is the key, not updated)
+                update_data = db_instrument.model_dump()
+                update_data.pop("symbol", None)
+
+                rows = db.client.update(
+                    "instruments",
+                    update_data,
+                    "symbol = :symbol",
+                    {"symbol": classification.symbol},
+                )
+                logger.info(
+                    "Updated %s in database (%s rows affected)",
+                    classification.symbol,
+                    rows,
+                )
+            else:
+                # Insert new instrument row
+                db.instruments.create_instrument(db_instrument)
+                logger.info("Created %s in database", classification.symbol)
+
+            updated.append(classification.symbol)
+
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Error updating %s: %s", classification.symbol, exc)
+            errors.append(
+                {
+                    "symbol": classification.symbol,
+                    "error": str(exc),
+                }
+            )
+
+    # Prepare a JSON-serialisable view of classifications
+    classification_summary = [
+        {
+            "symbol": c.symbol,
+            "name": c.name,
+            "type": c.instrument_type,
+            "current_price": c.current_price,
+            "asset_class": c.allocation_asset_class.model_dump(),
+            "regions": c.allocation_regions.model_dump(),
+            "sectors": c.allocation_sectors.model_dump(),
+        }
+        for c in classifications
+    ]
+
+    return {
+        "tagged": len(classifications),
+        "updated": updated,
+        "errors": errors,
+        "classifications": classification_summary,
+    }
+
+
+# ============================================================
+# AWS Lambda Entry Point
+# ============================================================
+
+
+def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """
+    AWS Lambda handler for instrument tagging.
+
+    Expected event format
+    ---------------------
     {
         "instruments": [
             {"symbol": "VTI", "name": "Vanguard Total Stock Market ETF"},
             ...
         ]
     }
+
+    Parameters
+    ----------
+    event :
+        Lambda event payload containing an ``instruments`` list.
+    context :
+        Lambda runtime context object (unused but required by AWS).
+
+    Returns
+    -------
+    Dict[str, Any]
+        HTTP-style response with ``statusCode`` and JSON ``body``.
     """
-    # Wrap entire handler with observability context
     with observe():
         try:
-            # Parse the event
-            instruments = event.get('instruments', [])
+            instruments = event.get("instruments", [])
 
             if not instruments:
+                logger.warning("No instruments provided in event payload")
                 return {
-                    'statusCode': 400,
-                    'body': json.dumps({'error': 'No instruments provided'})
+                    "statusCode": 400,
+                    "body": json.dumps({"error": "No instruments provided"}),
                 }
 
-            # Process all instruments in a single async context
+            # Run async processing in a single event loop
             result = asyncio.run(process_instruments(instruments))
 
             return {
-                'statusCode': 200,
-                'body': json.dumps(result)
+                "statusCode": 200,
+                "body": json.dumps(result),
             }
 
-        except Exception as e:
-            logger.error(f"Lambda handler error: {e}")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Lambda handler error: %s", exc)
             return {
-                'statusCode': 500,
-                'body': json.dumps({'error': str(e)})
+                "statusCode": 500,
+                "body": json.dumps({"error": str(exc)}),
             }
