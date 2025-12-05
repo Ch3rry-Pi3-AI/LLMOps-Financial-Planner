@@ -1,180 +1,336 @@
 #!/usr/bin/env python3
 """
-Destroy the Alex Financial Advisor Part 7 infrastructure.
-This script:
-1. Empties the S3 bucket
-2. Destroys infrastructure with Terraform
-3. Cleans up local artifacts
+Alex Financial Planner – Infrastructure Destruction Utility (Part 7).
+
+This script provides a **safe, guided teardown** of the Part 7 deployment:
+
+1. Look up the static site S3 bucket name from Terraform outputs
+2. Empty the S3 bucket (objects + optional versioned objects)
+3. Destroy the Terraform-managed infrastructure:
+   - CloudFront distribution
+   - API Gateway
+   - Lambda function
+   - S3 bucket
+   - IAM roles and policies
+4. Clean local build artefacts (Lambda ZIP, Next.js build folders)
+
+It is intended for **development and test environments** where you want to
+completely remove the deployed stack and start again from a clean slate.
+
+Typical usage
+-------------
+# Interactive destruction (requires typing 'yes' to confirm)
+uv run destroy.py
 """
 
+from __future__ import annotations
+
+import os
 import subprocess
 import sys
-import os
 from pathlib import Path
+from typing import Sequence, Union
+
+import shutil
 
 
-def run_command(cmd, cwd=None, check=True, capture_output=False):
-    """Run a command and optionally capture output."""
-    print(f"Running: {' '.join(cmd) if isinstance(cmd, list) else cmd}")
+# ============================================================
+# 🌍 Project Paths
+# ============================================================
 
-    if capture_output:
-        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, shell=isinstance(cmd, str))
-        if check and result.returncode != 0:
-            print(f"Error: {result.stderr}")
-            return None
-        return result.stdout.strip()
-    else:
-        result = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str))
-        if check and result.returncode != 0:
-            return False
-        return True
+PROJECT_ROOT = Path(__file__).parent.parent
+TERRAFORM_DIR = PROJECT_ROOT / "terraform" / "7_frontend"
+BACKEND_API_DIR = PROJECT_ROOT / "backend" / "api"
+FRONTEND_DIR = PROJECT_ROOT / "frontend"
 
 
-def confirm_destruction():
-    """Ask for confirmation before destroying resources."""
+# ============================================================
+# 🧰 Shell Command Helper
+# ============================================================
+
+def run_command(
+    cmd: Union[Sequence[str], str],
+    cwd: Path | None = None,
+    check: bool = True,
+    capture_output: bool = False,
+) -> str | bool | None:
+    """
+    Run a shell command and optionally capture its output.
+
+    Parameters
+    ----------
+    cmd :
+        Command to execute. Prefer a list of arguments; a string will be run
+        with ``shell=True``.
+    cwd :
+        Optional working directory for the command.
+    check :
+        If ``True``, treat non-zero exit codes as errors and return ``False`` or
+        ``None`` instead of raising.
+    capture_output :
+        If ``True``, capture and return the command's standard output.
+
+    Returns
+    -------
+    str or bool or None
+        - If ``capture_output=True``: the stripped stdout string (or ``None`` on error).
+        - If ``capture_output=False``: ``True`` on success, ``False`` on failure.
+    """
+    printable = " ".join(cmd) if isinstance(cmd, (list, tuple)) else cmd
+    print(f"➡️  Running: {printable}")
+
+    try:
+        if capture_output:
+            result = subprocess.run(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                shell=isinstance(cmd, str),
+            )
+            if check and result.returncode != 0:
+                print(f"❌ Error: {result.stderr}")
+                return None
+            return (result.stdout or "").strip()
+        else:
+            result = subprocess.run(
+                cmd,
+                cwd=cwd,
+                shell=isinstance(cmd, str),
+            )
+            if check and result.returncode != 0:
+                print(f"❌ Command failed with exit code {result.returncode}")
+                return False
+            return True
+    except FileNotFoundError as exc:
+        print(f"❌ Command not found: {exc}")
+        return None
+
+
+# ============================================================
+# ⚠️ Destruction Confirmation
+# ============================================================
+
+def confirm_destruction() -> bool:
+    """
+    Ask the user to confirm destructive teardown.
+
+    Returns
+    -------
+    bool
+        ``True`` if the user explicitly types ``yes`` (case-insensitive),
+        otherwise ``False``.
+    """
     print("⚠️  WARNING: This will destroy all Part 7 infrastructure!")
     print("This includes:")
     print("  - CloudFront distribution")
     print("  - API Gateway")
     print("  - Lambda function")
     print("  - S3 bucket and all contents")
-    print("  - IAM roles and policies")
-    print("")
+    print("  - IAM roles and policies\n")
 
     response = input("Are you sure you want to continue? Type 'yes' to confirm: ")
-    return response.lower() == 'yes'
+    return response.lower().strip() == "yes"
 
 
-def get_bucket_name():
-    """Get the S3 bucket name from Terraform output."""
-    terraform_dir = Path(__file__).parent.parent / "terraform" / "7_frontend"
+# ============================================================
+# 🪣 S3 Bucket Handling
+# ============================================================
 
-    if not terraform_dir.exists():
-        print(f"  ❌ Terraform directory not found: {terraform_dir}")
+def get_bucket_name() -> str | None:
+    """
+    Retrieve the S3 bucket name from Terraform outputs.
+
+    Returns
+    -------
+    str or None
+        The S3 bucket name if available, otherwise ``None``.
+    """
+    if not TERRAFORM_DIR.exists():
+        print(f"  ❌ Terraform directory not found: {TERRAFORM_DIR}")
         return None
 
-    # Get the bucket name from Terraform
     bucket_output = run_command(
         ["terraform", "output", "-raw", "s3_bucket_name"],
-        cwd=terraform_dir,
-        capture_output=True
+        cwd=TERRAFORM_DIR,
+        capture_output=True,
     )
 
-    return bucket_output if bucket_output else None
+    if not bucket_output:
+        print("  ⚠️  Could not read 's3_bucket_name' from Terraform outputs")
+        return None
+
+    return bucket_output
 
 
-def empty_s3_bucket(bucket_name):
-    """Empty the S3 bucket before deletion."""
+def empty_s3_bucket(bucket_name: str | None) -> None:
+    """
+    Empty the S3 bucket (objects and, where possible, versioned objects).
+
+    Parameters
+    ----------
+    bucket_name :
+        Name of the S3 bucket to empty. If ``None``, the function is a no-op.
+    """
     if not bucket_name:
-        print("  ⚠️  No bucket name provided, skipping...")
+        print("  ⚠️  No bucket name provided, skipping S3 empty step...")
         return
 
     print(f"\n🗑️  Emptying S3 bucket: {bucket_name}")
 
-    # Check if bucket exists
+    # Check if the bucket exists / is accessible
     exists = run_command(
         ["aws", "s3", "ls", f"s3://{bucket_name}"],
         capture_output=True,
-        check=False
+        check=False,
     )
 
     if not exists:
-        print(f"  Bucket {bucket_name} doesn't exist or is already empty")
+        print(f"  ℹ️ Bucket {bucket_name} doesn't exist or is already empty/unreachable")
         return
 
     # Delete all objects
-    print(f"  Deleting all objects from {bucket_name}...")
-    run_command([
-        "aws", "s3", "rm",
-        f"s3://{bucket_name}/",
-        "--recursive"
-    ])
+    print(f"  🔨 Deleting all objects from {bucket_name}...")
+    run_command(
+        [
+            "aws",
+            "s3",
+            "rm",
+            f"s3://{bucket_name}/",
+            "--recursive",
+        ]
+    )
 
-    # Delete all versions (if versioning is enabled)
-    print(f"  Deleting all object versions...")
-    run_command([
-        "aws", "s3api", "delete-objects",
-        "--bucket", bucket_name,
-        "--delete", "$(aws s3api list-object-versions --bucket " + bucket_name + " --output json --query='{Objects: Versions[].{Key:Key,VersionId:VersionId}}')"
-    ], check=False)
+    # Attempt to delete all versions (if versioning is enabled)
+    # Note: This relies on the original shell-based pattern and may be a no-op
+    # in some environments; errors are ignored.
+    print("  🔨 Deleting all object versions (if versioning is enabled)...")
+    run_command(
+        [
+            "aws",
+            "s3api",
+            "delete-objects",
+            "--bucket",
+            bucket_name,
+            "--delete",
+            "$(aws s3api list-object-versions --bucket "
+            + bucket_name
+            + " --output json --query='{Objects: Versions[].{Key:Key,VersionId:VersionId}}')",
+        ],
+        check=False,
+    )
 
-    print(f"  ✅ Bucket {bucket_name} emptied")
+    print(f"  ✅ Bucket {bucket_name} emptied (or already clean)")
 
 
-def destroy_terraform():
-    """Destroy infrastructure with Terraform."""
+# ============================================================
+# 🏗️ Terraform Destruction
+# ============================================================
+
+def destroy_terraform() -> bool:
+    """
+    Run ``terraform destroy`` to tear down the infrastructure.
+
+    Returns
+    -------
+    bool
+        ``True`` if the destroy command completed successfully, otherwise ``False``.
+    """
     print("\n🏗️  Destroying infrastructure with Terraform...")
 
-    terraform_dir = Path(__file__).parent.parent / "terraform" / "7_frontend"
-
-    if not terraform_dir.exists():
-        print(f"  ❌ Terraform directory not found: {terraform_dir}")
+    if not TERRAFORM_DIR.exists():
+        print(f"  ❌ Terraform directory not found: {TERRAFORM_DIR}")
         return False
 
-    # Check if Terraform is initialized
-    if not (terraform_dir / ".terraform").exists():
-        print("  ⚠️  Terraform not initialized, nothing to destroy")
+    # If Terraform has never been initialised, there is nothing to destroy
+    if not (TERRAFORM_DIR / ".terraform").exists():
+        print("  ⚠️  Terraform not initialised; no remote state to destroy")
         return True
 
-    # Destroy the infrastructure
-    print("  Running terraform destroy...")
-    print("  Type 'yes' when prompted to confirm destruction.")
+    print("  Running 'terraform destroy'...")
+    print("  👉 You will be prompted by Terraform to confirm destruction.")
 
-    success = run_command(["terraform", "destroy"], cwd=terraform_dir)
+    success = run_command(["terraform", "destroy"], cwd=TERRAFORM_DIR)
 
     if success:
         print("  ✅ Infrastructure destroyed successfully")
     else:
         print("  ❌ Failed to destroy infrastructure")
-        print("  You may need to manually clean up resources in AWS Console")
+        print("  You may need to manually clean up resources in the AWS Console")
 
-    return success
+    return bool(success)
 
 
-def clean_local_artifacts():
-    """Clean up local build artifacts."""
-    print("\n🧹 Cleaning up local artifacts...")
+# ============================================================
+# 🧹 Local Artefact Cleanup
+# ============================================================
 
-    artifacts = [
-        Path(__file__).parent.parent / "backend" / "api" / "api_lambda.zip",
-        Path(__file__).parent.parent / "frontend" / "out",
-        Path(__file__).parent.parent / "frontend" / ".next",
+def clean_local_artifacts() -> None:
+    """
+    Remove local build artefacts for a clean working tree.
+
+    Specifically removes:
+    - ``backend/api/api_lambda.zip``
+    - ``frontend/out`` (static export)
+    - ``frontend/.next`` (Next.js build cache)
+    """
+    print("\n🧹 Cleaning up local artefacts...")
+
+    artefacts = [
+        BACKEND_API_DIR / "api_lambda.zip",
+        FRONTEND_DIR / "out",
+        FRONTEND_DIR / ".next",
     ]
 
-    for artifact in artifacts:
-        if artifact.exists():
-            if artifact.is_file():
-                artifact.unlink()
-                print(f"  Deleted: {artifact}")
-            else:
-                import shutil
-                shutil.rmtree(artifact)
-                print(f"  Deleted directory: {artifact}")
+    for path in artefacts:
+        if not path.exists():
+            continue
 
-    print("  ✅ Local artifacts cleaned")
+        if path.is_file():
+            path.unlink()
+            print(f"  🗑️ Deleted file: {path}")
+        else:
+            shutil.rmtree(path)
+            print(f"  🗑️ Deleted directory: {path}")
+
+    print("  ✅ Local artefacts cleaned")
 
 
-def main():
-    """Main destruction function."""
-    print("💥 Alex Financial Advisor - Part 7 Infrastructure Destruction")
+# ============================================================
+# 🚀 CLI Entry Point
+# ============================================================
+
+def main() -> None:
+    """
+    Command-line entry point for the destruction workflow.
+
+    Steps
+    -----
+    1. Prompt the user for explicit confirmation
+    2. Fetch the S3 bucket name from Terraform outputs
+    3. Empty the S3 bucket (objects + versions, where possible)
+    4. Run ``terraform destroy`` to tear down infrastructure
+    5. Clean local build artefacts
+    """
+    print("💥 Alex Financial Advisor – Part 7 Infrastructure Destruction")
     print("=" * 60)
 
-    # Confirm destruction
+    # 1) Confirm destructive action
     if not confirm_destruction():
         print("\n❌ Destruction cancelled")
         sys.exit(0)
 
-    # Get bucket name before destroying infrastructure
+    # 2) Get bucket name (before destroying Terraform state)
     bucket_name = get_bucket_name()
 
-    # Empty S3 bucket first (required before Terraform can delete it)
+    # 3) Empty S3 bucket (required before Terraform can delete it cleanly)
     if bucket_name:
         empty_s3_bucket(bucket_name)
 
-    # Destroy Terraform infrastructure
+    # 4) Destroy Terraform-managed resources
     destroy_terraform()
 
-    # Clean local artifacts
+    # 5) Remove local artefacts
     clean_local_artifacts()
 
     print("\n" + "=" * 60)
