@@ -139,7 +139,7 @@ celerybeat.pid
 .envrc
 .env.backup
 .env.*
-!.env.example
+.env.example
 
 # Terraform variables (contain secrets)
 *.tfvars
