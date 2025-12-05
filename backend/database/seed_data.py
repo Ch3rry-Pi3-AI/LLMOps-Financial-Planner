@@ -1,21 +1,42 @@
 #!/usr/bin/env python3
 """
-Seed data for Alex Financial Planner
-Loads 20+ popular ETF instruments with allocation data
+Seed data for the Alex Financial Planner database.
+
+This module populates the `instruments` table in the Aurora PostgreSQL database
+with a curated set of ETF instruments and their allocation metadata.
+
+Key behaviour:
+    * Validates each instrument using `InstrumentCreate` (Pydantic)
+    * Inserts or updates rows via the RDS Data API (idempotent upsert)
+    * Verifies final row count and prints a small sample of instruments
+
+Required environment variables:
+    AURORA_CLUSTER_ARN   – ARN of the Aurora Serverless cluster
+    AURORA_SECRET_ARN    – ARN of the Secrets Manager entry for the DB user
+    AURORA_DATABASE      – Database name (default: "alex")
+    DEFAULT_AWS_REGION   – AWS region for RDS Data API (default: "us-east-1")
+
+Typical usage:
+    uv run backend/database/seed_data.py
 """
 
 import os
 import json
+
 import boto3
 from botocore.exceptions import ClientError
-from src.schemas import InstrumentCreate
-from pydantic import ValidationError
 from dotenv import load_dotenv
+from pydantic import ValidationError
 
-# Load environment variables
+from src.schemas import InstrumentCreate
+
+# Load environment variables from .env if present
 load_dotenv(override=True)
 
-# Get config from environment
+# ---------------------------------------------------------------------------
+# Configuration and RDS Data API client
+# ---------------------------------------------------------------------------
+
 cluster_arn = os.environ.get("AURORA_CLUSTER_ARN")
 secret_arn = os.environ.get("AURORA_SECRET_ARN")
 database = os.environ.get("AURORA_DATABASE", "alex")
@@ -23,12 +44,15 @@ region = os.environ.get("DEFAULT_AWS_REGION", "us-east-1")
 
 if not cluster_arn or not secret_arn:
     print("❌ Missing AURORA_CLUSTER_ARN or AURORA_SECRET_ARN in .env file")
-    exit(1)
+    raise SystemExit(1)
 
 client = boto3.client("rds-data", region_name=region)
 
-# Define popular ETF instruments with realistic allocation data
-# All percentages should sum to 100 for each allocation type
+# ---------------------------------------------------------------------------
+# Instrument seed data
+# All allocation percentages are intended to sum to 100 for each allocation type
+# ---------------------------------------------------------------------------
+
 INSTRUMENTS = [
     # Core US Equity
     {
@@ -348,16 +372,23 @@ INSTRUMENTS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
 def insert_instrument(instrument_data):
-    """Insert a single instrument into the database with Pydantic validation"""
-    # Validate with Pydantic first
+    """
+    Insert or update a single instrument in the database.
+
+    The instrument is first validated with Pydantic, then written via the
+    RDS Data API using an ON CONFLICT DO UPDATE statement.
+    """
     try:
         instrument = InstrumentCreate(**instrument_data)
-    except ValidationError as e:
-        print(f"    ❌ Validation error: {e}")
+    except ValidationError as exc:
+        print(f"    ❌ Validation error: {exc}")
         return False
 
-    # Get validated data
     validated = instrument.model_dump()
 
     sql = """
@@ -379,7 +410,7 @@ def insert_instrument(instrument_data):
     """
 
     try:
-        response = client.execute_statement(
+        client.execute_statement(
             resourceArn=cluster_arn,
             secretArn=secret_arn,
             database=database,
@@ -407,32 +438,40 @@ def insert_instrument(instrument_data):
             ],
         )
         return True
-    except ClientError as e:
-        print(f"    ❌ Error: {e.response['Error']['Message'][:100]}")
+
+    except ClientError as exc:
+        print(f"    ❌ Error: {exc.response['Error']['Message'][:100]}")
         return False
 
 
 def verify_allocations(instrument):
-    """Verify instrument using Pydantic validation"""
+    """
+    Verify allocation fields for a single instrument.
+
+    Returns a list of error messages; an empty list indicates success.
+    """
     try:
         InstrumentCreate(**instrument)
-        return []  # No errors
-    except ValidationError as e:
-        # Extract error messages
+        return []
+    except ValidationError as exc:
         errors = []
-        for error in e.errors():
+        for error in exc.errors():
             field = ".".join(str(x) for x in error["loc"])
             msg = error["msg"]
             errors.append(f"{field}: {msg}")
         return errors
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 def main():
     print("🚀 Seeding Instrument Data")
     print("=" * 50)
     print(f"Loading {len(INSTRUMENTS)} instruments...")
 
-    # First verify all allocations
+    # Verify allocations before attempting inserts
     print("\n📊 Verifying allocation data...")
     all_valid = True
     for inst in INSTRUMENTS:
@@ -443,7 +482,7 @@ def main():
 
     if not all_valid:
         print("\n❌ Some instruments have invalid allocations. Please fix before continuing.")
-        exit(1)
+        raise SystemExit(1)
 
     print("  ✅ All allocations valid!")
 
@@ -452,14 +491,12 @@ def main():
     success_count = 0
 
     for inst in INSTRUMENTS:
-        print(
-            f"  [{success_count + 1}/{len(INSTRUMENTS)}] {inst['symbol']}: {inst['name'][:40]}..."
-        )
+        print(f"  [{success_count + 1}/{len(INSTRUMENTS)}] {inst['symbol']}: {inst['name'][:40]}...")
         if insert_instrument(inst):
-            print(f"    ✅ Success")
+            print("    ✅ Success")
             success_count += 1
         else:
-            print(f"    ❌ Failed")
+            print("    ❌ Failed")
 
     print("\n" + "=" * 50)
     print(f"Seeding complete: {success_count}/{len(INSTRUMENTS)} instruments loaded")
@@ -490,8 +527,8 @@ def main():
             name = record[1]["stringValue"]
             print(f"    - {symbol}: {name}")
 
-    except ClientError as e:
-        print(f"  ❌ Error verifying: {e}")
+    except ClientError as exc:
+        print(f"  ❌ Error verifying: {exc}")
 
     print("\n✅ Seed data loaded successfully!")
     print("\n📝 Next steps:")
