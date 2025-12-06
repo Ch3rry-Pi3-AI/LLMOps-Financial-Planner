@@ -1,34 +1,69 @@
+/* ==========================================================================
+   Global Styles – Alex AI Financial Advisor
+   --------------------------------------------------------------------------
+   This file defines:
+   - Tailwind CSS import and theme tokens
+   - Brand colour palette for the entire app
+   - Light-mode global body styles
+   - Reusable animations for AI agent activity and toast notifications
+   ========================================================================== */
+
 @import "tailwindcss";
 
+/* --------------------------------------------------------------------------
+   Root CSS Variables
+   - Base background / foreground colours, used by the theme below.
+   - Keep these neutral so they work across all pages.
+   -------------------------------------------------------------------------- */
 :root {
   --background: #ffffff;
   --foreground: #171717;
 }
 
+/* --------------------------------------------------------------------------
+   Tailwind Theme Tokens (@theme inline)
+   - Expose app-specific colours and fonts as design tokens.
+   - These are consumed via Tailwind's design system.
+   -------------------------------------------------------------------------- */
 @theme inline {
-  /* Custom colors for Alex Financial Advisor */
-  --color-primary: #209DD7;        /* Primary blue */
-  --color-ai-accent: #753991;      /* Purple for AI/agent features */
-  --color-accent: #FFB707;         /* Yellow/gold accent */
-  --color-dark: #062147;           /* Dark navy */
-  --color-success: #10b981;        /* Green for positive */
-  --color-error: #ef4444;          /* Red for errors */
+  /* Brand colour palette for Alex AI Financial Advisor */
+  --color-primary: #209DD7;        /* Main primary blue for key actions / highlights */
+  --color-ai-accent: #753991;      /* Purple accent used for AI / agent-related elements */
+  --color-accent: #FFB707;         /* Yellow / gold accent for callouts and KPIs */
+  --color-dark: #062147;           /* Dark navy for headings, navbars, and footers */
+  --color-success: #10b981;        /* Green for success states and positive metrics */
+  --color-error: #ef4444;          /* Red for error states and destructive actions */
   
-  /* Preserve defaults */
+  /* Preserve / forward base tokens into the Tailwind theme */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-geist-sans);   /* Main UI font */
+  --font-mono: var(--font-geist-mono);   /* Code / numeric font */
 }
 
-/* Light mode only - no dark mode for enterprise look */
+/* --------------------------------------------------------------------------
+   Global Body Styles
+   - Light mode only, by design, for a clean enterprise dashboard feel.
+   - No dark mode toggling or colour scheme switching here.
+   -------------------------------------------------------------------------- */
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: system-ui, -apple-system, sans-serif;
 }
 
-/* Stronger pulsing animation for agent activity */
+/* ==========================================================================
+   Animations
+   - Reusable animation utilities applied via utility classes:
+     .animate-strong-pulse, .animate-glow-pulse, .animate-slide-in
+   - These are referenced throughout the app (e.g. advisor team, toasts).
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   strong-pulse
+   - Subtle scale + opacity animation for "alive / working" indicators.
+   - Used for animated dots, icons, and agent cards.
+   -------------------------------------------------------------------------- */
 @keyframes strong-pulse {
   0%, 100% {
     opacity: 1;
@@ -40,38 +75,51 @@ body {
   }
 }
 
+/* Utility class: attach strong-pulse animation to any element */
 .animate-strong-pulse {
   animation: strong-pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
-/* Even stronger glow pulse for active agents */
+/* --------------------------------------------------------------------------
+   glow-pulse
+   - Stronger visual emphasis with a purple glow.
+   - Ideal for highlighting the currently active AI agent or card.
+   -------------------------------------------------------------------------- */
 @keyframes glow-pulse {
   0%, 100% {
     opacity: 1;
-    box-shadow: 0 0 20px rgba(117, 57, 145, 0.5), 0 0 40px rgba(117, 57, 145, 0.3);
+    box-shadow: 0 0 20px rgba(117, 57, 145, 0.5),
+                0 0 40px rgba(117, 57, 145, 0.3);
   }
   50% {
     opacity: 0.7;
-    box-shadow: 0 0 30px rgba(117, 57, 145, 0.8), 0 0 60px rgba(117, 57, 145, 0.5);
+    box-shadow: 0 0 30px rgba(117, 57, 145, 0.8),
+                0 0 60px rgba(117, 57, 145, 0.5);
   }
 }
 
+/* Utility class: apply glow-pulse to emphasise active/important elements */
 .animate-glow-pulse {
   animation: glow-pulse 1.5s ease-in-out infinite;
 }
 
-/* Toast slide-in animation */
+/* --------------------------------------------------------------------------
+   slide-in
+   - Horizontal entrance animation used for toast notifications.
+   - Slides from the right while fading in.
+   -------------------------------------------------------------------------- */
 @keyframes slide-in {
   from {
-    transform: translateX(100%);
+    transform: translateX(100%);  /* Start off-screen to the right */
     opacity: 0;
   }
   to {
-    transform: translateX(0);
+    transform: translateX(0);     /* Settle into final position */
     opacity: 1;
   }
 }
 
+/* Utility class: use on toast containers / panels that should slide in */
 .animate-slide-in {
   animation: slide-in 0.3s ease-out;
 }
