@@ -1,226 +1,263 @@
-# 🛡️ **Part 1 — AWS Permissions Setup**
+# 🧩 **Part 2 — SageMaker Serverless Deployment**
 
-Welcome to **Project Alex — the Agentic Learning Equities eXplainer!**
+This branch deploys the **SageMaker Embedding Endpoint** used throughout Project Alex.
+The endpoint is responsible for converting raw text into **vector embeddings**, forming the foundation for:
 
-This branch configures the foundational **AWS IAM permissions** required for the Alex system. Before deploying AI agents, embeddings, ingestion pipelines, or App Runner services, we must ensure that our IAM user has the correct, minimal, and secure permissions.
+* Document ingestion
+* Semantic search
+* Portfolio analysis
+* Research insights
+* Question–answering workflows
 
-Alex is an AI-powered personal financial planner designed to help users:
+This deployment uses **SageMaker Serverless**, allowing industry-grade scalability while keeping operational costs minimal.
 
-* Understand their investment portfolios
-* Plan for retirement
-* Receive personalised financial guidance
-* Track market opportunities and market trends
+This branch builds directly upon the IAM configuration completed in Part 1.
 
-This branch prepares all IAM access needed across the lifecycle of the project.
+## 🧠 **What This Branch Provides**
 
+By completing this branch, you will have:
 
+* A fully deployed **HuggingFace-based embedding model** in SageMaker
+* A **serverless** endpoint that scales automatically
+* Terraform-managed infrastructure for reproducibility
+* A working embedding test flow via AWS CLI (Linux/macOS and Windows)
+* Clear troubleshooting steps and validation commands
 
-## 🧠 **What Is Alex?**
-
-Alex is a fully agentic system built on AWS that performs:
-
-* AI research and market analysis
-* Document ingestion and embedding
-* Portfolio understanding and tagging
-* Retirement forecasting
-* Interactive Q&A with financial logic
-
-Each later branch builds a core subsystem of Alex. Permissions created in *this* branch allow those subsystems to function safely.
-
-
+This component becomes the core “vector engine” consumed by later branches, including ingestion, tagging, research, and chart generation agents.
 
 ## 🏗️ **Architecture Overview**
 
-Below is the high-level system architecture that will evolve across all guides:
+The embedding component fits into the full Alex architecture as follows:
 
 ```mermaid
 graph TB
-    User[User] -->|Research| AR[App Runner<br/>AI Researcher]
-    Schedule[EventBridge<br/>Every 2 Hours] -->|Trigger| SchedLambda[Lambda<br/>Scheduler]
-    SchedLambda -->|Call| AR
-    AR -->|Generate| Bedrock[AWS Bedrock<br/>OSS 120B Model]
-    AR -->|Store| Lambda[Lambda<br/>Ingest]
-    Lambda -->|Embed| SM[SageMaker<br/>Embeddings]
-    Lambda -->|Index| S3V[(S3 Vectors<br/>90% Cheaper!)]
-    User -->|Search| S3V
-
-    style AR fill:#FF9900
-    style S3V fill:#90EE90
-    style SM fill:#10B981
-    style Schedule fill:#9333EA
-    style SchedLambda fill:#FF9900
-    style Bedrock fill:#FF9900
+    Docs[Documents & Inputs] --> IngestLambda[Lambda<br/>Ingest Pipeline]
+    IngestLambda --> SM[SageMaker<br/>Embedding Endpoint]
+    SM --> S3V[(S3 Vectors)]
+    User --> Query[User Query / Research]
+    Query --> Researcher[App Runner<br/>AI Researcher]
+    Researcher --> SM
 ```
 
-See **architecture.md** for a full technical breakdown.
-
-
+The model used is `sentence-transformers/all-MiniLM-L6-v2`, automatically loaded by SageMaker’s HuggingFace container.
 
 ## 🌿 **About This Branch**
 
-This branch focuses solely on:
+This branch focuses specifically on:
 
-* Creating a dedicated IAM group for Alex
-* Adding the correct AWS-managed policies
-* Adding a custom policy for the new **S3 Vectors** service
-* Ensuring your IAM user (`aiengineer`) inherits these capabilities
-* Confirming successful setup through AWS CLI tests
+* Creating the SageMaker model configuration
+* Configuring the serverless inference endpoint
+* Managing IAM role assignment for SageMaker (via Terraform)
+* Testing the endpoint with a real embedding request
+* Providing OS-specific invoke commands (Linux/macOS + Windows)
 
-These permissions will support the upcoming components, including SageMaker embeddings, Bedrock calls, Lambda execution, and EventBridge-based scheduling.
-
-
+No model packaging is required — SageMaker automatically downloads the model from HuggingFace.
 
 ## 📦 **Prerequisites**
 
 Before starting, ensure you have:
 
-* An AWS account with **root user** access
-* **AWS CLI** installed and configured
-* Your **IAM user** (`aiengineer`) already created
-* **Terraform** version 1.5+
-* Basic AWS familiarity
+* IAM configuration from **Part 1** completed
+* Terraform **1.5+** installed
+* AWS CLI configured for your IAM user
+* `.env` file created with
 
+  ```
+  AWS_ACCOUNT_ID=xxxx
+  DEFAULT_AWS_REGION=us-east-1
+  ```
 
+# 🪜 **Step 1 — Configure Terraform for SageMaker**
 
-# 🪪 **Step 1 — Setting Up IAM Permissions**
-
-### **1.1 Sign in as the Root User**
-
-1. Visit: [https://aws.amazon.com/console](https://aws.amazon.com/console)
-2. Choose **Root user**
-3. Enter your email + password
-4. Proceed to the console
-
-⚠️ *Root access is used only for IAM setup. All future operations must be done using your IAM user.*
-
-
-
-### **1.2 Create the S3 Vectors Permission Policy**
-
-S3 Vectors is a new 2025-era AWS service, so we must manually create a policy:
-
-1. Open **IAM → Policies**
-2. Click **Create policy**
-3. Switch to the **JSON** tab
-4. Paste the following:
-
-```json
-{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Effect": "Allow",
-            "Action": [
-                "s3vectors:*"
-            ],
-            "Resource": "*"
-        }
-    ]
-}
-```
-
-5. Continue → Name it **AlexS3VectorsAccess**
-6. Add description: *Full access to S3 Vectors for Alex project*
-7. Create the policy
-
-
-
-### **1.3 Create the `AlexAccess` IAM Group**
-
-1. Navigate to **IAM → User groups**
-2. Click **Create group**
-3. Name it: `AlexAccess`
-4. Attach these policies:
-
-| Required Policy                | Purpose                            |
-| ------------------------------ | ---------------------------------- |
-| **AmazonSageMakerFullAccess**  | For embedding endpoints            |
-| **AmazonBedrockFullAccess**    | For LLM inference                  |
-| **CloudWatchEventsFullAccess** | Required for EventBridge scheduler |
-| **AlexS3VectorsAccess**        | Custom S3 Vectors integration      |
-
-Other permissions (Lambda, S3, CloudWatch, API Gateway) come from earlier global groups.
-
-5. Create the group
-
-
-
-### **1.4 Add the Group to Your IAM User**
-
-1. Go to **IAM → Users**
-2. Select your user: **`aiengineer`**
-3. Open **Groups** tab
-4. Click **Add user to groups**
-5. Select **AlexAccess**
-6. Save
-
-
-
-### **1.5 Sign Out and Back In**
-
-Sign out from root, then sign back in using:
-
-* Account ID or alias
-* Username: `aiengineer`
-* Your IAM password
-
-This refreshes policy evaluation.
-
-
-
-### **1.6 Verify Permissions via AWS CLI**
-
-Run:
+### **1.1 Navigate to the correct directory**
 
 ```bash
-aws sts get-caller-identity
+cd terraform/2_sagemaker
 ```
 
-You should see an IAM user ARN.
-
-Then test SageMaker access:
+### **1.2 Create your variables file**
 
 ```bash
-aws sagemaker list-endpoints
+cp terraform.tfvars.example terraform.tfvars
 ```
 
-If the result is empty **but not an error**, permissions are correct.
+Then edit `terraform.tfvars`:
 
+```hcl
+aws_region = "us-east-1"
+```
 
+This value **must** match `DEFAULT_AWS_REGION` in your `.env` file.
 
-# 🧰 **Step 3 — Initial Project Setup**
+# 🛠️ **Step 2 — Deploy the SageMaker Endpoint**
 
-### **Create Your `.env` File**
-
-In the project root:
+### **2.1 Initialise Terraform**
 
 ```bash
-cd alex
-aws sts get-caller-identity --query Account --output text
+terraform init
 ```
 
-Create `.env`:
+### **2.2 Deploy**
 
-```text
-AWS_ACCOUNT_ID=123456789012
-DEFAULT_AWS_REGION=us-east-1
+```bash
+terraform apply
 ```
 
-More entries will be added in later branches.
+Confirm with `yes` when prompted.
 
+Terraform will create:
 
+* SageMaker execution IAM role
+* SageMaker model referencing the HuggingFace container
+* Serverless endpoint (`alex-embedding-endpoint`)
+* Appropriate IAM propagation delays to avoid SageMaker race conditions
 
-## 🚀 **Next Steps**
+Once complete, Terraform will output the endpoint name and ARN.
 
-You now have:
+# 🗂️ **Step 3 — Save Your Configuration**
 
-* Root-level IAM configuration complete
-* Custom S3 Vectors policy created
-* AlexAccess group assigned
-* IAM user access verified
-* Your environment file initialised
+From Terraform outputs, note the endpoint name:
 
-Continue to the next branch:
-👉 **AWS SageMaker — Serverless Embeddings Endpoint**
+```
+alex-embedding-endpoint
+```
 
-This will power Alex’s ability to understand text, documents, financial statements, and research inputs.
+Add it to your `.env` file:
+
+```
+SAGEMAKER_ENDPOINT=alex-embedding-endpoint
+```
+
+You may also review outputs at any time:
+
+```bash
+terraform output
+```
+
+# 🔍 **Step 4 — Test the Embedding Endpoint**
+
+Testing is performed using `vectorize_me.json` in the backend directory.
+
+### **4.1 Navigate to backend folder**
+
+```bash
+cd ../../backend
+```
+
+### **4.2 Linux and macOS Invocation**
+
+```bash
+aws sagemaker-runtime invoke-endpoint \
+  --endpoint-name alex-embedding-endpoint \
+  --content-type application/json \
+  --body fileb://vectorize_me.json \
+  --output json \
+  /dev/stdout
+```
+
+### **4.3 Windows PowerShell Invocation (Correct Method)**
+
+Because PowerShell does not support `/dev/stdout`, you must use an output file:
+
+```powershell
+aws sagemaker-runtime invoke-endpoint `
+  --region us-east-1 `
+  --endpoint-name alex-embedding-endpoint `
+  --content-type application/json `
+  --body fileb://vectorize_me.json `
+  output.json
+```
+
+View the results:
+
+```powershell
+Get-Content .\output.json
+```
+
+A successful response shows a JSON array of **384 floating-point values**, representing the embedding.
+
+# 🧪 **Step 5 — Validate Deployment**
+
+### Check endpoint status
+
+```bash
+aws sagemaker describe-endpoint --endpoint-name alex-embedding-endpoint --region us-east-1
+```
+
+Expected:
+
+```
+"EndpointStatus": "InService"
+```
+
+### View CloudWatch logs
+
+```bash
+aws logs tail /aws/sagemaker/Endpoints/alex-embedding-endpoint --follow --region us-east-1
+```
+
+### Verify model configuration
+
+```bash
+aws sagemaker describe-model \
+  --model-name alex-embedding-model \
+  --query 'PrimaryContainer.Environment' \
+  --region us-east-1
+```
+
+Expected environment variables:
+
+```
+HF_MODEL_ID = sentence-transformers/all-MiniLM-L6-v2
+HF_TASK = feature-extraction
+```
+
+# 🧹 **Troubleshooting**
+
+### **Endpoint Not Found**
+
+Cause: AWS CLI using the wrong region.
+Solution: Add `--region us-east-1` or update:
+
+```powershell
+aws configure set region us-east-1
+```
+
+### **Endpoint Already Exists**
+
+If Terraform was interrupted:
+
+Import existing endpoint:
+
+```bash
+terraform import aws_sagemaker_endpoint.embedding_endpoint alex-embedding-endpoint
+terraform apply
+```
+
+Or delete and recreate:
+
+```bash
+aws sagemaker delete-endpoint --endpoint-name alex-embedding-endpoint --region us-east-1
+terraform apply
+```
+
+### **IAM Role Propagation Errors**
+
+If endpoint creation fails on the first apply:
+
+1. `terraform destroy`
+2. Wait 30 seconds
+3. `terraform apply`
+
+SageMaker requires propagation delay before role reuse.
+
+# 🚀 **Next Steps**
+
+With the embedding endpoint now deployed, the next branch will:
+
+* Create **S3 Vector Storage**
+* Build the **Ingestion Lambda**
+* Connect Lambda → SageMaker → S3 Vectors using Terraform
+* Begin populating Alex’s knowledge base
+
+Your embedding engine is now live and ready for integration into the wider Alex system.
