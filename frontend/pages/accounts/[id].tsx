@@ -1,3 +1,18 @@
+/**
+ * Account Detail Page
+ *
+ * This page renders the full detail view for a single investment account.
+ * It:
+ *  - Loads a specific account (by URL param `id`) plus its positions from the API
+ *  - Loads instrument metadata to power symbol autocomplete when adding positions
+ *  - Allows inline editing of:
+ *      - Account name, purpose, and cash balance
+ *      - Position quantities (with validation)
+ *  - Supports creating and deleting positions via modal + confirmation flows
+ *  - Shows a summary panel (cash, positions value, total value, count of positions)
+ *  - Uses Clerk's `getToken` to authenticate all API calls
+ */
+
 import { useAuth } from "@clerk/nextjs";
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/router";
@@ -27,103 +42,138 @@ interface Account {
   positions?: Position[];
 }
 
+/**
+ * AccountDetail
+ *
+ * Main container component for viewing and managing a single account:
+ *  - Fetches account, positions and instruments on mount
+ *  - Handles local edit state for account and positions
+ *  - Provides modals for adding a new position and confirming deletions
+ */
 export default function AccountDetail() {
   const { getToken } = useAuth();
   const router = useRouter();
   const { id } = router.query;
+
+  // Core data state
   const [account, setAccount] = useState<Account | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
   const [instruments, setInstruments] = useState<Instrument[]>([]);
+
+  // UI / status state
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+  const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  // Account edit state
   const [editingAccount, setEditingAccount] = useState(false);
-  const [editedAccount, setEditedAccount] = useState({ name: '', purpose: '', cash_balance: '' });
+  const [editedAccount, setEditedAccount] = useState({ name: "", purpose: "", cash_balance: "" });
+
+  // Position edit state
   const [editingPosition, setEditingPosition] = useState<string | null>(null);
-  const [editedQuantity, setEditedQuantity] = useState('');
+  const [editedQuantity, setEditedQuantity] = useState("");
+
+  // Add-position modal state
   const [showAddPosition, setShowAddPosition] = useState(false);
-  const [newPosition, setNewPosition] = useState({ symbol: '', quantity: '' });
-  const [searchTerm, setSearchTerm] = useState('');
+  const [newPosition, setNewPosition] = useState({ symbol: "", quantity: "" });
+
+  // Symbol autocomplete state
+  const [searchTerm, setSearchTerm] = useState("");
   const [showSymbolSuggestions, setShowSymbolSuggestions] = useState(false);
+
+  // Delete-position confirmation modal state
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
     positionId: string;
     symbol: string;
-  }>({ isOpen: false, positionId: '', symbol: '' });
+  }>({ isOpen: false, positionId: "", symbol: "" });
 
-  const loadAccount = useCallback(async () => {
-    if (!id) return;
+  /**
+   * loadAccount
+   *
+   * Fetches:
+   *  - All accounts, then finds the one matching the route `id`
+   *  - Positions for the active account
+   *  - Instrument catalogue for symbol autocomplete
+   * Populates local state for account, positions and instruments.
+   */
+  const loadAccount = useCallback(
+    async () => {
+      if (!id) return;
 
-    try {
-      const token = await getToken();
+      try {
+        const token = await getToken();
 
-      // Load account details
-      const accountResponse = await fetch(`${API_URL}/api/accounts`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
-
-      if (accountResponse.ok) {
-        const accounts = await accountResponse.json();
-        const foundAccount = accounts.find((acc: Account) => acc.id === id);
-
-        if (foundAccount) {
-          setAccount(foundAccount);
-          setEditedAccount({
-            name: foundAccount.account_name,
-            purpose: foundAccount.account_purpose,
-            cash_balance: Number(foundAccount.cash_balance).toLocaleString('en-US'),
-          });
-        } else {
-          setMessage({ type: 'error', text: 'Account not found' });
-          setTimeout(() => router.push('/accounts'), 2000);
-          return;
-        }
-      }
-
-      // Load positions
-      const positionsResponse = await fetch(
-        `${API_URL}/api/accounts/${id}/positions`,
-        {
+        // Load account details (then select the one matching `id`)
+        const accountResponse = await fetch(`${API_URL}/api/accounts`, {
           headers: {
-            'Authorization': `Bearer ${token}`,
+            Authorization: `Bearer ${token}`,
           },
+        });
+
+        if (accountResponse.ok) {
+          const accounts = await accountResponse.json();
+          const foundAccount = accounts.find((acc: Account) => acc.id === id);
+
+          if (foundAccount) {
+            setAccount(foundAccount);
+            setEditedAccount({
+              name: foundAccount.account_name,
+              purpose: foundAccount.account_purpose,
+              cash_balance: Number(foundAccount.cash_balance).toLocaleString("en-US"),
+            });
+          } else {
+            setMessage({ type: "error", text: "Account not found" });
+            setTimeout(() => router.push("/accounts"), 2000);
+            return;
+          }
         }
-      );
 
-      if (positionsResponse.ok) {
-        const data = await positionsResponse.json();
-        setPositions(data.positions || []);
-      }
+        // Load positions for this account
+        const positionsResponse = await fetch(
+          `${API_URL}/api/accounts/${id}/positions`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
+        );
 
-      // Load instruments for autocomplete
-      const instrumentsResponse = await fetch(
-        `${API_URL}/api/instruments`,
-        {
+        if (positionsResponse.ok) {
+          const data = await positionsResponse.json();
+          setPositions(data.positions || []);
+        }
+
+        // Load instruments catalogue for autocomplete
+        const instrumentsResponse = await fetch(`${API_URL}/api/instruments`, {
           headers: {
-            'Authorization': `Bearer ${token}`,
+            Authorization: `Bearer ${token}`,
           },
+        });
+
+        if (instrumentsResponse.ok) {
+          const instrumentsData = await instrumentsResponse.json();
+          setInstruments(instrumentsData);
         }
-      );
-
-      if (instrumentsResponse.ok) {
-        const instrumentsData = await instrumentsResponse.json();
-        setInstruments(instrumentsData);
+      } catch (error) {
+        console.error("Error loading account:", error);
+        setMessage({ type: "error", text: "Failed to load account details" });
+      } finally {
+        setLoading(false);
       }
+    },
+    [id, getToken, router]
+  );
 
-    } catch (error) {
-      console.error('Error loading account:', error);
-      setMessage({ type: 'error', text: 'Failed to load account details' });
-    } finally {
-      setLoading(false);
-    }
-  }, [id, getToken, router]);
-
+  // Load account + related data on mount / when `id` changes
   useEffect(() => {
     loadAccount();
   }, [loadAccount]);
 
+  /**
+   * Save updated account metadata (name, purpose, cash balance)
+   * to the backend and refresh the local account state.
+   */
   const handleSaveAccount = async () => {
     setSaving(true);
     setMessage(null);
@@ -131,15 +181,15 @@ export default function AccountDetail() {
     try {
       const token = await getToken();
       const response = await fetch(`${API_URL}/api/accounts/${id}`, {
-        method: 'PUT',
+        method: "PUT",
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
           account_name: editedAccount.name,
           account_purpose: editedAccount.purpose,
-          cash_balance: parseFloat(editedAccount.cash_balance.replace(/,/g, '')),
+          cash_balance: parseFloat(editedAccount.cash_balance.replace(/,/g, "")),
         }),
       });
 
@@ -147,22 +197,26 @@ export default function AccountDetail() {
         const updatedAccount = await response.json();
         setAccount(updatedAccount);
         setEditingAccount(false);
-        setMessage({ type: 'success', text: 'Account updated successfully' });
+        setMessage({ type: "success", text: "Account updated successfully" });
       } else {
-        setMessage({ type: 'error', text: 'Failed to update account' });
+        setMessage({ type: "error", text: "Failed to update account" });
       }
     } catch (error) {
-      console.error('Error updating account:', error);
-      setMessage({ type: 'error', text: 'Error updating account' });
+      console.error("Error updating account:", error);
+      setMessage({ type: "error", text: "Error updating account" });
     } finally {
       setSaving(false);
     }
   };
 
+  /**
+   * Update a single position's quantity via the positions API,
+   * then reload fresh account data.
+   */
   const handleUpdatePosition = async (positionId: string) => {
     const quantity = parseFloat(editedQuantity);
     if (isNaN(quantity) || quantity < 0) {
-      setMessage({ type: 'error', text: 'Please enter a valid quantity' });
+      setMessage({ type: "error", text: "Please enter a valid quantity" });
       return;
     }
 
@@ -172,10 +226,10 @@ export default function AccountDetail() {
     try {
       const token = await getToken();
       const response = await fetch(`${API_URL}/api/positions/${positionId}`, {
-        method: 'PUT',
+        method: "PUT",
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
           quantity: quantity,
@@ -183,20 +237,23 @@ export default function AccountDetail() {
       });
 
       if (response.ok) {
-        setMessage({ type: 'success', text: 'Position updated successfully' });
+        setMessage({ type: "success", text: "Position updated successfully" });
         setEditingPosition(null);
         await loadAccount();
       } else {
-        setMessage({ type: 'error', text: 'Failed to update position' });
+        setMessage({ type: "error", text: "Failed to update position" });
       }
     } catch (error) {
-      console.error('Error updating position:', error);
-      setMessage({ type: 'error', text: 'Error updating position' });
+      console.error("Error updating position:", error);
+      setMessage({ type: "error", text: "Error updating position" });
     } finally {
       setSaving(false);
     }
   };
 
+  /**
+   * Delete a position from the backend, then reload account data.
+   */
   const handleDeletePosition = async (positionId: string) => {
     setSaving(true);
     setMessage(null);
@@ -204,35 +261,39 @@ export default function AccountDetail() {
     try {
       const token = await getToken();
       const response = await fetch(`${API_URL}/api/positions/${positionId}`, {
-        method: 'DELETE',
+        method: "DELETE",
         headers: {
-          'Authorization': `Bearer ${token}`,
+          Authorization: `Bearer ${token}`,
         },
       });
 
       if (response.ok) {
-        setMessage({ type: 'success', text: 'Position deleted successfully' });
+        setMessage({ type: "success", text: "Position deleted successfully" });
         await loadAccount();
       } else {
-        setMessage({ type: 'error', text: 'Failed to delete position' });
+        setMessage({ type: "error", text: "Failed to delete position" });
       }
     } catch (error) {
-      console.error('Error deleting position:', error);
-      setMessage({ type: 'error', text: 'Error deleting position' });
+      console.error("Error deleting position:", error);
+      setMessage({ type: "error", text: "Error deleting position" });
     } finally {
       setSaving(false);
     }
   };
 
+  /**
+   * Create a new position for this account using the provided
+   * symbol + quantity, with basic validation and success/error feedback.
+   */
   const handleAddPosition = async () => {
     if (!newPosition.symbol.trim() || !newPosition.quantity.trim()) {
-      setMessage({ type: 'error', text: 'Please enter symbol and quantity' });
+      setMessage({ type: "error", text: "Please enter symbol and quantity" });
       return;
     }
 
     const quantity = parseFloat(newPosition.quantity);
     if (isNaN(quantity) || quantity <= 0) {
-      setMessage({ type: 'error', text: 'Please enter a valid quantity' });
+      setMessage({ type: "error", text: "Please enter a valid quantity" });
       return;
     }
 
@@ -242,10 +303,10 @@ export default function AccountDetail() {
     try {
       const token = await getToken();
       const response = await fetch(`${API_URL}/api/positions`, {
-        method: 'POST',
+        method: "POST",
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
           account_id: id,
@@ -255,45 +316,71 @@ export default function AccountDetail() {
       });
 
       if (response.ok) {
-        setMessage({ type: 'success', text: 'Position added successfully' });
+        setMessage({ type: "success", text: "Position added successfully" });
         setShowAddPosition(false);
-        setNewPosition({ symbol: '', quantity: '' });
-        setSearchTerm('');
+        setNewPosition({ symbol: "", quantity: "" });
+        setSearchTerm("");
         await loadAccount();
       } else {
         const error = await response.json();
-        setMessage({ type: 'error', text: error.detail || 'Failed to add position' });
+        setMessage({
+          type: "error",
+          text: error.detail || "Failed to add position",
+        });
       }
     } catch (error) {
-      console.error('Error adding position:', error);
-      setMessage({ type: 'error', text: 'Error adding position' });
+      console.error("Error adding position:", error);
+      setMessage({ type: "error", text: "Error adding position" });
     } finally {
       setSaving(false);
     }
   };
 
+  /**
+   * formatCurrencyInput
+   *
+   * Utility to keep cash input nicely formatted as the user types:
+   *  - Strip non-numeric and non-decimal characters
+   *  - Insert thousands separators into the integer part
+   */
   const formatCurrencyInput = (value: string) => {
-    const cleaned = value.replace(/[^0-9.]/g, '');
-    const parts = cleaned.split('.');
-    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-    return parts.join('.');
+    const cleaned = value.replace(/[^0-9.]/g, "");
+    const parts = cleaned.split(".");
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    return parts.join(".");
   };
 
+  /**
+   * Calculate the total value of all positions using the
+   * latest `quantity * current_price` for each one.
+   */
   const calculatePositionsValue = () => {
     return positions.reduce((sum, position) => {
-      return sum + (Number(position.quantity) * (position.current_price || 0));
+      return sum + Number(position.quantity) * (position.current_price || 0);
     }, 0);
   };
 
+  /**
+   * Calculate the total account value as:
+   *  total = cash_balance + positions_value
+   */
   const calculateTotalValue = () => {
     return (account ? Number(account.cash_balance) : 0) + calculatePositionsValue();
   };
 
-  const filteredInstruments = instruments.filter(inst =>
-    inst.symbol.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    inst.name.toLowerCase().includes(searchTerm.toLowerCase())
-  ).slice(0, 5);
+  /**
+   * Instruments filtered by symbol or name for autocomplete suggestions.
+   * Only the first 5 matches are shown.
+   */
+  const filteredInstruments = instruments
+    .filter(
+      (inst) =>
+        inst.symbol.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        inst.name.toLowerCase().includes(searchTerm.toLowerCase())
+    )
+    .slice(0, 5);
 
+  // Loading state: minimal skeleton card
   if (loading) {
     return (
       <Layout>
@@ -306,6 +393,7 @@ export default function AccountDetail() {
     );
   }
 
+  // Safety check: no account found for the given `id`
   if (!account) {
     return (
       <Layout>
@@ -321,23 +409,34 @@ export default function AccountDetail() {
   return (
     <Layout>
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Breadcrumb */}
+        {/* Breadcrumb back to accounts list */}
         <div className="mb-4">
           <button
-            onClick={() => router.push('/accounts')}
+            onClick={() => router.push("/accounts")}
             className="text-primary hover:text-blue-600 flex items-center gap-1"
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            <svg
+              className="w-4 h-4"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M15 19l-7-7 7-7"
+              />
             </svg>
             Back to Accounts
           </button>
         </div>
 
-        {/* Account Details */}
+        {/* Account Details + summary */}
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <div className="flex justify-between items-start mb-6">
             <div className="flex-1">
+              {/* Editable vs read-only account header */}
               {editingAccount ? (
                 <div className="space-y-4 max-w-md">
                   <div>
@@ -347,10 +446,16 @@ export default function AccountDetail() {
                     <input
                       type="text"
                       value={editedAccount.name}
-                      onChange={(e) => setEditedAccount({ ...editedAccount, name: e.target.value })}
+                      onChange={(e) =>
+                        setEditedAccount({
+                          ...editedAccount,
+                          name: e.target.value,
+                        })
+                      }
                       className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary"
                     />
                   </div>
+
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">
                       Account Purpose
@@ -358,31 +463,45 @@ export default function AccountDetail() {
                     <input
                       type="text"
                       value={editedAccount.purpose}
-                      onChange={(e) => setEditedAccount({ ...editedAccount, purpose: e.target.value })}
+                      onChange={(e) =>
+                        setEditedAccount({
+                          ...editedAccount,
+                          purpose: e.target.value,
+                        })
+                      }
                       className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary"
                     />
                   </div>
+
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">
                       Cash Balance
                     </label>
                     <div className="relative">
-                      <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">$</span>
+                      <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">
+                        $
+                      </span>
                       <input
                         type="text"
                         value={editedAccount.cash_balance}
-                        onChange={(e) => setEditedAccount({ ...editedAccount, cash_balance: formatCurrencyInput(e.target.value) })}
+                        onChange={(e) =>
+                          setEditedAccount({
+                            ...editedAccount,
+                            cash_balance: formatCurrencyInput(e.target.value),
+                          })
+                        }
                         className="w-full border border-gray-300 rounded-lg pl-8 pr-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary"
                       />
                     </div>
                   </div>
+
                   <div className="flex gap-2">
                     <button
                       onClick={handleSaveAccount}
                       disabled={saving}
                       className="bg-primary hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
                     >
-                      {saving ? 'Saving...' : 'Save Changes'}
+                      {saving ? "Saving..." : "Save Changes"}
                     </button>
                     <button
                       onClick={() => {
@@ -390,7 +509,9 @@ export default function AccountDetail() {
                         setEditedAccount({
                           name: account.account_name,
                           purpose: account.account_purpose,
-                          cash_balance: Number(account.cash_balance).toLocaleString('en-US'),
+                          cash_balance: Number(
+                            account.cash_balance
+                          ).toLocaleString("en-US"),
                         });
                       }}
                       className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-4 py-2 rounded-lg transition-colors"
@@ -401,52 +522,81 @@ export default function AccountDetail() {
                 </div>
               ) : (
                 <>
-                  <h2 className="text-2xl font-bold text-dark">{account.account_name}</h2>
+                  <h2 className="text-2xl font-bold text-dark">
+                    {account.account_name}
+                  </h2>
                   <p className="text-gray-600 mt-1">{account.account_purpose}</p>
                 </>
               )}
             </div>
+
+            {/* Edit-account icon button (hidden while editing) */}
             {!editingAccount && (
               <button
                 onClick={() => setEditingAccount(true)}
                 className="text-primary hover:bg-primary/10 p-2 rounded transition-colors"
                 title="Edit Account"
               >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                  />
                 </svg>
               </button>
             )}
           </div>
 
+          {/* Inline success / error messaging */}
           {message && (
-            <div className={`mb-4 p-4 rounded-lg ${
-              message.type === 'success'
-                ? 'bg-green-50 border border-green-200 text-green-700'
-                : 'bg-red-50 border border-red-200 text-red-700'
-            }`}>
+            <div
+              className={`mb-4 p-4 rounded-lg ${
+                message.type === "success"
+                  ? "bg-green-50 border border-green-200 text-green-700"
+                  : "bg-red-50 border border-red-200 text-red-700"
+              }`}
+            >
               {message.text}
             </div>
           )}
 
-          {/* Account Summary */}
+          {/* Account summary metrics */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 p-4 bg-gray-50 rounded-lg">
             <div>
               <p className="text-sm text-gray-600">Cash Balance</p>
               <p className="text-lg font-semibold">
-                ${Number(account.cash_balance).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                $
+                {Number(account.cash_balance).toLocaleString("en-US", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}
               </p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Positions Value</p>
               <p className="text-lg font-semibold">
-                ${calculatePositionsValue().toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                $
+                {calculatePositionsValue().toLocaleString("en-US", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}
               </p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Total Value</p>
               <p className="text-lg font-semibold text-primary">
-                ${calculateTotalValue().toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                $
+                {calculateTotalValue().toLocaleString("en-US", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}
               </p>
             </div>
             <div>
@@ -456,7 +606,7 @@ export default function AccountDetail() {
           </div>
         </div>
 
-        {/* Positions */}
+        {/* Positions list + actions */}
         <div className="bg-white rounded-lg shadow p-6">
           <div className="flex justify-between items-center mb-6">
             <h3 className="text-xl font-bold text-dark">Positions</h3>
@@ -464,34 +614,64 @@ export default function AccountDetail() {
               onClick={() => setShowAddPosition(true)}
               className="bg-primary hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition-colors flex items-center gap-2"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              <svg
+                className="w-5 h-5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M12 4v16m8-8H4"
+                />
               </svg>
               Add Position
             </button>
           </div>
 
+          {/* Empty-state for positions */}
           {positions.length === 0 ? (
             <div className="text-center py-8 bg-gray-50 rounded-lg">
               <p className="text-gray-600">No positions in this account yet</p>
-              <p className="text-sm text-gray-500 mt-2">Click &ldquo;Add Position&rdquo; to start building your portfolio</p>
+              <p className="text-sm text-gray-500 mt-2">
+                Click &ldquo;Add Position&rdquo; to start building your portfolio
+              </p>
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-gray-200">
-                    <th className="text-left py-3 px-4 font-semibold text-gray-700">Symbol</th>
-                    <th className="text-right py-3 px-4 font-semibold text-gray-700">Quantity</th>
-                    <th className="text-right py-3 px-4 font-semibold text-gray-700">Price</th>
-                    <th className="text-right py-3 px-4 font-semibold text-gray-700">Value</th>
-                    <th className="text-center py-3 px-4 font-semibold text-gray-700">Actions</th>
+                    <th className="text-left py-3 px-4 font-semibold text-gray-700">
+                      Symbol
+                    </th>
+                    <th className="text-right py-3 px-4 font-semibold text-gray-700">
+                      Quantity
+                    </th>
+                    <th className="text-right py-3 px-4 font-semibold text-gray-700">
+                      Price
+                    </th>
+                    <th className="text-right py-3 px-4 font-semibold text-gray-700">
+                      Value
+                    </th>
+                    <th className="text-center py-3 px-4 font-semibold text-gray-700">
+                      Actions
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
                   {positions.map((position) => (
-                    <tr key={position.id} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
-                      <td className="py-4 px-4 font-medium">{position.symbol}</td>
+                    <tr
+                      key={position.id}
+                      className="border-b border-gray-100 hover:bg-gray-50 transition-colors"
+                    >
+                      <td className="py-4 px-4 font-medium">
+                        {position.symbol}
+                      </td>
+
+                      {/* Quantity cell: inline edit + save/cancel */}
                       <td className="py-4 px-4 text-right">
                         {editingPosition === position.id ? (
                           <input
@@ -503,39 +683,81 @@ export default function AccountDetail() {
                             min="0"
                           />
                         ) : (
-                          Number(position.quantity).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })
+                          Number(position.quantity).toLocaleString("en-US", {
+                            minimumFractionDigits: 0,
+                            maximumFractionDigits: 2,
+                          })
                         )}
                       </td>
+
+                      {/* Latest price */}
                       <td className="py-4 px-4 text-right">
-                        ${position.current_price?.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || 'N/A'}
+                        $
+                        {position.current_price?.toLocaleString("en-US", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        }) || "N/A"}
                       </td>
+
+                      {/* Position market value */}
                       <td className="py-4 px-4 text-right font-semibold">
-                        ${((position.current_price || 0) * Number(position.quantity)).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        $
+                        {(
+                          (position.current_price || 0) *
+                          Number(position.quantity)
+                        ).toLocaleString("en-US", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
                       </td>
+
+                      {/* Action buttons: edit / delete or save / cancel */}
                       <td className="py-4 px-4">
                         <div className="flex justify-center gap-2">
                           {editingPosition === position.id ? (
                             <>
                               <button
-                                onClick={() => handleUpdatePosition(position.id)}
+                                onClick={() =>
+                                  handleUpdatePosition(position.id)
+                                }
                                 disabled={saving}
                                 className="text-green-600 hover:bg-green-50 p-2 rounded transition-colors disabled:opacity-50"
                                 title="Save"
                               >
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                <svg
+                                  className="w-4 h-4"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  viewBox="0 0 24 24"
+                                >
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    strokeWidth={2}
+                                    d="M5 13l4 4L19 7"
+                                  />
                                 </svg>
                               </button>
                               <button
                                 onClick={() => {
                                   setEditingPosition(null);
-                                  setEditedQuantity('');
+                                  setEditedQuantity("");
                                 }}
                                 className="text-gray-600 hover:bg-gray-100 p-2 rounded transition-colors"
                                 title="Cancel"
                               >
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                <svg
+                                  className="w-4 h-4"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  viewBox="0 0 24 24"
+                                >
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    strokeWidth={2}
+                                    d="M6 18L18 6M6 6l12 12"
+                                  />
                                 </svg>
                               </button>
                             </>
@@ -544,29 +766,55 @@ export default function AccountDetail() {
                               <button
                                 onClick={() => {
                                   setEditingPosition(position.id);
-                                  // Format quantity to remove unnecessary decimal places
+                                  // Pre-fill quantity input with a clean numeric value
                                   const qty = Number(position.quantity);
-                                  setEditedQuantity(qty % 1 === 0 ? qty.toString() : qty.toFixed(2));
+                                  setEditedQuantity(
+                                    qty % 1 === 0
+                                      ? qty.toString()
+                                      : qty.toFixed(2)
+                                  );
                                 }}
                                 className="text-primary hover:bg-primary/10 p-2 rounded transition-colors"
                                 title="Edit"
                               >
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                                <svg
+                                  className="w-4 h-4"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  viewBox="0 0 24 24"
+                                >
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    strokeWidth={2}
+                                    d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                                  />
                                 </svg>
                               </button>
                               <button
-                                onClick={() => setConfirmModal({
-                                  isOpen: true,
-                                  positionId: position.id,
-                                  symbol: position.symbol
-                                })}
+                                onClick={() =>
+                                  setConfirmModal({
+                                    isOpen: true,
+                                    positionId: position.id,
+                                    symbol: position.symbol,
+                                  })
+                                }
                                 disabled={saving}
                                 className="text-red-600 hover:bg-red-50 p-2 rounded transition-colors disabled:opacity-50"
                                 title="Delete"
                               >
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                <svg
+                                  className="w-4 h-4"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  viewBox="0 0 24 24"
+                                >
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    strokeWidth={2}
+                                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                                  />
                                 </svg>
                               </button>
                             </>
@@ -585,9 +833,12 @@ export default function AccountDetail() {
         {showAddPosition && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
             <div className="bg-white rounded-lg max-w-md w-full p-6">
-              <h3 className="text-xl font-bold text-dark mb-4">Add New Position</h3>
+              <h3 className="text-xl font-bold text-dark mb-4">
+                Add New Position
+              </h3>
 
               <div className="space-y-4">
+                {/* Symbol input + autocomplete suggestions */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Symbol *
@@ -602,35 +853,45 @@ export default function AccountDetail() {
                         setNewPosition({ ...newPosition, symbol: value });
                         setShowSymbolSuggestions(value.length > 0);
                       }}
-                      onFocus={() => setShowSymbolSuggestions(searchTerm.length > 0)}
+                      onFocus={() =>
+                        setShowSymbolSuggestions(searchTerm.length > 0)
+                      }
                       className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary uppercase"
                       placeholder="Enter ticker symbol (e.g., SPY, AAPL)"
                     />
 
-                    {showSymbolSuggestions && filteredInstruments.length > 0 && (
-                      <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
-                        {filteredInstruments.map((inst) => (
-                          <button
-                            key={inst.symbol}
-                            onClick={() => {
-                              setNewPosition({ ...newPosition, symbol: inst.symbol });
-                              setSearchTerm('');
-                              setShowSymbolSuggestions(false);
-                            }}
-                            className="w-full text-left px-3 py-2 hover:bg-gray-50 border-b border-gray-100 last:border-b-0"
-                          >
-                            <div className="font-medium">{inst.symbol}</div>
-                            <div className="text-xs text-gray-500">{inst.name}</div>
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                    {showSymbolSuggestions &&
+                      filteredInstruments.length > 0 && (
+                        <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                          {filteredInstruments.map((inst) => (
+                            <button
+                              key={inst.symbol}
+                              onClick={() => {
+                                setNewPosition({
+                                  ...newPosition,
+                                  symbol: inst.symbol,
+                                });
+                                setSearchTerm("");
+                                setShowSymbolSuggestions(false);
+                              }}
+                              className="w-full text-left px-3 py-2 hover:bg-gray-50 border-b border-gray-100 last:border-b-0"
+                            >
+                              <div className="font-medium">{inst.symbol}</div>
+                              <div className="text-xs text-gray-500">
+                                {inst.name}
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      )}
                   </div>
                   <p className="text-xs text-gray-500 mt-1">
-                    If the symbol is not in our database, it will be added automatically
+                    If the symbol is not in our database, it will be added
+                    automatically
                   </p>
                 </div>
 
+                {/* Quantity input */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Quantity *
@@ -638,7 +899,12 @@ export default function AccountDetail() {
                   <input
                     type="number"
                     value={newPosition.quantity}
-                    onChange={(e) => setNewPosition({ ...newPosition, quantity: e.target.value })}
+                    onChange={(e) =>
+                      setNewPosition({
+                        ...newPosition,
+                        quantity: e.target.value,
+                      })
+                    }
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary"
                     placeholder="0"
                     step="0.01"
@@ -647,7 +913,8 @@ export default function AccountDetail() {
                 </div>
               </div>
 
-              {message && message.type === 'error' && (
+              {/* Error message specific to add-position flow */}
+              {message && message.type === "error" && (
                 <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
                   {message.text}
                 </div>
@@ -659,13 +926,13 @@ export default function AccountDetail() {
                   disabled={saving}
                   className="flex-1 bg-primary hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
                 >
-                  {saving ? 'Adding...' : 'Add Position'}
+                  {saving ? "Adding..." : "Add Position"}
                 </button>
                 <button
                   onClick={() => {
                     setShowAddPosition(false);
-                    setNewPosition({ symbol: '', quantity: '' });
-                    setSearchTerm('');
+                    setNewPosition({ symbol: "", quantity: "" });
+                    setSearchTerm("");
                     setShowSymbolSuggestions(false);
                     setMessage(null);
                   }}
@@ -684,9 +951,17 @@ export default function AccountDetail() {
           title="Delete Position"
           message={
             <div>
-              <p>Are you sure you want to delete your <span className="font-semibold">{confirmModal.symbol}</span> position?</p>
-              <p className="text-sm mt-2 text-gray-600">This will remove this holding from your account.</p>
-              <p className="text-sm mt-2 text-red-600 font-semibold">This action cannot be undone.</p>
+              <p>
+                Are you sure you want to delete your{" "}
+                <span className="font-semibold">{confirmModal.symbol}</span>{" "}
+                position?
+              </p>
+              <p className="text-sm mt-2 text-gray-600">
+                This will remove this holding from your account.
+              </p>
+              <p className="text-sm mt-2 text-red-600 font-semibold">
+                This action cannot be undone.
+              </p>
             </div>
           }
           confirmText="Delete Position"
@@ -694,9 +969,11 @@ export default function AccountDetail() {
           confirmButtonClass="bg-red-600 hover:bg-red-700"
           onConfirm={() => {
             handleDeletePosition(confirmModal.positionId);
-            setConfirmModal({ isOpen: false, positionId: '', symbol: '' });
+            setConfirmModal({ isOpen: false, positionId: "", symbol: "" });
           }}
-          onCancel={() => setConfirmModal({ isOpen: false, positionId: '', symbol: '' })}
+          onCancel={() =>
+            setConfirmModal({ isOpen: false, positionId: "", symbol: "" })
+          }
           isProcessing={saving}
         />
       </div>
