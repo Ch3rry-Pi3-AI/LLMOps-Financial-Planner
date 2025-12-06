@@ -1,110 +1,154 @@
-# Terraform Infrastructure
+# 🏗️ **Terraform Module — Infrastructure-as-Code for the Financial Planner Platform**
 
-This directory contains Terraform configurations for the Alex Financial Planner project.
+The **`terraform/`** folder contains all **Infrastructure-as-Code** required to deploy the Alex Financial Planner system across AWS services.
+Each subdirectory represents an isolated, self-contained Terraform configuration defining one major infrastructure component.
 
-## Structure
+This module enables reproducible, version-controlled provisioning of compute, storage, networking, and observability resources used by the backend agents, ingestion pipeline, researcher service, and frontend hosting.
 
-Each part of the course has its own independent Terraform directory:
+Terraform is used here to provide:
 
-- **`2_sagemaker/`** - SageMaker serverless endpoint for embeddings (Guide 2)
-- **`3_ingestion/`** - S3 Vectors, Lambda, and API Gateway for document ingestion (Guide 3)
-- **`4_researcher/`** - App Runner service for AI researcher agent (Guide 4)
-- **`5_database/`** - Aurora Serverless v2 PostgreSQL with Data API (Guide 5)
-- **`6_agents/`** - Lambda functions for agent orchestra (Guide 6)
-- **`7_frontend/`** - API Lambda and frontend infrastructure (Guide 7)
-- **`8_observability/`** - LangFuse and monitoring setup (Guide 8)
+1. Declarative, consistent AWS provisioning
+2. Safe, isolated deployments across learning modules
+3. Zero-dependency infrastructure setup (local state, no external backends)
+4. A clear mapping between architecture components and the course structure
 
-## Key Design Decisions
+The following sections describe the responsibilities of this Terraform module and how each directory contributes to the system.
 
-### Why Separate Directories?
+## 📁 **Folder Responsibilities**
 
-1. **Educational Clarity**: Each guide corresponds to exactly one Terraform directory
-2. **Independent Deployment**: Students can deploy each part without affecting others
-3. **Reduced Risk**: Mistakes in one part don't impact previously deployed infrastructure
-4. **Progressive Learning**: Can't accidentally deploy later parts before completing earlier ones
+Each directory in `terraform/` represents one infrastructure block of the platform:
 
-### Why Local State?
+### `2_sagemaker/` — **Serverless Embedding Endpoint**
 
-1. **Simplicity**: No need to set up and manage an S3 state bucket
-2. **Zero Dependencies**: Can start deploying immediately without prerequisite infrastructure
-3. **Cost Savings**: No S3 storage costs for state files
-4. **Security**: State files are automatically gitignored
+Creates an Amazon SageMaker Serverless Inference endpoint for generating embeddings used by the research/ingestion pipeline.
 
-## Usage
+### `3_ingestion/` — **S3 Vector Store & Ingestion Lambda**
 
-For each part of the course:
+Provisions the S3 vector bucket, ingestion Lambda, and API Gateway routing for document upload and semantic indexing.
+
+### `4_researcher/` — **App Runner Researcher Service**
+
+Deploys the containerised browser-assisted researcher agent with networking, IAM roles, and environment configuration.
+
+### `5_database/` — **Aurora Serverless PostgreSQL Cluster**
+
+Creates the Aurora Serverless v2 PostgreSQL cluster, Secrets Manager credentials, and Data API integration.
+
+### `6_agents/` — **LLM Agent Compute Layer**
+
+Deploys Lambda functions for Planner, Reporter, Charter, Tagger, Retirement, and supporting orchestration logic.
+
+### `7_frontend/` — **Frontend Hosting + API Gateway Routing**
+
+Provisions API Lambdas, CloudFront distributions, static hosting buckets, and domain configuration for the Next.js app.
+
+### `8_observability/` — **Monitoring, LangFuse, Cloud Resources**
+
+Sets up CloudWatch, LangFuse deployment parameters, and optional monitoring integrations.
+
+Each directory maintains its own `.tfstate`, allowing independent deployment, teardown, and experimentation.
+
+## 🧠 **Design Principles**
+
+### Why Each Component Has Its Own Directory
+
+1. **Clarity** — Mirrors the educational structure and architecture diagrams.
+2. **Safety** — Deploying one part cannot break another.
+3. **Incremental progression** — Users complete each guide in sequence without dependency complexity.
+4. **Focused troubleshooting** — Problems stay localised to a single Terraform unit.
+
+### Why Local State Is Used
+
+1. **Zero setup friction** — No need for S3/DynamoDB backends.
+2. **Cost efficiency** — Avoids AWS storage costs for state.
+3. **Security** — State files remain local and are gitignored.
+4. **Simplicity** — Perfect for learning and experimentation.
+
+## 🚀 **Usage Instructions**
+
+Terraform is executed per-directory. For example:
 
 ```bash
-# Navigate to the specific part's directory
-cd terraform/2_sagemaker  # (or 3_ingestion, 4_researcher, etc.)
+cd terraform/3_ingestion
 
-# Initialize Terraform (only needed once per directory)
-terraform init
-
-# Review what will be created
-terraform plan
-
-# Deploy the infrastructure
-terraform apply
-
-# When done with that part (optional)
-terraform destroy
+terraform init     # Install providers and set up working directory
+terraform plan     # Preview the infrastructure changes
+terraform apply    # Deploy the ingestion stack
+terraform destroy  # Optional teardown
 ```
 
-## Environment Variables
+Repeat for any other directory you want to deploy.
 
-Some Terraform configurations require environment variables from your `.env` file:
+## 🔧 **Environment Variables**
 
-- `OPENAI_API_KEY` - For the researcher agent (Part 4)
-- `ALEX_API_ENDPOINT` - API Gateway endpoint (from Part 3)
-- `ALEX_API_KEY` - API key for ingestion (from Part 3)
-- `AURORA_CLUSTER_ARN` - Aurora cluster ARN (from Part 5)
-- `AURORA_SECRET_ARN` - Secrets Manager ARN (from Part 5)
-- `VECTOR_BUCKET` - S3 Vectors bucket name (from Part 3)
-- `BEDROCK_MODEL_ID` - Bedrock model to use (Part 6)
+Certain configurations rely on environment variables normally loaded from `.env`:
 
-## State Management
+* `OPENAI_API_KEY` — Researcher agent (Guide 4)
+* `ALEX_API_ENDPOINT` — API Gateway URL from ingestion deployment
+* `ALEX_API_KEY` — Ingestion API key
+* `AURORA_CLUSTER_ARN` — Aurora cluster ARN (Guide 5)
+* `AURORA_SECRET_ARN` — Secrets Manager secret ARN
+* `VECTOR_BUCKET` — S3 bucket for vector storage
+* `BEDROCK_MODEL_ID` — Bedrock model for agent orchestration
 
-- Each directory maintains its own `terraform.tfstate` file
-- State files are stored locally (not in S3)
-- All `*.tfstate` files are gitignored for security
-- Back up state files before making major changes
+These must be set before running `terraform apply`.
 
-## Production Considerations
+## 📦 **State Management**
 
-This structure is optimized for learning. In production, you might consider:
+Each Terraform directory manages its own local state:
 
-- **Remote State**: Store state in S3 with state locking via DynamoDB
-- **Modules**: Share common configurations across environments
-- **Workspaces**: Manage multiple environments (dev, staging, prod)
-- **CI/CD**: Automated deployment pipelines
-- **Terragrunt**: Orchestrate multiple Terraform configurations
+* `terraform.tfstate` files are stored locally
+* All state files are automatically `.gitignore`d
+* No remote backend is required
+* Make backups of state files before major structural changes
 
-## Troubleshooting
+## 🏭 **Production Considerations**
 
-If you encounter issues:
+This repo uses a learning-optimised structure.
+A production deployment typically uses:
 
-1. **State Conflicts**: Each directory has independent state. If you need to import existing resources:
-   ```bash
-   terraform import <resource_type>.<resource_name> <resource_id>
-   ```
+* **Remote state** (S3 + DynamoDB locking)
+* **Shared Terraform modules** for reusability
+* **Workspaces** for dev/staging/prod environments
+* **CI/CD pipelines** for automated deploys
+* **Terragrunt** for orchestrating multi-stack deployments
 
-2. **Missing Dependencies**: Ensure you've completed earlier guides and have the required environment variables
+These are intentionally excluded from this course for simplicity.
 
-3. **Clean Slate**: To start over in any directory:
-   ```bash
-   terraform destroy  # Remove resources
-   rm -rf .terraform terraform.tfstate*  # Clean local files
-   terraform init  # Reinitialize
-   ```
+## 🧹 **Troubleshooting & Cleanup**
 
-## Cleanup Helper
+**State issues?** Import resources manually:
 
-To clean up old monolithic Terraform files (if upgrading from an older version):
+```bash
+terraform import <resource_type>.<name> <id>
+```
+
+**Missing dependencies?** Ensure earlier guide directories have been deployed.
+
+**Start fresh in any directory:**
+
+```bash
+terraform destroy
+rm -rf .terraform terraform.tfstate*
+terraform init
+```
+
+**Cleanup tool for older structures:**
 
 ```bash
 cd terraform
 python cleanup_old_structure.py
 ```
 
-This will identify old files that can be safely removed.
+Identifies outdated files safely removable from older course versions.
+
+## ✨ **Summary**
+
+The `terraform/` module delivers:
+
+* Fully isolated infrastructure stacks
+* Safe, repeatable provisioning of all AWS components
+* Education-first structure with minimal dependencies
+* Clear mapping to backend/agent/frontend architecture
+
+This module provides the foundation that the entire Financial Planner platform runs on, enabling seamless deployment of every major subsystem.

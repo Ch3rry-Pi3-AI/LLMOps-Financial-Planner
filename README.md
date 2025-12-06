@@ -1,38 +1,93 @@
-# Alex - the Agentic Learning Equities Explainer
+# 📦 **LLMOps Financial Planner — Repository Overview & Clone Guide**
 
-## Multi-agent Enterprise-Grade SaaS Financial Planner
+The **LLMOps Financial Planner** project is a full end-to-end system that delivers AI-powered financial analysis using a modern MLOps and serverless architecture.
+This repository brings together all major components:
 
-![Course Image](assets/alex.png)
+* A **Next.js frontend**
+* A **serverless backend** with multiple LLM-driven analytical agents
+* **Automation scripts** for development and deployment
+* **Terraform infrastructure** for AWS provisioning
+* Shared **assets** used across the project
 
-_If you're looking at this in Cursor, please right click on the filename in the Explorer on the left, and select "Open preview", to view it in formatted glory._
+This branch README provides a clean, high-level introduction for anyone cloning or exploring the repository.
 
-### Welcome to The Capstone Project for Week 3 and Week 4!
+## 📁 **Folder Structure**
 
-#### The directories:
+```
+LLMOps-Financial-Planner/
+│
+├─ backend/      # Full serverless compute layer (LLM agents, API, database, ingestion, orchestration)
+├─ frontend/     # Next.js application for the Alex AI Financial Advisor user experience
+├─ scripts/      # Developer tooling and automation (local dev, deployment, teardown)
+├─ terraform/    # Infrastructure-as-code for AWS (Aurora, Lambdas, S3, App Runner, CloudFront, etc.)
+├─ assets/       # Shared images, icons, diagrams
+│
+├─ .gitignore    # Repository exclusion rules
+├─ LICENSE       # Open-source license
+├─ README.md     # Main project documentation
+└─ test_payload.json  # Example analysis job payload for backend testing
+```
 
-1. **guides** - this is where you will live - step by step guides to deploy to production
-2. **backend** - the agent code, organized into subdirectories, each a uv project (as is the backend parent directory)
-3. **frontend** - a NextJS React frontend integrated with Clerk
-4. **terraform** - separate terraform subdirectories with state for each part
-5. **scripts** - the final deployment script
+Each folder contains its own detailed README describing internal modules and responsibilities.
 
-#### Order of play:
+## 🚀 **Cloning the Repository**
 
-##### Week 3
+To clone the official repo:
 
-- On Week 3 Day 3, we will do 1_permissions and 2_sagemaker
-- On Week 3 Day 4, we will do 3_ingest
-- On Week 3 Day 5, we will do 4_researcher
+```bash
+git clone https://github.com/Ch3rry-Pi3-AI/LLMOps-Financial-Planner.git
+cd LLMOps-Financial-Planner
+```
 
-##### Week 4
+Recommended environment prerequisites:
 
-- On Week 4 Day 1, we will do 5_database
-- On Week 4 Day 2, we will do 6_agents
-- On Week 4 Day 3, we will do 7_frontend
-- On Week 4 Day 4, we will do 8_enterprise
+* Python 3.12 with **uv** for backend dependency management
+* Node.js 20+ for the **frontend**
+* AWS CLI + credentials configured
+* Terraform installed (`v1.6+`)
+* Docker (optional but strongly recommended)
 
-#### Keep in mind
+## 🧩 **Top-Level Module Responsibilities**
 
-- Please submit your community_contributions, including links to your repos, in the production repo community_contributions folder
-- Regularly do a git pull to get the latest code
-- Reach out in Udemy or email (ed@edwarddonner.com) if I can help! This is a gigantic project and I am here to help you deliver it!
+### 🏛️ backend/
+
+The entire serverless computational engine: LLM agents, Planner/Reporter/Charter subsystems, database layer, ingestion pipeline, research services, schedulers, and deployment tooling.
+
+### 🎨 frontend/
+
+The full authenticated Next.js application that provides dashboards, advisor flows, charts, and report rendering.
+
+### 🛠️ scripts/
+
+Developer automation tools: local dev runner, Lambda packaging, Terraform deployment, CloudFront uploaders, teardown utilities.
+
+### 🌍 terraform/
+
+Infrastructure for all components: Aurora PostgreSQL, S3, Lambdas, API Gateway, App Runner, CloudFront, monitoring, and research compute.
+
+### 🖼️ assets/
+
+Project graphics, documentation images, icons, and branding used throughout READMEs and guides.
+
+## 📘 **Purpose of This Branch**
+
+This branch acts as the **starting point** for developers by providing:
+
+* A clear overview of the project structure
+* Guidance on cloning and preparing the environment
+* A minimal onboarding experience before diving into subsystem modules
+
+The branch README complements the deeper internal documentation located in each submodule.
+
+## ✨ **Summary**
+
+By cloning this repository you gain access to a fully featured, modern financial-analysis platform built using:
+
+* **Next.js + TypeScript**
+* **Python (serverless agents)**
+* **AWS Lambdas, App Runner, Aurora, S3**
+* **LLM orchestration and multi-agent pipelines**
+* **Terraform provisioning**
+* **Automated deployment tooling**
+
+The project is structured for clarity, modularity, and production-grade performance — ideal for both learning and real-world MLOps development.
