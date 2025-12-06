@@ -45,9 +45,9 @@ graph TB
 
 See [architecture.md](architecture.md) for the complete system architecture.
 
-## About This Guide
+## About This Branch
 
-This first guide focuses on setting up the necessary AWS permissions. We'll create a dedicated IAM group with only the permissions needed for the Alex project.
+This first branch focuses on setting up the necessary AWS permissions. We'll create a dedicated IAM group with only the permissions needed for the Alex project.
 
 ## Important Note on Infrastructure Management
 
@@ -182,13 +182,13 @@ cp .env.example .env
 aws sts get-caller-identity --query Account --output text
 ```
 
-Edit the `.env` file and add your AWS account ID and default region:
+Create a `.env` file and add your AWS account ID and default region:
 ```
 AWS_ACCOUNT_ID=123456789012     # Your actual account ID
 DEFAULT_AWS_REGION=us-east-1    # Your preferred default region
 ```
 
-You'll add more values to this file as you progress through the guides.
+You'll add more values to this file as you progress through the next branches.
 
 ### Important Files
 
@@ -200,8 +200,8 @@ Both are gitignored for security. You'll create them from the provided examples.
 
 ## Next Steps
 
-Excellent! You now have the necessary permissions and initial setup complete.
+You now have the necessary permissions and initial setup complete.
 
-Continue to the next guide: [2_sagemaker.md](2_sagemaker.md) where we'll deploy our first AI component - a SageMaker Serverless endpoint for generating text embeddings.
+Continue to the next branch: AWS SageMaker, where we'll deploy our first AI component - a SageMaker Serverless endpoint for generating text embeddings.
 
 This will be the foundation of Alex's ability to understand and process financial information! 🚀
