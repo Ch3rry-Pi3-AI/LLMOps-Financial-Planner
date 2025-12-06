@@ -1,93 +1,226 @@
-# 📦 **LLMOps Financial Planner — Repository Overview & Clone Guide**
+# 🛡️ **Part 1 — AWS Permissions Setup**
 
-The **LLMOps Financial Planner** project is a full end-to-end system that delivers AI-powered financial analysis using a modern MLOps and serverless architecture.
-This repository brings together all major components:
+Welcome to **Project Alex — the Agentic Learning Equities eXplainer!**
 
-* A **Next.js frontend**
-* A **serverless backend** with multiple LLM-driven analytical agents
-* **Automation scripts** for development and deployment
-* **Terraform infrastructure** for AWS provisioning
-* Shared **assets** used across the project
+This branch configures the foundational **AWS IAM permissions** required for the Alex system. Before deploying AI agents, embeddings, ingestion pipelines, or App Runner services, we must ensure that our IAM user has the correct, minimal, and secure permissions.
 
-This branch README provides a clean, high-level introduction for anyone cloning or exploring the repository.
+Alex is an AI-powered personal financial planner designed to help users:
 
-## 📁 **Folder Structure**
+* Understand their investment portfolios
+* Plan for retirement
+* Receive personalised financial guidance
+* Track market opportunities and market trends
 
+This branch prepares all IAM access needed across the lifecycle of the project.
+
+
+
+## 🧠 **What Is Alex?**
+
+Alex is a fully agentic system built on AWS that performs:
+
+* AI research and market analysis
+* Document ingestion and embedding
+* Portfolio understanding and tagging
+* Retirement forecasting
+* Interactive Q&A with financial logic
+
+Each later branch builds a core subsystem of Alex. Permissions created in *this* branch allow those subsystems to function safely.
+
+
+
+## 🏗️ **Architecture Overview**
+
+Below is the high-level system architecture that will evolve across all guides:
+
+```mermaid
+graph TB
+    User[User] -->|Research| AR[App Runner<br/>AI Researcher]
+    Schedule[EventBridge<br/>Every 2 Hours] -->|Trigger| SchedLambda[Lambda<br/>Scheduler]
+    SchedLambda -->|Call| AR
+    AR -->|Generate| Bedrock[AWS Bedrock<br/>OSS 120B Model]
+    AR -->|Store| Lambda[Lambda<br/>Ingest]
+    Lambda -->|Embed| SM[SageMaker<br/>Embeddings]
+    Lambda -->|Index| S3V[(S3 Vectors<br/>90% Cheaper!)]
+    User -->|Search| S3V
+
+    style AR fill:#FF9900
+    style S3V fill:#90EE90
+    style SM fill:#10B981
+    style Schedule fill:#9333EA
+    style SchedLambda fill:#FF9900
+    style Bedrock fill:#FF9900
 ```
-LLMOps-Financial-Planner/
-│
-├─ backend/      # Full serverless compute layer (LLM agents, API, database, ingestion, orchestration)
-├─ frontend/     # Next.js application for the Alex AI Financial Advisor user experience
-├─ scripts/      # Developer tooling and automation (local dev, deployment, teardown)
-├─ terraform/    # Infrastructure-as-code for AWS (Aurora, Lambdas, S3, App Runner, CloudFront, etc.)
-├─ assets/       # Shared images, icons, diagrams
-│
-├─ .gitignore    # Repository exclusion rules
-├─ LICENSE       # Open-source license
-├─ README.md     # Main project documentation
-└─ test_payload.json  # Example analysis job payload for backend testing
+
+See **architecture.md** for a full technical breakdown.
+
+
+
+## 🌿 **About This Branch**
+
+This branch focuses solely on:
+
+* Creating a dedicated IAM group for Alex
+* Adding the correct AWS-managed policies
+* Adding a custom policy for the new **S3 Vectors** service
+* Ensuring your IAM user (`aiengineer`) inherits these capabilities
+* Confirming successful setup through AWS CLI tests
+
+These permissions will support the upcoming components, including SageMaker embeddings, Bedrock calls, Lambda execution, and EventBridge-based scheduling.
+
+
+
+## 📦 **Prerequisites**
+
+Before starting, ensure you have:
+
+* An AWS account with **root user** access
+* **AWS CLI** installed and configured
+* Your **IAM user** (`aiengineer`) already created
+* **Terraform** version 1.5+
+* Basic AWS familiarity
+
+
+
+# 🪪 **Step 1 — Setting Up IAM Permissions**
+
+### **1.1 Sign in as the Root User**
+
+1. Visit: [https://aws.amazon.com/console](https://aws.amazon.com/console)
+2. Choose **Root user**
+3. Enter your email + password
+4. Proceed to the console
+
+⚠️ *Root access is used only for IAM setup. All future operations must be done using your IAM user.*
+
+
+
+### **1.2 Create the S3 Vectors Permission Policy**
+
+S3 Vectors is a new 2025-era AWS service, so we must manually create a policy:
+
+1. Open **IAM → Policies**
+2. Click **Create policy**
+3. Switch to the **JSON** tab
+4. Paste the following:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3vectors:*"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
 ```
 
-Each folder contains its own detailed README describing internal modules and responsibilities.
+5. Continue → Name it **AlexS3VectorsAccess**
+6. Add description: *Full access to S3 Vectors for Alex project*
+7. Create the policy
 
-## 🚀 **Cloning the Repository**
 
-To clone the official repo:
+
+### **1.3 Create the `AlexAccess` IAM Group**
+
+1. Navigate to **IAM → User groups**
+2. Click **Create group**
+3. Name it: `AlexAccess`
+4. Attach these policies:
+
+| Required Policy                | Purpose                            |
+| ------------------------------ | ---------------------------------- |
+| **AmazonSageMakerFullAccess**  | For embedding endpoints            |
+| **AmazonBedrockFullAccess**    | For LLM inference                  |
+| **CloudWatchEventsFullAccess** | Required for EventBridge scheduler |
+| **AlexS3VectorsAccess**        | Custom S3 Vectors integration      |
+
+Other permissions (Lambda, S3, CloudWatch, API Gateway) come from earlier global groups.
+
+5. Create the group
+
+
+
+### **1.4 Add the Group to Your IAM User**
+
+1. Go to **IAM → Users**
+2. Select your user: **`aiengineer`**
+3. Open **Groups** tab
+4. Click **Add user to groups**
+5. Select **AlexAccess**
+6. Save
+
+
+
+### **1.5 Sign Out and Back In**
+
+Sign out from root, then sign back in using:
+
+* Account ID or alias
+* Username: `aiengineer`
+* Your IAM password
+
+This refreshes policy evaluation.
+
+
+
+### **1.6 Verify Permissions via AWS CLI**
+
+Run:
 
 ```bash
-git clone https://github.com/Ch3rry-Pi3-AI/LLMOps-Financial-Planner.git
-cd LLMOps-Financial-Planner
+aws sts get-caller-identity
 ```
 
-Recommended environment prerequisites:
+You should see an IAM user ARN.
 
-* Python 3.12 with **uv** for backend dependency management
-* Node.js 20+ for the **frontend**
-* AWS CLI + credentials configured
-* Terraform installed (`v1.6+`)
-* Docker (optional but strongly recommended)
+Then test SageMaker access:
 
-## 🧩 **Top-Level Module Responsibilities**
+```bash
+aws sagemaker list-endpoints
+```
 
-### 🏛️ backend/
+If the result is empty **but not an error**, permissions are correct.
 
-The entire serverless computational engine: LLM agents, Planner/Reporter/Charter subsystems, database layer, ingestion pipeline, research services, schedulers, and deployment tooling.
 
-### 🎨 frontend/
 
-The full authenticated Next.js application that provides dashboards, advisor flows, charts, and report rendering.
+# 🧰 **Step 3 — Initial Project Setup**
 
-### 🛠️ scripts/
+### **Create Your `.env` File**
 
-Developer automation tools: local dev runner, Lambda packaging, Terraform deployment, CloudFront uploaders, teardown utilities.
+In the project root:
 
-### 🌍 terraform/
+```bash
+cd alex
+aws sts get-caller-identity --query Account --output text
+```
 
-Infrastructure for all components: Aurora PostgreSQL, S3, Lambdas, API Gateway, App Runner, CloudFront, monitoring, and research compute.
+Create `.env`:
 
-### 🖼️ assets/
+```text
+AWS_ACCOUNT_ID=123456789012
+DEFAULT_AWS_REGION=us-east-1
+```
 
-Project graphics, documentation images, icons, and branding used throughout READMEs and guides.
+More entries will be added in later branches.
 
-## 📘 **Purpose of This Branch**
 
-This branch acts as the **starting point** for developers by providing:
 
-* A clear overview of the project structure
-* Guidance on cloning and preparing the environment
-* A minimal onboarding experience before diving into subsystem modules
+## 🚀 **Next Steps**
 
-The branch README complements the deeper internal documentation located in each submodule.
+You now have:
 
-## ✨ **Summary**
+* Root-level IAM configuration complete
+* Custom S3 Vectors policy created
+* AlexAccess group assigned
+* IAM user access verified
+* Your environment file initialised
 
-By cloning this repository you gain access to a fully featured, modern financial-analysis platform built using:
+Continue to the next branch:
+👉 **AWS SageMaker — Serverless Embeddings Endpoint**
 
-* **Next.js + TypeScript**
-* **Python (serverless agents)**
-* **AWS Lambdas, App Runner, Aurora, S3**
-* **LLM orchestration and multi-agent pipelines**
-* **Terraform provisioning**
-* **Automated deployment tooling**
-
-The project is structured for clarity, modularity, and production-grade performance — ideal for both learning and real-world MLOps development.
+This will power Alex’s ability to understand text, documents, financial statements, and research inputs.
