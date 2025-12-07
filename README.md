@@ -1,4 +1,4 @@
-# 🧮 **Part 5 — Database & Shared Infrastructure (Aurora Serverless v2)**
+# 🧮 **Part 5 — Database & Shared Infrastructure**
 
 In this branch, you give Alex a **proper backend brain**: a shared Aurora Serverless v2 PostgreSQL database, plus a reusable database layer that all agents (Planner, Tagger, Reporter, Retirement, etc.) will share.
 
