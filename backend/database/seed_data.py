@@ -1,27 +1,44 @@
 #!/usr/bin/env python3
 """
-Seed data for the Alex Financial Planner database.
+Seed data loader for Alex Financial Planner.
 
-This module populates the `instruments` table in the Aurora PostgreSQL database
-with a curated set of ETF instruments and their allocation metadata.
+This script populates the `instruments` table with a curated set of
+popular ETFs, bond funds, and related instruments. Each instrument
+includes:
 
-Key behaviour:
-    * Validates each instrument using `InstrumentCreate` (Pydantic)
-    * Inserts or updates rows via the RDS Data API (idempotent upsert)
-    * Verifies final row count and prints a small sample of instruments
+* A symbol and descriptive name
+* Instrument type (e.g. ETF, bond fund)
+* A notional current price
+* Region, sector, and asset-class allocation breakdowns
 
-Required environment variables:
-    AURORA_CLUSTER_ARN   – ARN of the Aurora Serverless cluster
-    AURORA_SECRET_ARN    – ARN of the Secrets Manager entry for the DB user
-    AURORA_DATABASE      – Database name (default: "alex")
-    DEFAULT_AWS_REGION   – AWS region for RDS Data API (default: "us-east-1")
+The script performs three main tasks:
 
-Typical usage:
-    uv run backend/database/seed_data.py
+1. Validate instrument payloads using the `InstrumentCreate` Pydantic model
+2. Upsert each instrument into the Aurora PostgreSQL database (via RDS Data API)
+3. Verify that data was written correctly by querying the table
+
+Typical usage
+-------------
+Run from the `backend/database/` directory:
+
+    uv run seed_data.py
+
+Environment requirements
+------------------------
+The following environment variables must be set (e.g. via `.env`):
+
+- AURORA_CLUSTER_ARN   – ARN of the Aurora Serverless cluster
+- AURORA_SECRET_ARN    – ARN of the Secrets Manager entry for DB creds
+- AURORA_DATABASE      – Database name (defaults to "alex")
+- DEFAULT_AWS_REGION   – AWS region (defaults to "us-east-1")
 """
 
-import os
+from __future__ import annotations
+
 import json
+import os
+import sys
+from typing import Any, Dict, List, Sequence
 
 import boto3
 from botocore.exceptions import ClientError
@@ -30,30 +47,88 @@ from pydantic import ValidationError
 
 from src.schemas import InstrumentCreate
 
-# Load environment variables from .env if present
+
+# ============================================================
+# Console / Emoji Handling
+# ============================================================
+
+# Best-effort: normalise stdout to UTF-8 and avoid hard failures
+try:
+    # Python 3.7+ only; safe to ignore if unsupported
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
+
+def _supports_emoji() -> bool:
+    """
+    Return True if the current stdout encoding is likely to support emoji.
+
+    On Windows, consoles often default to cp1252 which cannot encode emoji.
+    In that case we fall back to ASCII-only markers.
+    """
+    encoding = getattr(sys.stdout, "encoding", "") or ""
+    return "UTF-8" in encoding.upper()
+
+
+USE_EMOJI: bool = _supports_emoji()
+
+ROCKET: str = "🚀" if USE_EMOJI else "[SEED]"
+CHECK: str = "✅" if USE_EMOJI else "[OK]"
+WARN: str = "⚠️" if USE_EMOJI else "[WARN]"
+ERROR: str = "❌" if USE_EMOJI else "[ERROR]"
+INFO: str = "📊" if USE_EMOJI else "[INFO]"
+SAVE: str = "💾" if USE_EMOJI else "[WRITE]"
+SEARCH: str = "🔍" if USE_EMOJI else "[QUERY]"
+NOTE: str = "📝" if USE_EMOJI else "[NEXT]"
+
+
+# ============================================================
+# Environment / Configuration
+# ============================================================
+
+# Load environment variables from .env file if present
 load_dotenv(override=True)
 
-# ---------------------------------------------------------------------------
-# Configuration and RDS Data API client
-# ---------------------------------------------------------------------------
 
-cluster_arn = os.environ.get("AURORA_CLUSTER_ARN")
-secret_arn = os.environ.get("AURORA_SECRET_ARN")
-database = os.environ.get("AURORA_DATABASE", "alex")
-region = os.environ.get("DEFAULT_AWS_REGION", "us-east-1")
+def get_rds_config() -> tuple[str, str, str, str]:
+    """
+    Load RDS Data API configuration from environment variables.
 
-if not cluster_arn or not secret_arn:
-    print("❌ Missing AURORA_CLUSTER_ARN or AURORA_SECRET_ARN in .env file")
-    raise SystemExit(1)
+    Returns
+    -------
+    cluster_arn : str
+        ARN of the Aurora Serverless cluster.
+    secret_arn : str
+        ARN of the Secrets Manager secret for database credentials.
+    database : str
+        Target database name.
+    region : str
+        AWS region in which the cluster resides.
 
-client = boto3.client("rds-data", region_name=region)
+    Raises
+    ------
+    ValueError
+        If the cluster ARN or secret ARN is missing.
+    """
+    cluster_arn = os.environ.get("AURORA_CLUSTER_ARN")
+    secret_arn = os.environ.get("AURORA_SECRET_ARN")
+    database = os.environ.get("AURORA_DATABASE", "alex")
+    region = os.environ.get("DEFAULT_AWS_REGION", "us-east-1")
 
-# ---------------------------------------------------------------------------
-# Instrument seed data
-# All allocation percentages are intended to sum to 100 for each allocation type
-# ---------------------------------------------------------------------------
+    if not cluster_arn or not secret_arn:
+        raise ValueError("Missing AURORA_CLUSTER_ARN or AURORA_SECRET_ARN in environment variables")
 
-INSTRUMENTS = [
+    return cluster_arn, secret_arn, database, region
+
+
+# ============================================================
+# Seed Instrument Definitions
+# ============================================================
+
+# Define popular ETF instruments with realistic allocation data
+# All percentages should sum to 100 for each allocation type
+INSTRUMENTS: List[Dict[str, Any]] = [
     # Core US Equity
     {
         "symbol": "SPY",
@@ -372,21 +447,47 @@ INSTRUMENTS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
+# ============================================================
+# Core Helpers
+# ============================================================
 
-def insert_instrument(instrument_data):
+def insert_instrument(
+    client: Any,
+    cluster_arn: str,
+    secret_arn: str,
+    database: str,
+    instrument_data: Dict[str, Any],
+) -> bool:
     """
     Insert or update a single instrument in the database.
 
-    The instrument is first validated with Pydantic, then written via the
-    RDS Data API using an ON CONFLICT DO UPDATE statement.
+    The payload is first validated with the `InstrumentCreate` Pydantic
+    model. If validation passes, the record is upserted into the
+    `instruments` table via the RDS Data API.
+
+    Parameters
+    ----------
+    client : Any
+        Boto3 RDS Data API client.
+    cluster_arn : str
+        ARN of the Aurora cluster.
+    secret_arn : str
+        ARN of the Secrets Manager secret for credentials.
+    database : str
+        Target database name.
+    instrument_data : Dict[str, Any]
+        Raw instrument payload.
+
+    Returns
+    -------
+    bool
+        True if the operation succeeded, False otherwise.
     """
+    # Validate with Pydantic first
     try:
         instrument = InstrumentCreate(**instrument_data)
     except ValidationError as exc:
-        print(f"    ❌ Validation error: {exc}")
+        print(f"    {ERROR} Validation error: {exc}")
         return False
 
     validated = instrument.model_dump()
@@ -438,23 +539,30 @@ def insert_instrument(instrument_data):
             ],
         )
         return True
-
     except ClientError as exc:
-        print(f"    ❌ Error: {exc.response['Error']['Message'][:100]}")
+        print(f"    {ERROR} Error: {exc.response['Error']['Message'][:100]}")
         return False
 
 
-def verify_allocations(instrument):
+def verify_allocations(instrument: Dict[str, Any]) -> List[str]:
     """
-    Verify allocation fields for a single instrument.
+    Validate an instrument payload using the Pydantic model.
 
-    Returns a list of error messages; an empty list indicates success.
+    Parameters
+    ----------
+    instrument : Dict[str, Any]
+        Raw instrument payload.
+
+    Returns
+    -------
+    List[str]
+        List of human-readable validation error messages. Empty if valid.
     """
     try:
         InstrumentCreate(**instrument)
         return []
     except ValidationError as exc:
-        errors = []
+        errors: List[str] = []
         for error in exc.errors():
             field = ".".join(str(x) for x in error["loc"])
             msg = error["msg"]
@@ -462,53 +570,72 @@ def verify_allocations(instrument):
         return errors
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+# ============================================================
+# Script Entry Point
+# ============================================================
 
-def main():
-    print("🚀 Seeding Instrument Data")
+def main() -> None:
+    """
+    Seed the `instruments` table with predefined instruments.
+
+    This function orchestrates the full seeding flow:
+
+    1. Load RDS configuration and create a Data API client
+    2. Validate all seed instrument payloads
+    3. Upsert instruments into the database
+    4. Verify row counts and print a small sample
+    """
+    try:
+        cluster_arn, secret_arn, database, region = get_rds_config()
+    except ValueError as exc:
+        print(f"{ERROR} {exc}")
+        sys.exit(1)
+
+    client = boto3.client("rds-data", region_name=region)
+
+    print(f"{ROCKET} Seeding instrument data")
     print("=" * 50)
     print(f"Loading {len(INSTRUMENTS)} instruments...")
 
-    # Verify allocations before attempting inserts
-    print("\n📊 Verifying allocation data...")
+    # First verify all allocations
+    print(f"\n{INFO} Verifying allocation data...")
     all_valid = True
     for inst in INSTRUMENTS:
         errors = verify_allocations(inst)
         if errors:
-            print(f"  ❌ {inst['symbol']}: {', '.join(errors)}")
+            print(f"  {ERROR} {inst['symbol']}: {', '.join(errors)}")
             all_valid = False
 
     if not all_valid:
-        print("\n❌ Some instruments have invalid allocations. Please fix before continuing.")
-        raise SystemExit(1)
+        print(f"\n{ERROR} Some instruments have invalid allocations. Please fix before continuing.")
+        sys.exit(1)
 
-    print("  ✅ All allocations valid!")
+    print(f"  {CHECK} All allocations valid!")
 
     # Insert instruments
-    print("\n💾 Inserting instruments...")
+    print(f"\n{SAVE} Inserting instruments...")
     success_count = 0
 
-    for inst in INSTRUMENTS:
-        print(f"  [{success_count + 1}/{len(INSTRUMENTS)}] {inst['symbol']}: {inst['name'][:40]}...")
-        if insert_instrument(inst):
-            print("    ✅ Success")
+    total = len(INSTRUMENTS)
+    for index, inst in enumerate(INSTRUMENTS, start=1):
+        print(f"  [{index}/{total}] {inst['symbol']}: {inst['name'][:40]}...")
+        if insert_instrument(client, cluster_arn, secret_arn, database, inst):
+            print(f"    {CHECK} Success")
             success_count += 1
         else:
-            print("    ❌ Failed")
+            print(f"    {ERROR} Failed")
 
     print("\n" + "=" * 50)
     print(f"Seeding complete: {success_count}/{len(INSTRUMENTS)} instruments loaded")
 
     # Verify by querying
-    print("\n🔍 Verifying data...")
+    print(f"\n{SEARCH} Verifying data...")
     try:
         response = client.execute_statement(
             resourceArn=cluster_arn,
             secretArn=secret_arn,
             database=database,
-            sql="SELECT COUNT(*) as count FROM instruments",
+            sql="SELECT COUNT(*) AS count FROM instruments",
         )
         count = response["records"][0][0]["longValue"]
         print(f"  Database now contains {count} instruments")
@@ -528,10 +655,10 @@ def main():
             print(f"    - {symbol}: {name}")
 
     except ClientError as exc:
-        print(f"  ❌ Error verifying: {exc}")
+        print(f"  {ERROR} Error verifying: {exc}")
 
-    print("\n✅ Seed data loaded successfully!")
-    print("\n📝 Next steps:")
+    print(f"\n{CHECK} Seed data loaded successfully!")
+    print(f"\n{NOTE} Next steps:")
     print("1. Create test user and portfolio: uv run create_test_data.py")
     print("2. Test database operations: uv run test_db.py")
 
