@@ -1,287 +1,486 @@
-# 🗃️ **Part 3 — Ingestion Pipeline with S3 Vectors**
+# 🧠 **Part 4 — Deploy the Researcher Agent**
 
-This branch deploys the full ingestion subsystem for Project Alex.
-Its purpose is to convert documents into embeddings, store them in **S3 Vectors**, and make them queryable via a secure API.
+In this branch, you will deploy the **Alex Researcher** service: an AI agent that generates investment research and automatically stores it in your knowledge base via the ingest pipeline.
 
-The ingestion pipeline integrates four subsystems:
+The Researcher:
 
-* **S3 Vectors** – AWS-native vector database (≈90% cheaper than OpenSearch)
-* **SageMaker Embedding Endpoint** – from Part 2
-* **Lambda ingestion function** – computes embeddings and writes vectors
-* **API Gateway** – authenticated, scalable public API for ingestion
+* Uses AWS Bedrock (Nova or OpenAI OSS 120B) for AI reasoning
+* Uses the OpenAI Agents SDK for orchestration and tracing
+* Calls your ingest API to store research in **S3 Vectors**
+* Exposes a REST API via **App Runner**
+* Can be run on-demand or on a schedule (every 2 hours)
 
-This branch completes the data foundation required for semantic search, financial research, and context retrieval throughout Alex.
+## 📦 **Prerequisites**
 
-## 🧠 **About S3 Vectors**
+Before starting, ensure you have:
 
-S3 Vectors is AWS’s purpose-built vector storage system.
-It provides:
+1. Completed Parts 1–3:
 
-* Low cost (≈90% savings vs OpenSearch)
-* Built-in vector indices
-* Native integration with AWS services
-* Automatic encryption and secure access
-* High scalability
+   * IAM / Permissions
+   * SageMaker Embedding Endpoint
+   * S3 Vectors + Ingest Pipeline
+2. Docker Desktop installed and running
+3. AWS CLI configured with your IAM user credentials
+4. Access to at least one supported Bedrock model (see Step 0)
+5. Your `.env` file populated with values from previous branches
 
-Note that **vector buckets** are distinct from regular S3 buckets, and are managed in a separate console namespace.
+## 🏗️ **Architecture Overview**
 
-# 🪜 **Step 1 — Create the Vector Bucket**
+```mermaid
+graph LR
+    User[User] -->|Research Request| AR[App Runner<br/>Researcher]
+    Schedule[EventBridge<br/>Every 2hrs] -->|Trigger| SchedLambda[Lambda<br/>Scheduler]
+    SchedLambda -->|Auto Research| AR
+    AR -->|Generate Analysis| Bedrock[AWS Bedrock<br/>LLM Model]
+    AR -->|Store Research| API[API Gateway]
+    API -->|Process| Lambda[Lambda<br/>Ingest]
+    Lambda -->|Embeddings| SM[SageMaker<br/>all-MiniLM-L6-v2]
+    Lambda -->|Store| S3V[(S3 Vectors<br/>90% Cheaper!)]
+    User -->|Search| S3V
 
-This step must be performed in the AWS Console.
+    style AR fill:#FF9900
+    style Bedrock fill:#FF9900
+    style S3V fill:#90EE90
+    style Schedule fill:#9333EA
+    style SchedLambda fill:#FF9900
+```
 
-1. Open the **S3 Console**
-2. In the left navigation, select **Vector buckets**
-3. Click **Create vector bucket**
-4. Configure:
+# 🔁 **Step 0 — Configure Bedrock Model Access**
 
-   * Name: `alex-vectors-{YOUR_ACCOUNT_ID}`
-   * Encryption: default (SSE-S3)
-5. After creation, open the bucket
-6. Create a vector index:
+The Researcher uses AWS Bedrock with either:
 
-   * Name: `financial-research`
-   * Dimension: `384`
-   * Distance metric: `Cosine`
-7. Click **Create vector index**
+* OpenAI OSS models (e.g. `openai.gpt-oss-120b-1:0`) in **us-west-2**, or
+* Amazon Nova models (e.g. `us.amazon.nova-pro-v1:0`) in your region or `us-east-1`.
 
-This bucket and index become the storage backend for all embeddings.
+### 0.1 Request model access
 
-# 🛠️ **Step 2 — Build the Lambda Deployment Package**
+1. Sign in to the AWS Console
+2. Open **Amazon Bedrock**
+3. Switch to **us-west-2** if using OSS models
+4. In the left sidebar, select **Model access**
+5. Click **Manage model access** / **Modify model access**
+6. In the **OpenAI** section, request:
 
-The ingestion Lambda code already exists in the repository.
+   * `gpt-oss-120b` (OpenAI GPT OSS 120B)
+   * `gpt-oss-20b` (optional, smaller model)
+7. Optionally, request **Amazon Nova** models in your region or `us-east-1` (e.g. `amazon.nova-pro-v1`)
+8. Submit and wait for access (typically fast)
+
+Notes:
+
+* OSS models are only available in **us-west-2**
+* No separate API key is needed for Bedrock; IAM roles handle auth
+* The Researcher also uses an **OpenAI API key** for Agents SDK tracing (for observability)
+
+### 0.2 Update `backend/researcher/server.py`
+
+Open:
+
+```text
+backend/researcher/server.py
+```
+
+Find:
+
+```python
+    # Please override these variables with the region you are using
+    # Other choices: us-west-2 (for OpenAI OSS models) and eu-central-1
+    REGION = "us-east-1"
+    os.environ["AWS_REGION_NAME"] = REGION  # LiteLLM's preferred variable
+    os.environ["AWS_REGION"] = REGION       # Boto3 standard
+    os.environ["AWS_DEFAULT_REGION"] = REGION  # Fallback
+
+    # Please override this variable with the model you are using
+    # Common choices: bedrock/eu.amazon.nova-pro-v1:0 for EU and bedrock/us.amazon.nova-pro-v1:0 for US
+    # or bedrock/amazon.nova-pro-v1:0 if you are not using inference profiles
+    # bedrock/openai.gpt-oss-120b-1:0 for OpenAI OSS models
+    # bedrock/converse/us.anthropic.claude-sonnet-4-20250514-v1:0 for Claude Sonnet 4
+    # NOTE that nova-pro is needed to support tools and MCP servers; nova-lite is not enough
+    MODEL = "bedrock/us.amazon.nova-pro-v1:0"
+    model = LitellmModel(model=MODEL)
+```
+
+Update:
+
+* `REGION` to match where you have model access (e.g. `us-west-2` for OSS, `us-east-1` for Nova)
+* `MODEL` to the exact Bedrock model ID you enabled (e.g. `bedrock/us.amazon.nova-pro-v1:0` or `bedrock/openai.gpt-oss-120b-1:0`).
+
+Ensure you choose a model that supports **tools / MCP** (e.g. Nova Pro).
+
+# 🪜 **Step 1 — Deploy ECR and IAM for the Researcher**
+
+First, configure Terraform for this branch.
 
 ```bash
-cd backend/ingest
-uv run package.py
-```
-
-This generates:
-
-```
-lambda_function.zip
-```
-
-which includes all Python dependencies and the ingestion handler.
-
-# 🧩 **Step 3 — Deploy the Ingestion Infrastructure**
-
-Navigate to the ingestion Terraform configuration:
-
-```bash
-cd ../../terraform/3_ingestion
+cd terraform/4_researcher
 cp terraform.tfvars.example terraform.tfvars
 ```
 
 Edit `terraform.tfvars`:
 
 ```hcl
-aws_region             = "us-east-1"
-sagemaker_endpoint_name = "alex-embedding-endpoint"
+aws_region       = "us-east-1"  # Your main AWS region
+openai_api_key   = "sk-..."     # OpenAI API key for Agents SDK tracing
+alex_api_endpoint = "https://xxxxxxxxxx.execute-api.us-east-1.amazonaws.com/prod/ingest"  # From Part 3
+alex_api_key      = "your-api-key-here"                                                   # From Part 3
+scheduler_enabled = false  # Keep false for now
 ```
 
-Deploy the stack:
+Now deploy only the **ECR repository** and **App Runner IAM role**.
+
+Mac / Linux:
 
 ```bash
 terraform init
+
+terraform apply \
+  -target=aws_ecr_repository.researcher \
+  -target=aws_iam_role.app_runner_role
+```
+
+Windows PowerShell:
+
+```powershell
+terraform init
+
+terraform apply `
+  -target="aws_ecr_repository.researcher" `
+  -target="aws_iam_role.app_runner_role"
+```
+
+Confirm with `yes`.
+
+Terraform creates:
+
+* ECR repository for the Researcher Docker image
+* IAM role for App Runner with required permissions
+
+Record the **ECR repository URL** from the output; it will be used by the deploy script.
+
+# 🚢 **Step 2 — Build and Deploy the Researcher Container**
+
+Now build and push the Docker image, and trigger an App Runner deployment.
+
+```bash
+cd ../../backend/researcher
+uv run deploy.py
+```
+
+The script will:
+
+1. Build a Docker image (`--platform linux/amd64` for App Runner)
+2. Push it to the ECR repository from Step 1
+3. Trigger an App Runner deployment
+4. Wait for the service to become healthy
+5. Print the **App Runner service URL**
+
+Example output:
+
+```text
+Service found at: https://xxxxxxxxxx.us-east-1.awsapprunner.com
+Checking if service is healthy...
+Service is healthy.
+```
+
+This **service URL** is what “`YOUR_SERVICE_URL`” refers to later in the README.
+
+# 🏗️ **Step 3 — Create the App Runner Service (Terraform)**
+
+After the image is built and pushed, return to Terraform to create the full service.
+
+```bash
+cd ../../terraform/4_researcher
 terraform apply
 ```
 
-Terraform will create:
+Windows PowerShell:
 
-* Lambda ingestion function
-* IAM roles with S3 Vectors + SageMaker permissions
-* API Gateway endpoint
-* API key with usage plan
-* Environment variables for Lambda
+```powershell
+cd ..\..\terraform\4_researcher
+terraform apply
+```
 
-Terraform will output:
+Confirm with `yes`.
 
-* API endpoint URL
-* API key ID (used to retrieve the actual key)
-* Vector bucket name
-* Lambda and IAM resource ARNs
+Terraform will:
 
-# 🗂️ **Step 4 — Save Configuration Values**
+* Create / update the App Runner service (using the ECR image)
+* Configure environment variables (API endpoint, keys, model config)
+* Optionally prepare the scheduler (depending on `scheduler_enabled`)
 
-Retrieve your API key:
+Initial App Runner deployment can take 3–5 minutes.
+The final Terraform output will also include the **service URL**.
+
+# 🔗 **Step 4 — Test the End-to-End Pipeline**
+
+Now test the full path: **Research → Ingest → S3 Vectors → Search**.
+
+### 4.1 Clean the vector store
 
 ```bash
-aws apigateway get-api-key \
-  --api-key YOUR_API_KEY_ID \
-  --include-value \
-  --query 'value' \
-  --output text
+cd ../../backend/ingest
+uv run cleanup_s3vectors.py
 ```
 
-Update your `.env` file in the **project root**:
+Expected:
 
-```
-VECTOR_BUCKET=alex-vectors-YOUR_ACCOUNT_ID
-ALEX_API_ENDPOINT=https://xxxxx.execute-api.us-east-1.amazonaws.com/prod/ingest
-ALEX_API_KEY=YOUR_API_KEY_VALUE
+```text
+✅ All documents deleted successfully
 ```
 
-To view Terraform outputs again later:
+### 4.2 Generate research via the Researcher
 
 ```bash
-cd terraform/3_ingestion
-terraform output
+cd ../researcher
+uv run test_research.py
 ```
 
-# 🧪 **Step 5 — Test Local Ingestion Using S3 Vectors**
+The script will:
+
+1. Discover your App Runner service URL
+2. Check the `/health` endpoint
+3. Trigger a research job on a default topic
+4. Send results to the ingest API
+5. Print summary output
+
+You can also pass a topic explicitly:
 
 ```bash
-cd backend/ingest
-uv run test_ingest_s3vectors.py
+uv run test_research.py "Tesla competitive advantages"
+uv run test_research.py "Microsoft cloud revenue growth"
 ```
 
-Expected output:
-
-```
-✓ Success! Document ID: <uuid>
-Testing complete!
-```
-
-# 🧪 **Step 6 — Test Local Search**
+### 4.3 Verify the research was stored
 
 ```bash
+cd ../ingest
 uv run test_search_s3vectors.py
 ```
 
-You should see the test documents (Tesla, Amazon, NVIDIA) and semantic search matches.
+You should see:
 
-Understood — **clean section only**, no explanations, no optional Windows curl, no commentary.
-Just the two correct options:
+* Research documents
+* Associated metadata (topic, timestamp)
+* Evidence that embeddings were created and stored
 
-* **Windows (PowerShell)**
-* **Linux / macOS (curl)**
-
-Here it is:
-
----
-
-# 🧪 **Optional — Test Ingestion via API Gateway**
-
-Use the command appropriate for your operating system.
-
-## **Windows (PowerShell)**
-
-```powershell
-cd C:\Users\HP\OneDrive\Documents\Projects\LLMOps\LLMOps-Financial-Planner
-
-(Get-Content .env) -replace '^(.*?)=(.*)$', '$env:$1="$2"' | Invoke-Expression
-
-cd backend\ingest
-
-$body = @{
-  text = "Test document via API"
-  metadata = @{ source = "api_test" }
-} | ConvertTo-Json
-
-Invoke-WebRequest `
-  -Uri $env:ALEX_API_ENDPOINT `
-  -Method POST `
-  -Headers @{
-    "x-api-key"    = $env:ALEX_API_KEY
-    "Content-Type" = "application/json"
-  } `
-  -Body $body
-```
-
-Expected output:
-
-```
-StatusCode : 200
-Content    : {"message":"Document indexed successfully","document_id":"..."}
-```
-
-## **Linux / macOS (curl)**
+### 4.4 Test semantic search
 
 ```bash
-curl -X POST "$ALEX_API_ENDPOINT" \
-  -H "x-api-key: $ALEX_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"text": "Test document via API", "metadata": {"source": "api_test"}}'
+uv run test_search_s3vectors.py "electric vehicle market"
+uv run test_search_s3vectors.py "inflation protection"
 ```
 
-Expected output:
+Even if the phrasing differs from the original topic, semantic search should surface related research.
+
+# 🧪 **Step 5 — Test the Researcher Service Directly**
+
+This step validates the **App Runner service** itself.
+
+`YOUR_SERVICE_URL` here refers to the **App Runner service URL** printed by:
+
+* `uv run test_research.py`
+* or visible in the App Runner console
+
+It will look like:
+
+```text
+https://xxxxxxxxxx.us-east-1.awsapprunner.com
+```
+
+### 5.1 Health check
+
+Mac / Linux:
+
+```bash
+curl https://YOUR_APP_RUNNER_SERVICE_URL/health
+```
+
+Windows PowerShell:
+
+```powershell
+Invoke-WebRequest -Uri "https://YOUR_APP_RUNNER_SERVICE_URL/health" | ConvertFrom-Json
+```
+
+Example output:
+
+```text
+service         status  timestamp
+-------         ------  ---------
+Alex Researcher healthy 2025-12-07T13:11:27.830533+00:00
+```
+
+Or in JSON form:
 
 ```json
-{"message": "Document indexed successfully", "document_id": "..."}
+{
+  "service": "Alex Researcher",
+  "status": "healthy",
+  "alex_api_configured": true,
+  "timestamp": "2025-..."
+}
 ```
 
+### 5.2 Try additional research topics
 
-# 🏗️ **Architecture Overview**
+From `backend/researcher`:
 
-```mermaid
-graph LR
-    Client -->|API Key| APIGW[API Gateway]
-    APIGW --> Lambda[Lambda Ingestion Function]
-    Lambda --> SM[SageMaker Embedding Endpoint]
-    SM -->|Embeddings| Lambda
-    Lambda --> S3V[S3 Vectors]
-
-    style S3V fill:#90EE90,stroke:#228B22,stroke-width:2px
+```bash
+uv run test_research.py "NVIDIA AI chip market share"
+uv run test_research.py "Apple services revenue growth"
+uv run test_research.py "Gold vs Bitcoin as an inflation hedge"
 ```
 
-This pipeline completes the ingestion backbone of Alex.
+Then query from `backend/ingest`:
 
-# 📉 **Cost Comparison**
+```bash
+uv run test_search_s3vectors.py "artificial intelligence"
+uv run test_search_s3vectors.py "inflation hedge"
+```
 
-| Service               | Estimated Monthly Cost |
-| --------------------- | ---------------------- |
-| OpenSearch Serverless | ~$200–300              |
-| **S3 Vectors**        | **~$20–30**            |
-| Savings               | **≈90%**               |
+# ⏱️ **Step 6 — Enable Automated Research (Optional)**
+
+The scheduler triggers the Researcher automatically every 2 hours.
+
+### 6.1 Enable the scheduler
+
+Edit `terraform/4_researcher/terraform.tfvars`:
+
+```hcl
+scheduler_enabled = true
+```
+
+Apply the change:
+
+Mac / Linux:
+
+```bash
+cd terraform/4_researcher
+terraform apply
+```
+
+Windows PowerShell:
+
+```powershell
+cd terraform\4_researcher
+terraform apply
+```
+
+Confirm with `yes`.
+
+Terraform will:
+
+* Create a scheduler Lambda
+* Create an EventBridge rule (every 2 hours)
+* Wire the Lambda to call your App Runner `/research/auto` endpoint
+
+Check status:
+
+```bash
+terraform output scheduler_status
+```
+
+### 6.2 Monitor automated research
+
+Lambda scheduler logs:
+
+```bash
+aws logs tail /aws/lambda/alex-research-scheduler --follow --region us-east-1
+```
+
+App Runner application logs:
+
+```bash
+aws logs tail "/aws/apprunner/alex-researcher/*/application" --follow --region us-east-1
+```
+
+Search accumulated research:
+
+```bash
+cd ../../backend/ingest
+uv run test_search_s3vectors.py
+```
+
+### 6.3 Disable the scheduler
+
+When you want to stop automatic runs:
+
+Mac / Linux:
+
+```bash
+cd terraform/4_researcher
+terraform apply -var="scheduler_enabled=false"
+```
+
+Windows PowerShell:
+
+```powershell
+cd terraform\4_researcher
+terraform apply -var="scheduler_enabled=false"
+```
 
 # 🧹 **Troubleshooting**
 
-### Vector bucket not found
+**Service creation failed**
 
-Ensure:
+* Check ECR repository:
 
-* Bucket was created in **Vector Buckets**, not S3
-* Index name and dimension match the configuration
-
-### AccessDenied errors
-
-Check:
-
-* IAM user has S3 Vectors permissions
-* Lambda role includes `s3vectors:*` actions
-
-### Lambda errors (500 responses)
-
-Check:
-
-* CloudWatch logs:
-
+  ```bash
+  aws ecr describe-repositories
   ```
-  aws logs tail /aws/lambda/alex-ingest --follow
-  ```
-* Lambda environment variables (SAGEMAKER_ENDPOINT, VECTOR_BUCKET)
-* Role permissions for SageMaker + S3 Vectors integration
 
-### Missing CLI support
+* Ensure Docker Desktop is running
 
-Update AWS CLI to the newest version to access `s3vectors` namespaces.
+* Verify AWS credentials (`aws sts get-caller-identity`)
 
-# 📌 **Next Steps**
+**Deployment stuck in `OPERATION_IN_PROGRESS`**
 
-You now have a complete ingestion subsystem:
+* Normal for first deploy (5–10 minutes)
+* Check App Runner logs in the AWS Console
 
-* Vector bucket and index
-* Secure ingestion API
-* End-to-end embedding pipeline
-* Working semantic search
-* Fully deployed Terraform-managed infrastructure
+**Exit code 255 / service will not start**
 
-In the next branch, you will integrate research functionality and connect ingestion outputs to the wider Alex agentic system.
+* Often due to architecture mismatch
+* Ensure the deploy script builds for `linux/amd64`
+* Re-run `uv run deploy.py`
+
+**Connection refused / 5xx when calling service**
+
+* Confirm service status is `RUNNING` in App Runner
+* Verify you are using `https://` and the correct service URL
+
+**504 Gateway Timeout**
+
+* The agent may be performing long web browsing
+* The request can time out but still complete and store results
+
+**Bedrock model errors**
+
+* Confirm model access in the Bedrock console
+* Ensure IAM roles include Bedrock permissions
+* Verify `REGION` and `MODEL` in `server.py`
 
 # 🧽 **Clean Up (Optional)**
 
+To remove all resources for this branch:
+
 ```bash
+cd terraform/4_researcher
 terraform destroy
 ```
 
-Only run this if you are finished with the project; it will delete the ingestion API, Lambda, IAM roles, and related resources.
+This will delete:
+
+* App Runner service
+* ECR repository (if managed here)
+* Scheduler Lambda and EventBridge rule
+* IAM roles for the Researcher
+
+# ✅ **Summary**
+
+By completing this branch, you now have:
+
+* A fully deployed **Researcher Agent** on AWS App Runner
+* Integration with **Bedrock** for large-scale financial analysis
+* Automatic storage of research into **S3 Vectors** via the ingest pipeline
+* A tested end-to-end flow: Research → Ingest → Embeddings → Vectors → Search
+* An optional **scheduler** to keep your knowledge base continuously updated
