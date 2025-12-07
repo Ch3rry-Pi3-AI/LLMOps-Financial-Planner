@@ -28,11 +28,44 @@ The following environment variables must be set (e.g. via `.env`):
 from __future__ import annotations
 
 import os
+import sys
 from typing import List, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
+
+
+# ============================================================
+# Console / Emoji Handling
+# ============================================================
+
+# Best-effort: normalise stdout to UTF-8 and avoid hard failures
+try:
+    # Python 3.7+ only; safe to ignore if unsupported
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
+
+def _supports_emoji() -> bool:
+    """
+    Return True if the current stdout encoding is likely to support emoji.
+
+    On Windows, consoles often default to cp1252 which cannot encode emoji.
+    In that case we fall back to ASCII-only markers.
+    """
+    encoding = getattr(sys.stdout, "encoding", "") or ""
+    return "UTF-8" in encoding.upper()
+
+
+USE_EMOJI: bool = _supports_emoji()
+
+ROCKET: str = "🚀" if USE_EMOJI else "[MIGRATE]"
+CHECK: str = "✅" if USE_EMOJI else "[OK]"
+WARN: str = "⚠️" if USE_EMOJI else "[WARN]"
+ERROR: str = "❌" if USE_EMOJI else "[ERROR]"
+SKIP: str = "⚠️" if USE_EMOJI else "[SKIP]"
 
 
 # ============================================================
@@ -276,7 +309,7 @@ def run_migrations() -> None:
     statements = get_migration_statements()
 
     # Announce start of migration process
-    print("🚀 Running database migrations...")
+    print(f"{ROCKET} Running database migrations...")
     print("=" * 50)
 
     # Track success and error counts for summary
@@ -303,7 +336,7 @@ def run_migrations() -> None:
                 database=database,
                 sql=stmt,
             )
-            print("    ✅ Success")
+            print(f"    {CHECK} Success")
             success_count += 1
 
         except ClientError as exc:
@@ -312,10 +345,10 @@ def run_migrations() -> None:
 
             # Treat "already exists" as a non-fatal, idempotent success
             if "already exists" in error_msg.lower():
-                print("    ⚠️  Already exists (skipping)")
+                print(f"    {SKIP} Already exists (skipping)")
                 success_count += 1
             else:
-                print(f"    ❌ Error: {error_msg[:100]}")
+                print(f"    {ERROR} Error: {error_msg[:100]}")
                 error_count += 1
 
     # Print consolidated summary
@@ -324,12 +357,12 @@ def run_migrations() -> None:
 
     # Provide next-step guidance or caution depending on outcome
     if error_count == 0:
-        print("\n✅ All migrations completed successfully!")
-        print("\n📝 Next steps:")
+        print(f"\n{CHECK} All migrations completed successfully!")
+        print("\nNext steps:")
         print("1. Load seed data: uv run seed_data.py")
         print("2. Test database operations: uv run test_db.py")
     else:
-        print("\n⚠️  Some statements failed. Check errors above.")
+        print(f"\n{WARN} Some statements failed. Check errors above.")
 
 
 # ============================================================
