@@ -28,14 +28,84 @@ Typical usage:
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from decimal import Decimal
-from pathlib import Path
 from typing import List
 
 from src.client import DataAPIClient
 from src.models import Database
 from src.schemas import AccountCreate, PositionCreate, UserCreate
+
+
+# ============================================================
+# Console / Emoji Handling
+# ============================================================
+
+# Best-effort: normalise stdout to UTF-8 and avoid hard failures
+try:
+    # Python 3.7+ only; safe to ignore if unsupported
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
+
+def _supports_emoji() -> bool:
+    """
+    Return True if the current stdout encoding is likely to support emoji.
+
+    On Windows, consoles often default to cp1252 which cannot encode emoji.
+    In that case we fall back to ASCII-only markers.
+    """
+    encoding = getattr(sys.stdout, "encoding", "") or ""
+    return "UTF-8" in encoding.upper()
+
+
+USE_EMOJI: bool = _supports_emoji()
+
+ROCKET: str = "🚀" if USE_EMOJI else "[RESET]"
+TRASH: str = "🗑️" if USE_EMOJI else "[DROP]"
+CHECK: str = "✅" if USE_EMOJI else "[OK]"
+WARN: str = "⚠️" if USE_EMOJI else "[WARN]"
+ERROR: str = "❌" if USE_EMOJI else "[ERROR]"
+NOTE: str = "📝" if USE_EMOJI else "[INFO]"
+SEARCH: str = "🔍" if USE_EMOJI else "[CHECK]"
+USER_ICON: str = "👤" if USE_EMOJI else "[USER]"
+BULLET: str = "•"   # This is fine in UTF-8 and usually supported
+
+
+def run_uv_script(args: List[str]) -> subprocess.CompletedProcess[bytes]:
+    """
+    Run a uv-based Python script and return its completed process.
+
+    This captures raw bytes (not text) to avoid any implicit cp1252
+    decoding inside subprocess reader threads on Windows. The caller
+    is responsible for decoding with UTF-8.
+    """
+    return subprocess.run(
+        ["uv", "run", *args],
+        check=False,
+        capture_output=True,  # stdout/stderr will be bytes
+    )
+
+
+def _decode_output(data: bytes | None) -> str:
+    """
+    Decode subprocess output bytes using UTF-8 with replacement.
+
+    Parameters
+    ----------
+    data : Optional[bytes]
+        Raw stdout or stderr from a subprocess.
+
+    Returns
+    -------
+    str
+        Decoded text, never None.
+    """
+    if data is None:
+        return ""
+    return data.decode("utf-8", errors="replace")
 
 
 # ============================================================
@@ -52,7 +122,7 @@ def drop_all_tables(db: DataAPIClient) -> None:
         Low-level Aurora Data API client used to execute SQL statements.
     """
     # Announce destructive operation
-    print("🗑️  Dropping existing tables...")
+    print(f"{TRASH} Dropping existing tables...")
 
     # Tables must be dropped in dependency order because of foreign keys
     tables_to_drop: List[str] = [
@@ -67,16 +137,16 @@ def drop_all_tables(db: DataAPIClient) -> None:
     for table in tables_to_drop:
         try:
             db.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
-            print(f"   ✅ Dropped {table}")
+            print(f"   {CHECK} Dropped {table}")
         except Exception as exc:  # noqa: BLE001
-            print(f"   ⚠️  Error dropping {table}: {exc}")
+            print(f"   {WARN} Error dropping {table}: {exc}")
 
     # Drop the timestamp trigger function if present
     try:
         db.execute("DROP FUNCTION IF EXISTS update_updated_at_column() CASCADE")
-        print("   ✅ Dropped update_updated_at_column function")
+        print(f"   {CHECK} Dropped update_updated_at_column function")
     except Exception as exc:  # noqa: BLE001
-        print(f"   ⚠️  Error dropping function: {exc}")
+        print(f"   {WARN} Error dropping function: {exc}")
 
 
 # ============================================================
@@ -93,7 +163,7 @@ def create_test_data(db_models: Database) -> None:
         High-level database interface exposing table model helpers.
     """
     # Announce start of test data creation
-    print("\n👤 Creating test user and portfolio...")
+    print(f"\n{USER_ICON} Creating test user and portfolio...")
 
     # Build test user payload with Pydantic validation
     user_data = UserCreate(
@@ -106,7 +176,7 @@ def create_test_data(db_models: Database) -> None:
     # Check whether the test user already exists
     existing_user = db_models.users.find_by_clerk_id("test_user_001")
     if existing_user:
-        print("   ℹ️  Test user already exists")
+        print(f"   {NOTE} Test user already exists")
     else:
         # Use validated model data to create the user
         validated_user = user_data.model_dump()
@@ -116,7 +186,7 @@ def create_test_data(db_models: Database) -> None:
             years_until_retirement=validated_user["years_until_retirement"],
             target_retirement_income=validated_user["target_retirement_income"],
         )
-        print("   ✅ Created test user")
+        print(f"   {CHECK} Created test user")
 
     # Define three example accounts with different wrappers and cash rates
     accounts = [
@@ -145,7 +215,7 @@ def create_test_data(db_models: Database) -> None:
 
     # Reuse existing accounts if they are already present
     if user_accounts:
-        print(f"   ℹ️  User already has {len(user_accounts)} accounts")
+        print(f"   {NOTE} User already has {len(user_accounts)} accounts")
         account_ids = [acc["id"] for acc in user_accounts]
     else:
         # Create new accounts and collect their IDs
@@ -160,7 +230,7 @@ def create_test_data(db_models: Database) -> None:
                 cash_interest=validated_acc["cash_interest"],
             )
             account_ids.append(account_id)
-            print(f"   ✅ Created account: {validated_acc['account_name']}")
+            print(f"   {CHECK} Created account: {validated_acc['account_name']}")
 
     # Only proceed with positions if at least one account exists
     if not account_ids:
@@ -181,7 +251,7 @@ def create_test_data(db_models: Database) -> None:
     # Check if the account already has positions
     existing_positions = db_models.positions.find_by_account(primary_account_id)
     if existing_positions:
-        print(f"   ℹ️  Account already has {len(existing_positions)} positions")
+        print(f"   {NOTE} Account already has {len(existing_positions)} positions")
         return
 
     # Insert each test position with Pydantic validation
@@ -198,7 +268,7 @@ def create_test_data(db_models: Database) -> None:
             validated_position["symbol"],
             validated_position["quantity"],
         )
-        print(f"   ✅ Added position: {quantity} shares of {symbol}")
+        print(f"   {CHECK} Added position: {quantity} shares of {symbol}")
 
 
 # ============================================================
@@ -227,7 +297,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Print script banner
-    print("🚀 Database Reset Script")
+    print(f"{ROCKET} Database Reset Script")
     print("=" * 50)
 
     # Initialise low-level client and high-level model interface
@@ -240,67 +310,70 @@ def main() -> None:
         drop_all_tables(db_client)
 
         # Run migrations using the project migration runner
-        print("\n📝 Running migrations...")
-        import subprocess
+        print(f"\n{NOTE} Running migrations...")
 
-        migration_result = subprocess.run(
-            ["uv", "run", "run_migrations.py"],
-            capture_output=True,
-            text=True,
-        )
+        migration_result = run_uv_script(["run_migrations.py"])
+        mig_stdout = _decode_output(migration_result.stdout)
+        mig_stderr = _decode_output(migration_result.stderr)
 
         # Abort if migrations fail
         if migration_result.returncode != 0:
-            print("❌ Migration failed!")
-            print(migration_result.stderr)
+            print(f"{ERROR} Migration failed!")
+            if mig_stdout.strip():
+                print("---- migration stdout ----")
+                print(mig_stdout)
+            if mig_stderr.strip():
+                print("---- migration stderr ----")
+                print(mig_stderr)
             sys.exit(1)
 
-        print("✅ Migrations completed")
+        print(f"{CHECK} Migrations completed")
 
     # Always run seed data to (re)populate instruments and other core data
     print("\n🌱 Loading seed data...")
-    import subprocess
-
-    seed_result = subprocess.run(
-        ["uv", "run", "seed_data.py"],
-        capture_output=True,
-        text=True,
-    )
+    seed_result = run_uv_script(["seed_data.py"])
+    seed_stdout = _decode_output(seed_result.stdout)
+    seed_stderr = _decode_output(seed_result.stderr)
 
     # Abort if seed script fails
     if seed_result.returncode != 0:
-        print("❌ Seed data failed!")
-        print(seed_result.stderr)
+        print(f"{ERROR} Seed data failed!")
+        if seed_stdout.strip():
+            print("---- seed stdout ----")
+            print(seed_stdout)
+        if seed_stderr.strip():
+            print("---- seed stderr ----")
+            print(seed_stderr)
         sys.exit(1)
 
     # Provide a friendlier success message based on script output
-    if "22/22 instruments loaded" in seed_result.stdout:
-        print("✅ Loaded 22 instruments")
+    if "instruments loaded" in seed_stdout:
+        print(f"{CHECK} Seed data loaded (instruments confirmed)")
     else:
-        print("✅ Seed data loaded")
+        print(f"{CHECK} Seed data loaded")
 
     # Optionally add a test user, accounts, and positions
     if args.with_test_data:
         create_test_data(db_models)
 
     # Perform a simple record-count verification across key tables
-    print("\n🔍 Final verification...")
+    print(f"\n{SEARCH} Final verification...")
 
     tables_to_check = ["users", "instruments", "accounts", "positions", "jobs"]
     for table_name in tables_to_check:
         result = db_client.query(f"SELECT COUNT(*) AS count FROM {table_name}")
         count = result[0]["count"] if result else 0
-        print(f"   • {table_name}: {count} records")
+        print(f"   {BULLET} {table_name}: {count} records")
 
     # Final status summary
     print("\n" + "=" * 50)
-    print("✅ Database reset complete!")
+    print(f"{CHECK} Database reset complete!")
 
     if args.with_test_data:
-        print("\n📝 Test user created:")
-        print("   • User ID: test_user_001")
-        print("   • 3 accounts (401k, Roth IRA, Taxable)")
-        print("   • 5 positions in 401k account")
+        print(f"\n{NOTE} Test user created:")
+        print(f"   {BULLET} User ID: test_user_001")
+        print(f"   {BULLET} 3 accounts (401k, Roth IRA, Taxable)")
+        print(f"   {BULLET} 5 positions in 401k account")
 
 
 if __name__ == "__main__":
