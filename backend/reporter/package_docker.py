@@ -3,7 +3,7 @@
 Alex Financial Planner – Reporter Lambda Docker Packager.
 
 This script builds an AWS Lambda-compatible deployment package for the
-**Reporter** Lambda function using Docker. It is intended to be run from
+Reporter Lambda function using Docker. It is intended to be run from
 local development or CI to produce (and optionally deploy) a single ZIP
 artifact.
 
@@ -24,7 +24,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
+
 
 # ============================================================
 # Configuration
@@ -39,7 +40,7 @@ LAMBDA_BASE_IMAGE = "public.ecr.aws/lambda/python:3.12"
 # ============================================================
 
 
-def run_command(cmd: list[str], cwd: Optional[str] = None) -> str:
+def run_command(cmd: List[str], cwd: Optional[str | Path] = None) -> str:
     """Run a shell command and return its stdout, exiting on failure.
 
     Parameters
@@ -52,25 +53,36 @@ def run_command(cmd: list[str], cwd: Optional[str] = None) -> str:
     Returns
     -------
     str
-        Standard output from the command as text.
+        Standard output from the command as text (decoded with replacement
+        for any invalid characters).
 
     Raises
     ------
     SystemExit
         If the command exits with a non-zero status code.
     """
-    print(f"▶ Running: {' '.join(cmd)}")
+    print(f"Running: {' '.join(cmd)}")
+
     result = subprocess.run(
         cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
+        cwd=str(cwd) if cwd is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
+
+    # Decode with replacement to avoid UnicodeDecodeError on Windows cp1252
+    stdout = result.stdout.decode(errors="replace")
+    stderr = result.stderr.decode(errors="replace")
+
     if result.returncode != 0:
-        print("❌ Error while running command:")
-        print(result.stderr)
+        print("Error while running command:")
+        if stderr:
+            print(stderr)
+        else:
+            print("No stderr output.")
         sys.exit(1)
-    return result.stdout
+
+    return stdout
 
 
 # ============================================================
@@ -102,15 +114,15 @@ def package_lambda() -> Path:
         package_dir = temp_path / "package"
         package_dir.mkdir(parents=True, exist_ok=True)
 
-        print("📦 Creating Reporter Lambda package using Docker...")
+        print("Creating Reporter Lambda package using Docker...")
 
         # ------------------------------------------------------
         # Export requirements from uv.lock
         # ------------------------------------------------------
-        print("📜 Exporting requirements from uv.lock...")
+        print("Exporting requirements from uv.lock...")
         requirements_result = run_command(
             ["uv", "export", "--no-hashes", "--no-emit-project"],
-            cwd=str(reporter_dir),
+            cwd=reporter_dir,
         )
 
         # Filter out packages not needed or not suitable in Lambda
@@ -118,17 +130,17 @@ def package_lambda() -> Path:
         for line in requirements_result.splitlines():
             # Example: skip clipboard utilities
             if line.startswith("pyperclip"):
-                print(f"⚖️  Excluding from Lambda package: {line}")
+                print(f"Excluding from Lambda package: {line}")
                 continue
             filtered_requirements.append(line)
 
         req_file = temp_path / "requirements.txt"
-        req_file.write_text("\n".join(filtered_requirements))
+        req_file.write_text("\n".join(filtered_requirements), encoding="utf-8")
 
         # ------------------------------------------------------
         # Install dependencies into ./package using Docker
         # ------------------------------------------------------
-        print("🐳 Installing dependencies inside Lambda base image...")
+        print("Installing dependencies inside Lambda base image...")
 
         docker_cmd = [
             "docker",
@@ -139,7 +151,7 @@ def package_lambda() -> Path:
             "-v",
             f"{temp_path}:/build",
             "-v",
-            f"{backend_dir}/database:/database",
+            f"{backend_dir / 'database'}:/database",
             "--entrypoint",
             "/bin/bash",
             LAMBDA_BASE_IMAGE,
@@ -156,7 +168,7 @@ def package_lambda() -> Path:
         # ------------------------------------------------------
         # Copy Reporter source files into the package
         # ------------------------------------------------------
-        print("📁 Copying Reporter source files into package...")
+        print("Copying Reporter source files into package...")
 
         files_to_copy = [
             "lambda_handler.py",
@@ -170,7 +182,7 @@ def package_lambda() -> Path:
             src = reporter_dir / filename
             dst = package_dir / filename
             shutil.copy(src, dst)
-            print(f"  ✅ Included: {filename}")
+            print(f"  Included: {filename}")
 
         # ------------------------------------------------------
         # Create the ZIP archive
@@ -178,14 +190,14 @@ def package_lambda() -> Path:
         zip_path = reporter_dir / "reporter_lambda.zip"
 
         if zip_path.exists():
-            print(f"🧹 Removing existing zip: {zip_path}")
+            print(f"Removing existing zip: {zip_path}")
             zip_path.unlink()
 
-        print(f"🪙 Creating zip file: {zip_path}")
-        run_command(["zip", "-r", str(zip_path), "."], cwd=str(package_dir))
+        print(f"Creating zip file: {zip_path}")
+        run_command(["zip", "-r", str(zip_path), "."], cwd=package_dir)
 
         size_mb = zip_path.stat().st_size / (1024 * 1024)
-        print(f"✅ Package created: {zip_path} ({size_mb:.1f} MB)")
+        print(f"Package created: {zip_path} ({size_mb:.1f} MB)")
 
         return zip_path
 
@@ -213,7 +225,7 @@ def deploy_lambda(zip_path: Path) -> None:
 
     lambda_client = boto3.client("lambda")
 
-    print(f"☁️  Deploying to Lambda function: {LAMBDA_FUNCTION_NAME}")
+    print(f"Deploying to Lambda function: {LAMBDA_FUNCTION_NAME}")
 
     try:
         with zip_path.open("rb") as f:
@@ -222,17 +234,16 @@ def deploy_lambda(zip_path: Path) -> None:
                 ZipFile=f.read(),
             )
 
-        print("✅ Successfully updated Lambda function")
-        print(f"   Function ARN: {response['FunctionArn']}")
-
+        print("Successfully updated Lambda function")
+        print(f"Function ARN: {response['FunctionArn']}")
     except lambda_client.exceptions.ResourceNotFoundException:
         print(
-            f"❌ Lambda function {LAMBDA_FUNCTION_NAME} not found. "
+            f"Lambda function {LAMBDA_FUNCTION_NAME} not found. "
             "Please deploy via Terraform first."
         )
         sys.exit(1)
     except Exception as exc:  # noqa: BLE001
-        print(f"❌ Error deploying Lambda: {exc}")
+        print(f"Error deploying Lambda: {exc}")
         sys.exit(1)
 
 
@@ -257,7 +268,7 @@ def main() -> None:
     try:
         run_command(["docker", "--version"])
     except FileNotFoundError:
-        print("❌ Error: Docker is not installed or not in PATH")
+        print("Error: Docker is not installed or not in PATH")
         sys.exit(1)
 
     # Build the Lambda package

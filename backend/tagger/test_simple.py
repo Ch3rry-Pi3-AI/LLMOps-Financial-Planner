@@ -15,9 +15,9 @@ Responsibilities
 
 Typical usage
 -------------
-Run locally from the scheduler folder:
+Run locally from the tagger folder:
 
-    uv run backend/scheduler/test_simple.py
+    uv run backend/tagger/test_simple.py
 
 This test **does not** call AWS or the real Lambda environment — it uses the
 handler directly inside your local Python environment.

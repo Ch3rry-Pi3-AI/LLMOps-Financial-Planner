@@ -1,557 +1,764 @@
-# 🧮 **Part 5 — Database & Shared Infrastructure**
+# 🎭 **Part 6 — AI Agent Orchestra**
 
-In this branch, you give Alex a **proper backend brain**: a shared Aurora Serverless v2 PostgreSQL database, plus a reusable database layer that all agents (Planner, Tagger, Reporter, Retirement, etc.) will share.
+In this branch, you give Alex a **full multi-agent AI backend**: five specialised Lambda agents orchestrated via SQS, Aurora, Bedrock, and S3 Vectors. This is where Alex stops being a single “smart endpoint” and becomes a **coordinated team of experts** working together on each user’s portfolio.
 
-By the end of this branch, Alex is no longer just a research toy – it has a **multi-agent, multi-user SaaS-style data model** with proper schema, validation, and scripts for seeding, resetting, and verifying the database.
+By the end of this branch you will have:
 
-## 🏦 **Why Aurora Serverless v2 with the Data API?**
+* Five production-ready Lambda agents (Planner, Tagger, Reporter, Charter, Retirement)
+* A robust SQS-driven orchestration flow
+* Local and remote (AWS) test harnesses
+* Terraform wiring for all agent infrastructure and configuration
 
-AWS offers many database services. For Alex, we need:
+## 🎻 **Why a Multi-Agent Architecture?**
 
-* Strong relational modelling (users, accounts, positions, jobs)
-* JSONB for flexible payloads (charts, reports, retirement projections)
-* Minimal networking/VPC complexity
-* Easy integration with Lambda and other serverless components
+Instead of one giant prompt that does everything badly, Alex uses **specialised agents**, each tuned for a narrow responsibility:
 
-### Common AWS database options
+* **Planner (Orchestrator)** – decides *what* needs doing and *who* should do it
+* **Tagger** – classifies instruments and fills in missing allocation data
+* **Reporter** – writes long-form markdown portfolio analysis
+* **Charter** – generates structured JSON chart specs for the frontend
+* **Retirement** – runs Monte Carlo retirement simulations and projections
 
-| Service            | Type           | Best For                                | Why Not for Alex (here)                                     |
-| ------------------ | -------------- | --------------------------------------- | ----------------------------------------------------------- |
-| **DynamoDB**       | NoSQL          | Key-value lookups, very high-scale apps | No SQL joins; awkward for relational portfolio data         |
-| **RDS (standard)** | SQL (managed)  | Predictable, always-on workloads        | Needs VPC + networking; always running → higher idle cost   |
-| **DocumentDB**     | Document NoSQL | MongoDB-compatible apps                 | Overkill; poorer fit for strongly structured financial data |
-| **Neptune**        | Graph          | Social / graph relationships            | Wrong model – we do not need graph queries                  |
-| **Timestream**     | Time-series    | Metrics, IoT, telemetry                 | Too specialised; we need full relational + JSONB            |
+Advantages:
 
-### Why Aurora Serverless v2 PostgreSQL + Data API?
+1. **Specialisation** – each agent is optimised for one job (classification, reporting, charts, retirement)
+2. **Reliability** – focused prompts and tools are easier to control and evaluate
+3. **Parallel execution** – agents can work concurrently where possible
+4. **Maintainability** – you can iterate on one agent’s prompts/tools without touching others
+5. **Cost control** – you only invoke the agents relevant to a given request
 
-We use **Aurora Serverless v2 with the Data API** because it offers:
+For a deeper conceptual background, see Philipp Schmid’s article on context engineering:
 
-1. **No VPC hassle** – Data API gives HTTPS access; no private networking setup
-2. **Scales to near-zero** – Low baseline cost for a learning project
-3. **PostgreSQL** – Mature SQL with JSONB support for flexible payloads
-4. **Serverless** – Auto-scales for spikes when agents run heavy workloads
-5. **Data API** – Lambda-friendly; no persistent connections or pooling required
-6. **Pay-per-use** – Good cost profile while you iterate on the system
-
-You get a production-grade relational database without having to dive into VPCs, bastion hosts, or connection-pool tuning on day one.
+[https://www.philschmid.de/context-engineering](https://www.philschmid.de/context-engineering)
 
 ## 🧱 **What This Branch Builds**
 
 This branch deploys and wires up:
 
-* ✅ Aurora Serverless v2 PostgreSQL cluster with the Data API enabled
-* ✅ Core schema for users, accounts, positions, instruments, and jobs
-* ✅ Shared database package (Pydantic-backed) for all backend agents
-* ✅ Seed data: 22 popular ETFs with allocation breakdowns
-* ✅ Reset + verification scripts for fast, repeatable local development
+* ✅ Five Lambda agents:
 
-Architecture context:
+  * `alex-planner`
+  * `alex-tagger`
+  * `alex-reporter`
+  * `alex-charter`
+  * `alex-retirement`
+* ✅ An SQS queue + DLQ for orchestrating analysis jobs
+* ✅ A complete **agent test harness** (local and AWS)
+* ✅ Docker-based packaging for Lambda-ready ZIPs
+* ✅ Terraform module for all agent infrastructure (IAM, triggers, logs, S3 code bucket)
+* ✅ Bedrock + Polygon configuration for real-time analysis
+
+High-level architecture:
 
 ```mermaid
 graph TB
-    User[User] -->|Manage Portfolio| API[API Gateway]
-    API -->|CRUD Operations| Lambda[API Lambda]
-    Lambda -->|Data API| Aurora[(Aurora Serverless v2<br/>PostgreSQL)]
-
-    Planner[Financial Planner<br/>Orchestrator] -->|Read/Write| Aurora
-    Tagger[Instrument Tagger] -->|Update Instruments| Aurora
-    Reporter[Report Writer] -->|Store Reports| Aurora
-    Charter[Chart Maker] -->|Store Charts| Aurora
-    Retirement[Retirement Specialist] -->|Store Projections| Aurora
-
-    style Aurora fill:#FF9900
+    User[User Request] -->|Trigger Analysis| SQS[SQS Queue]
+    SQS -->|Message| Planner[🎯 Financial Planner<br/>Orchestrator]
+    
+    Planner -->|Auto-tag missing data| Tagger[🏷️ InstrumentTagger]
+    Tagger -->|Update instruments| DB[(Aurora DB)]
+    
+    Planner -->|Delegate work| Reporter[📝 Report Writer]
+    Planner -->|Delegate work| Charter[📊 Chart Maker]
+    Planner -->|Delegate work| Retirement[🎯 Retirement Specialist]
+    
+    Reporter -->|Markdown analysis| DB
+    Charter -->|JSON charts| DB
+    Retirement -->|Projections| DB
+    
+    Reporter -->|Access knowledge| S3V[(S3 Vectors)]
+    
+    Planner -->|Finalize| DB
+    DB -->|Results| User
+    
     style Planner fill:#FFD700
-    style API fill:#90EE90
+    style Reporter fill:#90EE90
+    style Charter fill:#87CEEB
+    style Retirement fill:#DDA0DD
+    style Tagger fill:#FFB6C1
 ```
 
-# 🪜 **Step 0 — Add Required IAM Permissions**
+**Pre-requisites from earlier parts**
 
-Before Terraform can create Aurora, subnets, secrets, and Data API resources, your IAM user must have the right permissions.
+You should already have:
 
-### 0.1 Create a custom RDS + Data API policy
+* Aurora Serverless v2 database (Part 5)
+* S3 Vectors + embeddings endpoint (Parts 2–3)
+* Basic backend environment and `.env` in place
 
-1. Sign in as the **root user** (only for IAM setup)
-2. Go to **IAM → Policies → Create policy**
-3. Switch to the **JSON** tab and paste:
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "RDSPermissions",
-      "Effect": "Allow",
-      "Action": [
-        "rds:CreateDBCluster",
-        "rds:CreateDBInstance",
-        "rds:CreateDBSubnetGroup",
-        "rds:DeleteDBCluster",
-        "rds:DeleteDBInstance",
-        "rds:DeleteDBSubnetGroup",
-        "rds:DescribeDBClusters",
-        "rds:DescribeDBInstances",
-        "rds:DescribeDBSubnetGroups",
-        "rds:DescribeGlobalClusters",
-        "rds:ModifyDBCluster",
-        "rds:ModifyDBInstance",
-        "rds:ModifyDBSubnetGroup",
-        "rds:AddTagsToResource",
-        "rds:ListTagsForResource",
-        "rds:RemoveTagsFromResource",
-        "rds-data:ExecuteStatement",
-        "rds-data:BatchExecuteStatement",
-        "rds-data:BeginTransaction",
-        "rds-data:CommitTransaction",
-        "rds-data:RollbackTransaction"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "EC2Permissions",
-      "Effect": "Allow",
-      "Action": [
-        "ec2:DescribeVpcs",
-        "ec2:DescribeVpcAttribute",
-        "ec2:DescribeSubnets",
-        "ec2:DescribeAvailabilityZones",
-        "ec2:DescribeSecurityGroups",
-        "ec2:CreateSecurityGroup",
-        "ec2:DeleteSecurityGroup",
-        "ec2:AuthorizeSecurityGroupIngress",
-        "ec2:AuthorizeSecurityGroupEgress",
-        "ec2:RevokeSecurityGroupIngress",
-        "ec2:RevokeSecurityGroupEgress",
-        "ec2:CreateTags",
-        "ec2:DescribeTags"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "SecretsManagerPermissions",
-      "Effect": "Allow",
-      "Action": [
-        "secretsmanager:CreateSecret",
-        "secretsmanager:DeleteSecret",
-        "secretsmanager:DescribeSecret",
-        "secretsmanager:GetSecretValue",
-        "secretsmanager:PutSecretValue",
-        "secretsmanager:UpdateSecret"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "KMSPermissions",
-      "Effect": "Allow",
-      "Action": [
-        "kms:CreateGrant",
-        "kms:Decrypt",
-        "kms:DescribeKey",
-        "kms:Encrypt"
-      ],
-      "Resource": "*"
-    }
-  ]
-}
-```
 
-4. Continue → name the policy **`AlexRDSCustomPolicy`**
-5. Set a description, e.g. `RDS and Data API permissions for Alex project`
-6. Create the policy
+# 🧩 **Step 1 — Configure Agent Environment & Polygon**
 
-### 0.2 Attach policies to the `AlexAccess` group
+The AI agents depend on both **Bedrock** and **Polygon.io** for LLM calls and price data.
 
-1. In IAM, go to **User groups → AlexAccess**
+### 1.1 Get a free Polygon API key
 
-2. Open the **Permissions** tab → **Add permissions → Attach policies**
+The Planner agent fetches real-time or end-of-day prices via **Polygon.io**.
 
-3. Attach these AWS managed policies:
+1. Visit [https://polygon.io](https://polygon.io)
+2. Click **Get your Free API Key**
+3. Sign up and verify your email
+4. Copy your API key from the dashboard
 
-   * `AmazonRDSDataFullAccess`
-   * `AWSLambda_FullAccess`
-   * `AmazonSQSFullAccess`
-   * `AmazonEventBridgeFullAccess`
-   * `SecretsManagerReadWrite`
+The free tier includes:
 
-4. Also attach your custom policy:
+* 5 API calls per minute
+* End-of-day price data
+* Perfect for development and testing
 
-   * `AlexRDSCustomPolicy`
+For serious / production use, you can upgrade later to a paid plan.
 
-5. Save changes
+### 1.2 Update `.env` with agent configuration
 
-### 0.3 Verify from your IAM user
-
-Sign out from root, sign back in as your **IAM user** (`aiengineer`), then run:
+In your project `.env`, add:
 
 ```bash
-aws rds describe-db-clusters
+# Part 6 - Agent Configuration
+BEDROCK_MODEL_ID=us.amazon.nova-pro-v1:0
+BEDROCK_REGION=us-west-2
+DEFAULT_AWS_REGION=us-east-1  # Or your preferred region
+
+# Polygon.io API for stock prices
+POLYGON_API_KEY=your_polygon_api_key_here
+POLYGON_PLAN=free   # or "paid" if you upgrade later
 ```
 
-This should return either an empty list or any existing clusters (no AccessDenied).
+Nova Pro is used as the primary LLM for tool-calling and orchestration.
 
-Check the Data API CLI is available:
+Ensure your local tooling (`uv`, test scripts) is loading this `.env` (for example via `python-dotenv`).
+
+
+
+# 🧠 **Step 2 — Explore the Agent Code**
+
+Before deploying, familiarise yourself with each agent’s responsibilities.
+
+### 2.1 InstrumentTagger – classification agent
+
+**Directory**: `backend/tagger`
+
+Key files:
+
+* `agent.py` – the Tagger agent implementation
+* `templates.py` – LLM prompt + structured output definition
+* `lambda_handler.py` – Lambda entrypoint
+
+The Tagger:
+
+* Classifies instruments (ETFs, stocks, bond funds, etc.)
+* Infers **asset class allocation** (equity, fixed income, real estate, commodities)
+* Infers **geographic exposure**
+* Uses **structured outputs** (Pydantic schema)
+* Does *not* need external tools – pure classification prompt
+
+### 2.2 Reporter – portfolio analysis writer
+
+**Directory**: `backend/reporter`
+
+Key files:
+
+* `agent.py` – Reporter agent logic
+* `templates.py` – analytical framework prompt
+* `lambda_handler.py` – Lambda entrypoint
+
+The Reporter:
+
+* Generates a comprehensive markdown portfolio analysis
+* Uses tools to:
+
+  * Access S3 Vectors (market context, knowledge)
+  * Write results back to Aurora (into `jobs.report_payload`)
+* Produces:
+
+  * Executive summary
+  * Key observations / strengths / weaknesses
+  * Recommendations and next steps
+
+### 2.3 Charter – chart-generation engine
+
+**Directory**: `backend/charter`
+
+Key files:
+
+* `agent.py` – Chart Maker agent
+* `templates.py` – visualisation guidelines and constraints
+* `lambda_handler.py` – Lambda entrypoint
+
+The Charter:
+
+* Produces **4–6 charts** per analysis
+* Chooses chart types (pie, bar, donut, etc.)
+* Returns **Recharts-compatible JSON** only (no free-text)
+* Does not use tools – it reads data from the DB via the orchestrator and emits JSON chart specs
+
+### 2.4 Retirement – Monte Carlo specialist
+
+**Directory**: `backend/retirement`
+
+Key files:
+
+* `agent.py` – Retirement analyst
+* `templates.py` – retirement planning and simulation prompt
+* `lambda_handler.py` – Lambda entrypoint
+
+The Retirement agent:
+
+* Runs Monte Carlo simulations for retirement outcomes
+* Estimates probabilities of success / failure
+* Produces a detailed explanation and suggested levers (save more, work longer, change allocation, etc.)
+* Uses tools to write projections into `jobs.retirement_payload`
+
+### 2.5 Planner – orchestrator / conductor
+
+**Directory**: `backend/planner`
+
+Key files:
+
+* `agent.py` – Planner agent logic
+* `templates.py` – orchestration strategy / decision logic
+* `lambda_handler.py` – Lambda entrypoint for SQS-triggered jobs
+
+The Planner:
+
+* Listens for **SQS messages** containing job IDs
+* Ensures instruments are tagged (invokes Tagger when necessary)
+* Delegates to Reporter, Charter, and Retirement as needed
+* Coordinates parallel execution where possible
+* Finalises the job record (status, summary, completion time)
+
+
+
+# 🧪 **Step 3 — Test Agents Locally (Mocked)**
+
+Each agent has a **local smoke test** that runs entirely on your machine, using your `.env` and mocked infrastructure where appropriate.
+
+> These tests run the agent logic directly (or its Lambda handler) without going through AWS Lambda / SQS.
+
+### 3.1 Tagger – local smoke test
+
+**From** `backend/tagger`:
 
 ```bash
-aws rds-data execute-statement --help
+uv run test_simple.py
 ```
 
-You should see usage information mentioning required arguments like `--resource-arn`, `--secret-arn`, `--sql`.
+Expected output (example):
 
-# 🧱 **Step 1 — Deploy Aurora Serverless v2 with Terraform**
+* Uses VTI (or similar) as a test instrument
+* Shows something like:
 
-### 1.1 Configure Terraform variables
+  * `Tagged: 1 instruments`
+  * `Updated: ['VTI']`
 
-From the project root:
+Run time: ~5–10 seconds.
+
+### 3.2 Reporter – local smoke test
+
+**From** `backend/reporter`:
 
 ```bash
-cd terraform/5_database
+uv run test_simple.py
+```
+
+Expected:
+
+* `Success: 1`
+* `Message: Report generated and stored`
+* Report body is long markdown (≈ 2,800+ characters) with:
+
+  * Executive summary
+  * Key observations
+  * Risks & recommendations
+
+Run time: ~15–20 seconds.
+
+### 3.3 Charter – local smoke test
+
+**From** `backend/charter`:
+
+```bash
+uv run test_simple.py
+```
+
+Expected:
+
+* `Success: True`
+* `Message: Generated 5 charts`
+* Output includes:
+
+  * Chart titles
+  * Types (`"pie"`, `"bar"`, `"donut"`, etc.)
+  * Recharts-style data arrays with colours
+
+Run time: ~10–15 seconds.
+
+### 3.4 Retirement – local smoke test
+
+**From** `backend/retirement`:
+
+```bash
+uv run test_simple.py
+```
+
+Expected:
+
+* `Success: 1`
+* `Message: Retirement analysis completed`
+* Body describes:
+
+  * Monte Carlo simulation summary
+  * Probability of success
+  * Scenario ranges (pessimistic / base / optimistic)
+  * Concrete improvement suggestions
+
+Run time: ~10–15 seconds.
+
+### 3.5 Planner – local smoke test
+
+**From** `backend/planner`:
+
+```bash
+uv run test_simple.py
+```
+
+This script:
+
+* Ensures test data exists (calling `reset_db.py --with-test-data --skip-drop`)
+* Creates a `portfolio_analysis` job
+* Invokes `lambda_handler` with `MOCK_LAMBDAS=true`
+
+Expected:
+
+* `Status Code: 200`
+* `Success: True`
+* `Message: Analysis completed for job <job-id>`
+
+Run time: ~5–10 seconds.
+
+### 3.6 Full backend local smoke test
+
+**From** `backend`:
+
+```bash
+uv run test_simple.py
+```
+
+This runs local smoke tests for all agents and prints a summary, e.g.:
+
+```text
+Tagger:   ✅
+Reporter: ✅
+Charter:  ✅
+Retirement: ✅
+Planner: ✅
+
+✅ ALL TESTS PASSED!
+```
+
+Run time: ~60–90 seconds overall.
+
+
+
+# 📦 **Step 4 — Package Lambda Functions with Docker**
+
+To ensure binary compatibility with the Lambda runtime, dependencies are packaged inside Docker.
+
+**From** `backend`:
+
+```bash
+uv run package_docker.py
+```
+
+This script:
+
+1. Uses the official Lambda Python image
+2. Installs dependencies into a `/package` directory
+3. Bundles each agent’s code + dependencies into a ZIP
+4. Produces one ZIP per Lambda agent
+
+Expected output (example):
+
+```text
+Packaging tagger...
+✅ Created tagger_lambda.zip (≈52 MB)
+
+Packaging reporter...
+✅ Created reporter_lambda.zip (≈68 MB)
+
+Packaging charter...
+✅ Created charter_lambda.zip (≈54 MB)
+
+Packaging retirement...
+✅ Created retirement_lambda.zip (≈55 MB)
+
+Packaging planner...
+✅ Created planner_lambda.zip (≈72 MB)
+
+All agents packaged successfully!
+```
+
+These ZIPs are then uploaded to an S3 code bucket and used by Terraform / deployment scripts.
+
+
+
+# 🌍 **Step 5 — Configure Terraform for Agent Infrastructure**
+
+Terraform in `terraform/6_agents` manages all agent-related infrastructure: Lambdas, SQS, IAM, logs, and S3 code bucket.
+
+### 5.1 Create and edit `terraform.tfvars`
+
+**From project root**:
+
+```bash
+cd terraform/6_agents
 cp terraform.tfvars.example terraform.tfvars
 ```
 
-Edit `terraform.tfvars`:
+Open `terraform.tfvars` and adjust:
 
 ```hcl
-aws_region   = "us-east-1"  # Your main region
-min_capacity = 0.5          # Minimum ACUs (keep low for dev)
-max_capacity = 1.0          # Maximum ACUs (small for dev)
+# Your AWS region for Lambda functions (typically your main region)
+aws_region = "us-east-1"
+
+# Aurora cluster ARN from Part 5 (can be left empty; data sources will resolve)
+aurora_cluster_arn = ""
+
+# Aurora secret ARN from Part 5 (can be left empty; data sources will resolve)
+aurora_secret_arn = ""
+
+# S3 Vectors bucket name from Part 3
+vector_bucket = "alex-vectors-123456789012"  # Replace with your actual bucket
+
+# Bedrock model configuration
+bedrock_model_id = "amazon.nova-pro-v1:0"
+bedrock_region   = "us-east-1"
+
+# SageMaker endpoint name from Part 2
+sagemaker_endpoint = "alex-embedding-endpoint"
+
+# Polygon API configuration
+polygon_api_key = "your_polygon_api_key_here"
+polygon_plan    = "free"
 ```
 
-### 1.2 Deploy the database
+Notes:
 
-Mac / Linux:
+* `aurora_cluster_arn` and `aurora_secret_arn` can be left blank – the module uses Terraform data sources to look them up based on naming.
+* Ensure `vector_bucket`, `sagemaker_endpoint`, and `polygon_api_key` match your actual values.
+
+
+
+# 🚀 **Step 6 — Deploy Agent Infrastructure with Terraform**
+
+### 6.1 Initialise Terraform
+
+From `terraform/6_agents`:
 
 ```bash
 terraform init
-terraform apply
 ```
 
-Windows PowerShell:
+### 6.2 Review Terraform plan
 
-```powershell
-terraform init
+```bash
+terraform plan
+```
+
+You should see planned creation of:
+
+* 5 Lambda functions (`alex-planner`, `alex-tagger`, `alex-reporter`, `alex-charter`, `alex-retirement`)
+* SQS queue + dead letter queue
+* IAM roles and policies for each agent
+* S3 bucket for code artefacts
+* CloudWatch log groups
+
+### 6.3 Apply the changes
+
+```bash
 terraform apply
 ```
 
 Confirm with `yes`.
 
-Terraform will create:
-
-* Aurora Serverless v2 cluster with the Data API enabled
-* Subnet group, security group, and networking basics
-* Secrets Manager entry for DB credentials
-* Database **`alex`** inside the cluster
-
-First-time provisioning typically takes **10–15 minutes**.
-
-### 1.3 Save the outputs into `.env`
-
-After Terraform completes:
-
-```bash
-terraform output
-```
-
-Note the values for:
-
-* `aurora_cluster_arn`
-* `aurora_secret_arn`
-
-In the project root, open your `.env` file and add:
+Typical completion message:
 
 ```text
-# Part 5 - Database
-AURORA_CLUSTER_ARN=arn:aws:rds:us-east-1:123456789012:cluster:alex-aurora-cluster
-AURORA_SECRET_ARN=arn:aws:secretsmanager:us-east-1:123456789012:secret:alex-aurora-credentials-xxxxx
+Apply complete! Resources: 25 added, 0 changed, 0 destroyed.
+
+Outputs:
+lambda_functions = {
+  "charter"   = "alex-charter"
+  "planner"   = "alex-planner"
+  "reporter"  = "alex-reporter"
+  "retirement"= "alex-retirement"
+  "tagger"    = "alex-tagger"
+}
+sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/alex-analysis-jobs"
 ```
 
-Use the exact values from your own Terraform output.
+At this point the **infrastructure** exists, but the code still needs to be pushed from your freshly built ZIPs.
 
-# 🔌 **Step 2 — Test the Data API Connection**
 
-From the project root:
+
+# 📤 **Step 7 — Deploy Lambda Code Updates**
+
+After packaging, deploy the ZIPs to the live Lambda functions.
+
+**From** `backend`:
 
 ```bash
-cd backend/database
-uv run test_data_api.py
+uv run deploy_all_lambdas.py
 ```
 
-Expected output (or similar):
+This script uploads the ZIPs (e.g. `planner_lambda.zip`, `tagger_lambda.zip`, etc.) to S3 and updates the corresponding Lambda functions.
+
+Expected output:
 
 ```text
-✅ Successfully connected to Aurora using Data API!
-Database version: PostgreSQL 15.x
+Updating alex-tagger... ✅
+Updating alex-reporter... ✅
+Updating alex-charter... ✅
+Updating alex-retirement... ✅
+Updating alex-planner... ✅
+
+All Lambda functions updated successfully!
 ```
 
-If this works, your IAM, secrets, and Data API configuration are all correct.
+Now your AWS Lambdas are running the same code you tested locally.
 
-# 🧬 **Step 3 — Run Database Migrations**
 
-Create the schema (tables, indexes, triggers) via the Data API:
+
+# ☁️ **Step 8 — Test Deployed Agents in AWS**
+
+Each agent has a **full remote test** that exercises its Lambda via AWS (and any configured tools).
+
+### 8.1 Tagger – full remote test
+
+**From** `backend/tagger`:
 
 ```bash
-# From backend/database
-uv run run_migrations.py
+uv run test_full.py
 ```
 
-You should see a step-by-step log of each statement being executed, followed by a summary indicating success.
+Run this 2–3 times; it should consistently succeed.
 
-# 🌱 **Step 4 — Load Seed Data (ETFs)**
+### 8.2 Reporter – full remote test
 
-Populate the `instruments` table with 22 popular ETFs:
+**From** `backend/reporter`:
 
 ```bash
-# From backend/database
-uv run seed_data.py
+uv run test_full.py
 ```
 
-Example output:
+Verifies:
 
-```text
-Seeding 22 instruments...
-✅ SPY - SPDR S&P 500 ETF
-✅ QQQ - Invesco QQQ Trust
-✅ BND - Vanguard Total Bond Market ETF
-...
-✅ Successfully seeded 22 instruments
-```
+* Lambda invocation
+* S3 Vectors access
+* DB writes into `jobs.report_payload`
 
-# 🧪 **Step 5 — Create Test Data (Optional)**
+### 8.3 Charter – full remote test
 
-For development, you can reset the database and create a fully-populated test user and portfolio:
+**From** `backend/charter`:
 
 ```bash
-# From backend/database
-uv run reset_db.py --with-test-data
+uv run test_full.py
 ```
 
-Typical output:
+Ensures chart JSON is generated and persisted correctly.
 
-```text
-Dropping existing tables...
-Running migrations...
-Loading default instruments...
-Creating test user with portfolio...
-✅ Database reset complete with test data!
+### 8.4 Retirement – full remote test
 
-Test user created:
-- User ID: test_user_001
-- Display Name: Test User
-- 3 accounts (401k, Roth IRA, Taxable)
-- 5 positions in 401k account
-```
-
-This is useful for quickly bootstrapping a realistic dataset.
-
-# ✅ **Step 6 — Verify Database Integrity**
-
-The verification script gives you a “pre-flight check” before wiring agents into the database.
+**From** `backend/retirement`:
 
 ```bash
-# From backend/database
-uv run verify_database.py
+uv run test_full.py
 ```
 
-It reports:
+Checks Monte Carlo projections run successfully and results are stored.
 
-* Table presence and row counts
-* Instrument allocation sanity checks (e.g. percentages sum to 100)
-* Indexes and triggers
-* Overall status
+### 8.5 Planner – full remote test
 
-Look for the final confirmation section indicating the database is ready for use in the next branch.
-
-# 🧩 **Understanding the Database Schema**
-
-The schema is deliberately compact but expressive enough for multi-agent workflows.
-
-```mermaid
-erDiagram
-    users ||--o{ accounts : "owns"
-    users ||--o{ jobs : "requests"
-    accounts ||--o{ positions : "contains"
-    positions }o--|| instruments : "references"
-
-    users {
-        varchar clerk_user_id PK
-        varchar display_name
-        integer years_until_retirement
-        decimal target_retirement_income
-        jsonb asset_class_targets
-        jsonb region_targets
-    }
-
-    accounts {
-        uuid id PK
-        varchar clerk_user_id FK
-        varchar account_name
-        text account_purpose
-        decimal cash_balance
-        decimal cash_interest
-    }
-
-    positions {
-        uuid id PK
-        uuid account_id FK
-        varchar symbol FK
-        decimal quantity
-        date as_of_date
-    }
-
-    instruments {
-        varchar symbol PK
-        varchar name
-        varchar instrument_type
-        decimal current_price
-        jsonb allocation_regions
-        jsonb allocation_sectors
-        jsonb allocation_asset_class
-    }
-
-    jobs {
-        uuid id PK
-        varchar clerk_user_id FK
-        varchar job_type
-        varchar status
-        jsonb request_payload
-        jsonb report_payload
-        jsonb charts_payload
-        jsonb retirement_payload
-        jsonb summary_payload
-        text error_message
-        timestamp started_at
-        timestamp completed_at
-    }
-```
-
-### Table roles
-
-* **users**
-  Minimal profile data; authentication is handled by Clerk. Includes retirement preferences and allocation targets.
-
-* **instruments**
-  Master list of ETFs/stocks/funds. Contains allocation JSONB fields used by the Tagger, Planner, and Reporter.
-
-* **accounts**
-  Logical investment accounts (401k, ISA, brokerage, etc.) per user.
-
-* **positions**
-  Holdings (symbol + quantity per account) with `as_of_date`.
-
-* **jobs**
-  Tracks asynchronous work across the system. Each agent writes into its own JSONB payload:
-
-  * `request_payload` – original request (e.g. “Build a retirement plan”)
-  * `report_payload` – Reporter’s markdown analysis
-  * `charts_payload` – Charter’s chart specs
-  * `retirement_payload` – Retirement agent’s projections
-  * `summary_payload` – Planner’s final summary / metadata
-
-All inserts/updates are validated via Pydantic schemas before hitting the database, helping maintain integrity across agents.
-
-# 💸 **Cost Management**
-
-Aurora Serverless v2 approximate costs:
-
-* **0.5 ACU minimum capacity**: roughly **$40–45/month** if left running
-* Actual daily cost depends on activity and scale
-
-To keep costs under control:
+**From** `backend/planner`:
 
 ```bash
-cd terraform/5_database
-terraform destroy
+uv run test_full.py
+```
+
+This is the most involved test:
+
+* Creates a job
+* Triggers Planner
+* Planner coordinates Tagger / Reporter / Charter / Retirement
+* Job is updated as completed in Aurora
+
+It may take **60–90 seconds** on the first run.
+
+### 8.6 Full system test via SQS
+
+**From** `backend`:
+
+```bash
+uv run test_full.py
 ```
 
 This:
 
-* Stops all Aurora charges
-* Deletes the cluster and all data
+1. Creates a new `jobs` row
+2. Sends a message to the **SQS** queue
+3. Lets the Planner Lambda consume and orchestrate the whole pipeline
+4. Waits for completion and verifies results
 
-When you are ready to continue:
+End result: a fully end-to-end test of the distributed system.
 
-```bash
-terraform apply
-```
 
-You can then re-run migrations and seed scripts to restore the baseline dataset.
 
-> Only run `terraform destroy` when you’re comfortable losing all data in the cluster.
+# 📈 **Step 9 — Advanced Scenario Tests**
 
-# 🛠️ **Troubleshooting**
+### 9.1 Multiple accounts per user
 
-### Data API connection issues
-
-Check cluster status:
+**From** `backend`:
 
 ```bash
-aws rds describe-db-clusters --db-cluster-identifier alex-aurora-cluster
+uv run test_multiple_accounts.py
 ```
 
-Status should be `available`.
+This creates a user with multiple accounts (e.g. 401k, IRA, Taxable) and runs a full analysis. It verifies:
 
-Check Data API is enabled:
+* Correct aggregation across accounts
+* Proper handling of different wrappers and cash balances
+
+### 9.2 Scale / concurrency test
+
+**From** `backend`:
 
 ```bash
-aws rds describe-db-clusters \
-  --db-cluster-identifier alex-aurora-cluster \
-  --query 'DBClusters[0].EnableHttpEndpoint'
+uv run test_scale.py
 ```
 
-Should return `true`.
+This:
 
-Check secrets:
+* Creates several users with varying portfolio sizes
+* Dispatches multiple jobs concurrently
+* Validates that the system can handle parallel workloads using SQS + Lambda concurrency
+
+Use this to get a feel for how the system behaves under moderate load.
+
+
+
+# 🗄️ **Step 10 — Inspect Jobs and Results in the Database**
+
+Once remote tests pass, inspect what the agents actually wrote to Aurora.
+
+**From** `backend`:
 
 ```bash
-aws secretsmanager list-secrets \
-  --query "SecretList[?contains(Name, 'alex-aurora-credentials')].Name"
+uv run check_jobs.py
 ```
 
-Then:
+This script prints recent jobs, including:
 
-```bash
-aws secretsmanager get-secret-value \
-  --secret-id alex-aurora-credentials-XXXX \
-  --query SecretString \
-  --output text
-```
+* Job ID and timestamps
+* User information
+* Status (`pending`, `processing`, `completed`, `error`)
+* Sizes of each payload (`report_payload`, `charts_payload`, `retirement_payload`, `summary_payload`)
 
-This should contain username and password in JSON form.
+This is a convenient way to confirm that all agents are writing into the `jobs` table as expected.
 
-### Migration failures
 
-From `backend/database`:
 
-* Inspect the migration definitions (in this project they’re embedded in Python; for any SQL file based migrations, inspect the relevant file).
+# 📊 **Step 11 — Explore AWS Console & Monitoring**
 
-To reset and retry:
+### 11.1 Lambda functions
 
-```bash
-uv run reset_db.py
-```
+1. Open the **Lambda Console**
+2. Locate:
 
-This drops tables, re-runs migrations, and reloads seed data.
+   * `alex-planner`
+   * `alex-tagger`
+   * `alex-reporter`
+   * `alex-charter`
+   * `alex-retirement`
+3. Click into `alex-planner`
+4. Open the **Monitor** tab → **View logs in CloudWatch**
+5. Inspect the latest log stream for detailed execution traces and agent reasoning logs
 
-### Pydantic validation errors
+### 11.2 SQS queue
 
-Typical causes:
+1. Open the **SQS Console**
+2. Select `alex-analysis-jobs`
+3. Check:
 
-* Allocation dictionaries not summing to exactly `100.0`
-* Invalid enum / literal values for regions, sectors, or asset classes
+   * **Messages available** – should be 0 when idle
+   * **Monitoring** tab – for throughput and error metrics
+4. Inspect the DLQ (`alex-analysis-jobs-dlq`) – ideally empty
 
-Review schema definitions:
+### 11.3 Cost management
 
-```bash
-# From backend/database
-cat src/schemas.py
-```
+1. Open **Cost Management → Cost Explorer**
+2. Filter by service:
 
-Check that your custom data respects the expected value ranges and formats.
+   * Lambda
+   * Aurora
+   * Bedrock
+   * SQS
+3. Estimate a monthly development cost; typical ranges:
 
-# 📍 **Next Steps**
+   * Aurora baseline (depending on ACUs)
+   * Lambda invocations (very cheap at low volume)
+   * Bedrock tokens (main variable cost)
+   * SQS (fractions of a cent at low usage)
 
-With this branch complete, you now have:
 
-* Aurora Serverless v2 PostgreSQL with the Data API enabled
-* A clean, validated schema for users, portfolios, instruments, and jobs
-* Seeded ETF data and optional test user portfolios
-* A shared database package ready to be used by all backend agents
+
+# 🧯 **Troubleshooting & Deep-Dive Notes**
+
+### Agent timeouts
+
+If an agent times out:
+
+1. Check each Lambda’s timeout (agents ≈ 60s, Planner ≈ 300s)
+2. Verify Bedrock permissions and model access in the configured region
+3. Inspect CloudWatch logs for stack traces or retry behaviour
+
+### Database connection errors
+
+1. Confirm the Aurora cluster is **available** (not paused)
+2. Check `AURORA_CLUSTER_ARN` / `AURORA_SECRET_ARN` in Lambda environment variables
+3. Ensure RDS Data API IAM permissions are present for the Lambda role
+
+### SQS messages not being processed
+
+1. Confirm that `alex-planner` has an SQS trigger bound to the queue
+2. Check Lambda’s IAM policy for SQS `ReceiveMessage/DeleteMessage`
+3. Inspect the DLQ for failed messages
+
+### Rate limiting (LLM / Polygon)
+
+1. Logs may show TooManyRequests / rate-limit messages
+2. The code includes retry with exponential backoff, but bursts can still fail
+3. For heavy testing, slow down or consider higher-tier plans
+
+### Model / region errors
+
+If you see “model not found” or similar:
+
+1. Confirm `BEDROCK_MODEL_ID` and `BEDROCK_REGION` in `.env` and Lambda env
+2. Ensure the model (e.g. `amazon.nova-pro-v1:0`) is enabled in the selected region
+
+
+
+# ✅ **Summary**
+
+In this branch you:
+
+* ✅ Configured environment variables for **Bedrock** and **Polygon**
+* ✅ Explored five specialised agents and their prompts
+* ✅ Ran **local smoke tests** for each agent and the planner
+* ✅ Packaged all Lambda functions using a Docker-based build
+* ✅ Deployed full **agent infrastructure** with Terraform
+* ✅ Deployed updated Lambda code ZIPs
+* ✅ Validated remote execution via **test_full** scripts and SQS
+* ✅ Explored jobs, logs, and costs in AWS
+
+Your **AI Agent Orchestra** is now fully live – Planner, Tagger, Reporter, Charter, and Retirement are all working together to analyse portfolios, generate reports, create charts, and model retirement outcomes.
