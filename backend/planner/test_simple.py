@@ -69,24 +69,32 @@ def setup_test_data() -> str:
     ------
     ValueError
         If the expected test user cannot be found after the reset step.
+    RuntimeError
+        If the `reset_db.py` script fails.
     """
     print("Ensuring test data exists...")
 
+    # Run the reset script and let it print directly to the console.
+    # We only care about whether it succeeded, not about capturing its output.
     result = subprocess.run(
         ["uv", "run", "reset_db.py", "--with-test-data", "--skip-drop"],
         cwd="../database",
-        capture_output=True,
-        text=True,
+        check=False,
     )
+
     if result.returncode != 0:
-        print(f"Warning: Could not ensure test data via reset_db.py:\n{result.stderr}")
+        raise RuntimeError(
+            "Failed to ensure test data via reset_db.py.\n"
+            "Please run manually:\n"
+            "  cd ../database && uv run reset_db.py --with-test-data --skip-drop"
+        )
 
     db = Database()
 
     # The reset_db script creates this user when called with --with-test-data
     test_user_id = "test_user_001"
 
-    user = db.users.find_by_clerk_user_id(test_user_id)
+    user = db.users.find_by_clerk_id(test_user_id)
     if not user:
         raise ValueError(
             f"Test user {test_user_id} not found.\n"
