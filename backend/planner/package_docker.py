@@ -2,7 +2,7 @@
 """
 Alex Financial Planner – Planner Lambda Docker Packager
 
-This utility script builds a **Lambda-ready deployment package** for the
+This utility script builds a Lambda-ready deployment package for the
 Planner Orchestrator using Docker and the official AWS Lambda Python 3.12
 runtime image to guarantee binary compatibility.
 
@@ -31,6 +31,7 @@ from typing import Optional
 # Shell Command Helper
 # ============================================================
 
+
 def run_command(cmd: list[str], cwd: Optional[str] = None) -> str:
     """
     Run a shell command and return its stdout, exiting on non-zero status.
@@ -45,7 +46,8 @@ def run_command(cmd: list[str], cwd: Optional[str] = None) -> str:
     Returns
     -------
     str
-        The captured standard output from the command.
+        The captured standard output from the command (decoded with
+        replacement for any invalid characters).
 
     Raises
     ------
@@ -53,23 +55,33 @@ def run_command(cmd: list[str], cwd: Optional[str] = None) -> str:
         If the command exits with a non-zero return code.
     """
     print(f"Running: {' '.join(cmd)}")
+
     result = subprocess.run(
         cmd,
         cwd=cwd,
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
 
+    # Decode with replacement to avoid UnicodeDecodeError on Windows cp1252
+    stdout = result.stdout.decode(errors="replace")
+    stderr = result.stderr.decode(errors="replace")
+
     if result.returncode != 0:
-        print(f"Error: {result.stderr}")
+        print(f"Error while running command:")
+        if stderr:
+            print(stderr)
+        else:
+            print("No stderr output.")
         sys.exit(1)
 
-    return result.stdout
+    return stdout
 
 
 # ============================================================
 # Packaging Logic
 # ============================================================
+
 
 def package_lambda() -> Path:
     """
@@ -77,12 +89,12 @@ def package_lambda() -> Path:
 
     Steps
     -----
-    1. Create a temporary build directory
-    2. Export dependencies from `uv.lock` into `requirements.txt`
-    3. Filter out packages that are not needed in Lambda (e.g. `pyperclip`)
-    4. Use Docker + Lambda Python image to install dependencies into `./package`
-    5. Copy the planner modules into the package directory
-    6. Zip everything into ``planner_lambda.zip`` in the planner folder
+    1. Create a temporary build directory.
+    2. Export dependencies from `uv.lock` into `requirements.txt`.
+    3. Filter out packages that are not needed in Lambda (e.g. `pyperclip`).
+    4. Use Docker + Lambda Python image to install dependencies into `./package`.
+    5. Copy the planner modules into the package directory.
+    6. Zip everything into ``planner_lambda.zip`` in the planner folder.
 
     Returns
     -------
@@ -92,7 +104,7 @@ def package_lambda() -> Path:
     # Determine key directories
     planner_dir = Path(__file__).parent.absolute()
     backend_dir = planner_dir.parent
-    project_root = backend_dir.parent  # noqa: F841  (kept for clarity / future use)
+    project_root = backend_dir.parent  # noqa: F841 (kept for clarity / future use)
 
     # Use a temporary directory for building the package
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -121,7 +133,7 @@ def package_lambda() -> Path:
             filtered_requirements.append(line)
 
         req_file = temp_path / "requirements.txt"
-        req_file.write_text("\n".join(filtered_requirements))
+        req_file.write_text("\n".join(filtered_requirements), encoding="utf-8")
 
         # ----------------------------------------------------
         # Use Docker to install Lambda-compatible dependencies
@@ -129,6 +141,7 @@ def package_lambda() -> Path:
         # We install:
         #   * All packages from requirements.txt into ./package
         #   * The local database package from backend/database into ./package
+        print("Installing dependencies inside Lambda base image...")
         docker_cmd = [
             "docker",
             "run",
@@ -138,7 +151,7 @@ def package_lambda() -> Path:
             "-v",
             f"{temp_path}:/build",
             "-v",
-            f"{backend_dir}/database:/database",
+            f"{backend_dir / 'database'}:/database",
             "--entrypoint",
             "/bin/bash",
             "public.ecr.aws/lambda/python:3.12",
@@ -155,6 +168,7 @@ def package_lambda() -> Path:
         # ----------------------------------------------------
         # Copy planner Lambda source modules
         # ----------------------------------------------------
+        print("Copying Planner Lambda source files into package directory...")
         shutil.copy(planner_dir / "lambda_handler.py", package_dir)
         shutil.copy(planner_dir / "agent.py", package_dir)
         shutil.copy(planner_dir / "templates.py", package_dir)
@@ -169,6 +183,7 @@ def package_lambda() -> Path:
 
         # Remove previous package if it exists
         if zip_path.exists():
+            print(f"Removing existing zip: {zip_path}")
             zip_path.unlink()
 
         print(f"Creating zip file: {zip_path}")
@@ -187,11 +202,12 @@ def package_lambda() -> Path:
 # Deployment Logic
 # ============================================================
 
+
 def deploy_lambda(zip_path: Path) -> None:
     """
     Deploy an existing Lambda deployment package to AWS.
 
-    This function updates the code for the **alex-planner** Lambda function.
+    This function updates the code for the ``alex-planner`` Lambda function.
     The function must already exist (e.g. created via Terraform).
 
     Parameters
@@ -215,7 +231,6 @@ def deploy_lambda(zip_path: Path) -> None:
 
         print(f"Successfully updated Lambda function: {function_name}")
         print(f"Function ARN: {response['FunctionArn']}")
-
     except lambda_client.exceptions.ResourceNotFoundException:
         print(
             f"Lambda function {function_name} not found. "
@@ -231,6 +246,7 @@ def deploy_lambda(zip_path: Path) -> None:
 # CLI Entry Point
 # ============================================================
 
+
 def main() -> None:
     """
     Command-line entry point for packaging (and optionally deploying) the Lambda.
@@ -239,7 +255,7 @@ def main() -> None:
     -----
     --deploy :
         If provided, the script will deploy the created zip package to
-        the `alex-planner` Lambda function after packaging.
+        the ``alex-planner`` Lambda function after packaging.
     """
     parser = argparse.ArgumentParser(
         description="Package Planner Lambda for deployment",
