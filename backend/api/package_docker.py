@@ -2,7 +2,7 @@
 """
 Docker-based packaging utility for the Alex Financial Advisor FastAPI API.
 
-This script builds an **AWS Lambda–compatible** deployment package for the
+This script builds an AWS Lambda–compatible deployment package for the
 backend API by:
 
 * Copying the API and database source code into a temporary build directory.
@@ -40,7 +40,8 @@ def run_command(cmd: List[str], cwd: Optional[Path] = None) -> str:
     Returns
     -------
     str
-        Standard output captured from the command.
+        Standard output captured from the command (decoded with replacement
+        for any invalid characters).
 
     Raises
     ------
@@ -51,16 +52,25 @@ def run_command(cmd: List[str], cwd: Optional[Path] = None) -> str:
     # Log the command being executed for transparency
     print(f"Running: {' '.join(cmd)}")
 
-    # Execute the command and capture stdout/stderr for diagnostics
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    # Execute the command and capture stdout/stderr for diagnostics (as bytes)
+    result = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    # Decode with replacement to avoid UnicodeDecodeError on Windows cp1252
+    stdout = result.stdout.decode(errors="replace")
+    stderr = result.stderr.decode(errors="replace")
 
     # If the command failed, print stderr and exit the script
     if result.returncode != 0:
-        print(f"Error: {result.stderr}")
+        print(f"Error: {stderr or 'No stderr output.'}")
         sys.exit(1)
 
     # Return the captured standard output for further processing
-    return result.stdout
+    return stdout
 
 
 def main() -> None:
@@ -235,7 +245,7 @@ CMD ["api.main.handler"]
 
         # Compute and display the size of the created Lambda package
         size_mb: float = zip_path.stat().st_size / (1024 * 1024)
-        print(f"✅ Lambda package created: {zip_path} ({size_mb:.2f} MB)")
+        print(f"Lambda package created: {zip_path} ({size_mb:.2f} MB)")
 
         # Print a small preview of the package contents for quick inspection
         print("\nPackage contents (first 20 files):")
