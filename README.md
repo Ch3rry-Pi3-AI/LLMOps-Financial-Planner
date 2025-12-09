@@ -1,304 +1,279 @@
-# 🎭 **Part 6 — AI Agent Orchestra**
+# 🖥️ **Part 7 — Frontend & API**
 
-In this branch, you give Alex a **full multi-agent AI backend**: five specialised Lambda agents orchestrated via SQS, Aurora, Bedrock, and S3 Vectors. This is where Alex stops being a single “smart endpoint” and becomes a **coordinated team of experts** working together on each user’s portfolio.
+In this branch, you deploy the **user interface and HTTP API** that bring Alex to life: a modern React (Next.js) frontend plus a FastAPI backend running on Lambda and API Gateway.
 
-By the end of this branch you will have:
+By the end of this branch, you will have a **full SaaS experience**:
 
-* Five production-ready Lambda agents (Planner, Tagger, Reporter, Charter, Retirement)
-* A robust SQS-driven orchestration flow
-* Local and remote (AWS) test harnesses
-* Terraform wiring for all agent infrastructure and configuration
+* Clerk-based authentication and automatic user creation
+* Portfolio management (accounts, positions, cash)
+* Real-time multi-agent analysis triggering and status checks
+* Interactive reports, charts, and retirement projections
+* Production-grade infrastructure: CloudFront, S3 static hosting, API Gateway, Lambda
 
-## 🎻 **Why a Multi-Agent Architecture?**
+## 🌐 **What This Branch Builds**
 
-Instead of one giant prompt that does everything badly, Alex uses **specialised agents**, each tuned for a narrow responsibility:
+This branch wires up:
 
-* **Planner (Orchestrator)** – decides *what* needs doing and *who* should do it
-* **Tagger** – classifies instruments and fills in missing allocation data
-* **Reporter** – writes long-form markdown portfolio analysis
-* **Charter** – generates structured JSON chart specs for the frontend
-* **Retirement** – runs Monte Carlo retirement simulations and projections
+* ✅ Next.js frontend with TailwindCSS and Clerk authentication
+* ✅ FastAPI backend deployed as `alex-api` Lambda behind API Gateway
+* ✅ Local dev harness for running frontend + API together
+* ✅ Production S3 + CloudFront static site hosting
+* ✅ JWT-secured API integrated with the existing Aurora + SQS + agents stack
 
-Advantages:
-
-1. **Specialisation** – each agent is optimised for one job (classification, reporting, charts, retirement)
-2. **Reliability** – focused prompts and tools are easier to control and evaluate
-3. **Parallel execution** – agents can work concurrently where possible
-4. **Maintainability** – you can iterate on one agent’s prompts/tools without touching others
-5. **Cost control** – you only invoke the agents relevant to a given request
-
-For a deeper conceptual background, see Philipp Schmid’s article on context engineering:
-
-[https://www.philschmid.de/context-engineering](https://www.philschmid.de/context-engineering)
-
-## 🧱 **What This Branch Builds**
-
-This branch deploys and wires up:
-
-* ✅ Five Lambda agents:
-
-  * `alex-planner`
-  * `alex-tagger`
-  * `alex-reporter`
-  * `alex-charter`
-  * `alex-retirement`
-* ✅ An SQS queue + DLQ for orchestrating analysis jobs
-* ✅ A complete **agent test harness** (local and AWS)
-* ✅ Docker-based packaging for Lambda-ready ZIPs
-* ✅ Terraform module for all agent infrastructure (IAM, triggers, logs, S3 code bucket)
-* ✅ Bedrock + Polygon configuration for real-time analysis
-
-High-level architecture:
+Architecture overview:
 
 ```mermaid
 graph TB
-    User[User Request] -->|Trigger Analysis| SQS[SQS Queue]
-    SQS -->|Message| Planner[🎯 Financial Planner<br/>Orchestrator]
-    
-    Planner -->|Auto-tag missing data| Tagger[🏷️ InstrumentTagger]
-    Tagger -->|Update instruments| DB[(Aurora DB)]
-    
-    Planner -->|Delegate work| Reporter[📝 Report Writer]
-    Planner -->|Delegate work| Charter[📊 Chart Maker]
-    Planner -->|Delegate work| Retirement[🎯 Retirement Specialist]
-    
-    Reporter -->|Markdown analysis| DB
-    Charter -->|JSON charts| DB
-    Retirement -->|Projections| DB
-    
-    Reporter -->|Access knowledge| S3V[(S3 Vectors)]
-    
-    Planner -->|Finalize| DB
-    DB -->|Results| User
-    
-    style Planner fill:#FFD700
-    style Reporter fill:#90EE90
-    style Charter fill:#87CEEB
-    style Retirement fill:#DDA0DD
-    style Tagger fill:#FFB6C1
+    User[User Browser] -->|HTTPS| CF[CloudFront CDN]
+    CF -->|Static Files| S3[S3 Static Site]
+    CF -->|/api/*| APIG[API Gateway]
+
+    User -->|Auth| Clerk[Clerk Auth]
+    APIG -->|JWT| Lambda[API Lambda]
+
+    Lambda -->|Data API| Aurora[(Aurora DB)]
+    Lambda -->|Trigger| SQS[SQS Queue]
+
+    SQS -->|Process| Agents[AI Agents]
+    Agents -->|Results| Aurora
+
+    style CF fill:#FF9900
+    style S3 fill:#569A31
+    style Lambda fill:#FF9900
+    style Clerk fill:#6C5CE7
 ```
 
-**Pre-requisites from earlier parts**
+Pre-requisites:
 
-You should already have:
-
-* Aurora Serverless v2 database (Part 5)
-* S3 Vectors + embeddings endpoint (Parts 2–3)
-* Basic backend environment and `.env` in place
+* Database, SQS, agents, and vectors deployed in earlier parts
+* `.env` set up for Aurora, Bedrock, SQS, etc.
 
 
 
-# 🧩 **Step 1 — Configure Agent Environment & Polygon**
+# 🔐 **Step 1 — Configure Clerk Authentication**
 
-The AI agents depend on both **Bedrock** and **Polygon.io** for LLM calls and price data.
+You’ll use **Clerk** for authentication (same provider as earlier projects). You can reuse an existing Clerk app or create a new one.
 
-### 1.1 Get a free Polygon API key
+### 1.1 Get your Clerk credentials
 
-The Planner agent fetches real-time or end-of-day prices via **Polygon.io**.
+If you already have a Clerk app:
 
-1. Visit [https://polygon.io](https://polygon.io)
-2. Click **Get your Free API Key**
-3. Sign up and verify your email
-4. Copy your API key from the dashboard
+1. Sign in at [https://dashboard.clerk.com](https://dashboard.clerk.com)
+2. Select your existing application
+3. Go to **API Keys**
+4. Note:
 
-The free tier includes:
+   * **Publishable Key** (starts with `pk_`)
+   * **Secret Key** (starts with `sk_`)
+5. In the same area, open **Show JWT Public Key** → copy:
 
-* 5 API calls per minute
-* End-of-day price data
-* Perfect for development and testing
+   * **JWKS Endpoint URL** (JWKS)
 
-For serious / production use, you can upgrade later to a paid plan.
+If you need a new app:
 
-### 1.2 Update `.env` with agent configuration
+1. Sign up at [https://clerk.com](https://clerk.com)
+2. Create a new application
+3. Choose **Email** (and optionally Google) as sign-in methods
+4. Grab your publishable + secret keys from **API Keys**
 
-In your project `.env`, add:
+### 1.2 Configure frontend environment
+
+Create `.env.local` in the `frontend` directory:
 
 ```bash
-# Part 6 - Agent Configuration
-BEDROCK_MODEL_ID=us.amazon.nova-pro-v1:0
-BEDROCK_REGION=us-west-2
-DEFAULT_AWS_REGION=us-east-1  # Or your preferred region
+# Clerk Authentication (use your own keys)
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_your-key-here
+CLERK_SECRET_KEY=sk_test_your-secret-here
 
-# Polygon.io API for stock prices
-POLYGON_API_KEY=your_polygon_api_key_here
-POLYGON_PLAN=free   # or "paid" if you upgrade later
+# Sign-in/up redirects (these paths are wired into the app)
+NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL=/dashboard
+NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL=/dashboard
+
+# API URL - localhost for dev, API Gateway URL for prod
+NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
-Nova Pro is used as the primary LLM for tool-calling and orchestration.
+For production you’ll later change `NEXT_PUBLIC_API_URL` to your API Gateway base URL.
 
-Ensure your local tooling (`uv`, test scripts) is loading this `.env` (for example via `python-dotenv`).
+### 1.3 Configure backend environment for JWT validation
 
-
-
-# 🧠 **Step 2 — Explore the Agent Code**
-
-Before deploying, familiarise yourself with each agent’s responsibilities.
-
-### 2.1 InstrumentTagger – classification agent
-
-**Directory**: `backend/tagger`
-
-Key files:
-
-* `agent.py` – the Tagger agent implementation
-* `templates.py` – LLM prompt + structured output definition
-* `lambda_handler.py` – Lambda entrypoint
-
-The Tagger:
-
-* Classifies instruments (ETFs, stocks, bond funds, etc.)
-* Infers **asset class allocation** (equity, fixed income, real estate, commodities)
-* Infers **geographic exposure**
-* Uses **structured outputs** (Pydantic schema)
-* Does *not* need external tools – pure classification prompt
-
-### 2.2 Reporter – portfolio analysis writer
-
-**Directory**: `backend/reporter`
-
-Key files:
-
-* `agent.py` – Reporter agent logic
-* `templates.py` – analytical framework prompt
-* `lambda_handler.py` – Lambda entrypoint
-
-The Reporter:
-
-* Generates a comprehensive markdown portfolio analysis
-* Uses tools to:
-
-  * Access S3 Vectors (market context, knowledge)
-  * Write results back to Aurora (into `jobs.report_payload`)
-* Produces:
-
-  * Executive summary
-  * Key observations / strengths / weaknesses
-  * Recommendations and next steps
-
-### 2.3 Charter – chart-generation engine
-
-**Directory**: `backend/charter`
-
-Key files:
-
-* `agent.py` – Chart Maker agent
-* `templates.py` – visualisation guidelines and constraints
-* `lambda_handler.py` – Lambda entrypoint
-
-The Charter:
-
-* Produces **4–6 charts** per analysis
-* Chooses chart types (pie, bar, donut, etc.)
-* Returns **Recharts-compatible JSON** only (no free-text)
-* Does not use tools – it reads data from the DB via the orchestrator and emits JSON chart specs
-
-### 2.4 Retirement – Monte Carlo specialist
-
-**Directory**: `backend/retirement`
-
-Key files:
-
-* `agent.py` – Retirement analyst
-* `templates.py` – retirement planning and simulation prompt
-* `lambda_handler.py` – Lambda entrypoint
-
-The Retirement agent:
-
-* Runs Monte Carlo simulations for retirement outcomes
-* Estimates probabilities of success / failure
-* Produces a detailed explanation and suggested levers (save more, work longer, change allocation, etc.)
-* Uses tools to write projections into `jobs.retirement_payload`
-
-### 2.5 Planner – orchestrator / conductor
-
-**Directory**: `backend/planner`
-
-Key files:
-
-* `agent.py` – Planner agent logic
-* `templates.py` – orchestration strategy / decision logic
-* `lambda_handler.py` – Lambda entrypoint for SQS-triggered jobs
-
-The Planner:
-
-* Listens for **SQS messages** containing job IDs
-* Ensures instruments are tagged (invokes Tagger when necessary)
-* Delegates to Reporter, Charter, and Retirement as needed
-* Coordinates parallel execution where possible
-* Finalises the job record (status, summary, completion time)
-
-
-
-# 🧪 **Step 3 — Test Agents Locally (Mocked)**
-
-Each agent has a **local smoke test** that runs entirely on your machine, using your `.env` and mocked infrastructure where appropriate.
-
-> These tests run the agent logic directly (or its Lambda handler) without going through AWS Lambda / SQS.
-
-### 3.1 Tagger – local smoke test
-
-**From** `backend/tagger`:
+In your **root** `.env` file, add:
 
 ```bash
-uv run test_simple.py
+# Part 7 - Clerk Authentication
+CLERK_JWKS_URL=https://your-app.clerk.accounts.dev/.well-known/jwks.json
 ```
 
-Expected output (example):
+To find it:
 
-* Uses VTI (or similar) as a test instrument
-* Shows something like:
+1. Clerk Dashboard → **API Keys**
+2. Click **Show JWT Public Key**
+3. Copy the **JWKS Endpoint** URL
 
-  * `Tagged: 1 instruments`
-  * `Updated: ['VTI']`
+Later, Terraform will also need the JWKS URL and issuer.
 
-Run time: ~5–10 seconds.
 
-### 3.2 Reporter – local smoke test
+
+# 🧪 **Step 2 — Run Frontend & API Locally**
+
+Before deploying to AWS, verify that the full stack works locally.
+
+### 2.1 Install frontend dependencies
+
+From the project root:
+
+```bash
+cd frontend
+npm install
+```
+
+This installs React, Next.js, Tailwind, Clerk, etc.
+
+### 2.2 Start local backend + frontend
+
+Use the helper script that runs both FastAPI and Next.js together.
+
+From the `scripts` directory:
+
+```bash
+cd ../scripts   # if you are in frontend
+uv run run_local.py
+```
+
+Expected output:
+
+```text
+🚀 Starting FastAPI backend...
+  ✅ Backend running at http://localhost:8000
+     API docs: http://localhost:8000/docs
+
+🚀 Starting NextJS frontend...
+  ✅ Frontend running at http://localhost:3000
+```
+
+### 2.3 Explore the local app
+
+Open [http://localhost:3000](http://localhost:3000):
+
+1. **Landing page** – Alex AI Financial Advisor homepage
+2. **Sign in** – click “Sign In”, use your Clerk account or create one
+3. **Dashboard** – after sign-in you’re redirected to `/dashboard`
+4. The backend automatically **creates your user record** in Aurora (via `GET /api/user` on first visit)
+
+### 2.4 Inspect the API documentation
+
+Open [http://localhost:8000/docs](http://localhost:8000/docs).
+
+You’ll see FastAPI’s Swagger UI:
+
+* Available endpoints
+* Request/response schemas
+* Auth requirements
+* Try-it-out UI (you will need a valid JWT)
+
+Key API routes include:
+
+* `GET /api/user` – get or create logged-in user
+* `GET /api/accounts` – list accounts for the current user
+* `POST /api/positions` – create/update positions
+* `POST /api/analyze` – trigger AI analysis (Planner + agents)
+* `GET /api/jobs/{job_id}` – fetch job status and results
+
+
+
+# 💼 **Step 3 — Populate a Test Portfolio**
+
+To make the UI and agents interesting, you’ll create some sample accounts and positions.
+
+### 3.1 Use the Accounts page
+
+In the frontend:
+
+1. Click **Accounts** in the navigation
+2. Initially, you’ll see “No accounts found”
+3. Click **Populate Test Data**
+
+The system will create:
+
+* 3 accounts:
+
+  * 401k
+  * Roth IRA
+  * Taxable brokerage
+* A spread of ETF/stock positions
+* Cash balances per account
+
+### 3.2 Explore account & position management
+
+Click an account to:
+
+* View positions with current values
+* Edit quantities
+* Add new positions (by ticker)
+* Delete positions
+* Update cash balances
+
+Example flow:
+
+1. Click the edit icon next to a position
+2. Change the quantity
+3. Save
+4. Confirm the total value updates
+
+> Note: **AI analysis won’t run end-to-end** until the AWS infra (SQS, agents, Lambda API) is deployed and correctly wired. Local portfolio management will still work.
+
+
+
+# ☁️ **Step 4 — Deploy API & Frontend Infrastructure with Terraform**
+
+Now you’ll deploy the **API Gateway + Lambda API** and **CloudFront + S3 frontend hosting**.
+
+### 4.1 Configure Terraform variables
 
 **From** `backend/reporter`:
 
 ```bash
-uv run test_simple.py
+cd terraform/7_frontend
+cp terraform.tfvars.example terraform.tfvars
 ```
 
 Expected:
 
-* `Success: 1`
-* `Message: Report generated and stored`
-* Report body is long markdown (≈ 2,800+ characters) with:
+```hcl
+# AWS region for frontend + API
+aws_region = "us-east-1"
 
-  * Executive summary
-  * Key observations
-  * Risks & recommendations
-
-Run time: ~15–20 seconds.
-
-### 3.3 Charter – local smoke test
-
-**From** `backend/charter`:
-
-```bash
-uv run test_simple.py
+# Clerk configuration for JWT validation
+# Use values from your Clerk dashboard
+clerk_jwks_url = "https://your-instance.clerk.accounts.dev/.well-known/jwks.json"
+clerk_issuer   = "https://your-instance.clerk.accounts.dev"
 ```
 
-Expected:
-
-* `Success: True`
-* `Message: Generated 5 charts`
-* Output includes:
-
-  * Chart titles
-  * Types (`"pie"`, `"bar"`, `"donut"`, etc.)
-  * Recharts-style data arrays with colours
-
-Run time: ~10–15 seconds.
-
-### 3.4 Retirement – local smoke test
-
-**From** `backend/retirement`:
+To find your AWS account ID (used in some bucket names and outputs):
 
 ```bash
-uv run test_simple.py
+aws sts get-caller-identity --query Account --output text
+```
+
+### 4.2 Package the API Lambda
+
+From the project root:
+
+```bash
+cd backend/api
+uv run package_docker.py
+```
+
+This builds a Lambda-compatible ZIP (e.g. `api_lambda.zip`) inside the `backend/api` folder.
+
+### 4.3 Deploy frontend & API infrastructure
+
+From `terraform/7_frontend`:
+
+```bash
+terraform init
+terraform plan
+terraform apply
 ```
 
 Expected:
@@ -307,458 +282,399 @@ Expected:
 * `Message: Retirement analysis completed`
 * Body describes:
 
-  * Monte Carlo simulation summary
-  * Probability of success
-  * Scenario ranges (pessimistic / base / optimistic)
-  * Concrete improvement suggestions
+* S3 bucket for static frontend files
+* CloudFront distribution for global delivery
+* API Gateway REST API (or HTTP API) for `/api/*` routes
+* `alex-api` Lambda for FastAPI backend
+* IAM roles/policies and log groups
 
-Run time: ~10–15 seconds.
+Provisioning typically takes **10–15 minutes** (CloudFront takes the longest).
 
-### 3.5 Planner – local smoke test
+### 4.4 Capture Terraform outputs and update `.env`
 
-**From** `backend/planner`:
-
-```bash
-uv run test_simple.py
-```
-
-This script:
-
-* Ensures test data exists (calling `reset_db.py --with-test-data --skip-drop`)
-* Creates a `portfolio_analysis` job
-* Invokes `lambda_handler` with `MOCK_LAMBDAS=true`
-
-Expected:
-
-* `Status Code: 200`
-* `Success: True`
-* `Message: Analysis completed for job <job-id>`
-
-Run time: ~5–10 seconds.
-
-### 3.6 Full backend local smoke test
-
-**From** `backend`:
+After apply:
 
 ```bash
 uv run test_simple.py
 ```
 
-This runs local smoke tests for all agents and prints a summary, e.g.:
+You should see values like:
 
-```text
-Tagger:   ✅
-Reporter: ✅
-Charter:  ✅
-Retirement: ✅
-Planner: ✅
+* `cloudfront_url` – frontend URL
+* `api_gateway_url` – production API base URL
+* `s3_bucket` – static site bucket
 
-✅ ALL TESTS PASSED!
-```
-
-Run time: ~60–90 seconds overall.
-
-
-
-# 📦 **Step 4 — Package Lambda Functions with Docker**
-
-To ensure binary compatibility with the Lambda runtime, dependencies are packaged inside Docker.
-
-**From** `backend`:
-
-```bash
-uv run package_docker.py
-```
-
-This script:
-
-1. Uses the official Lambda Python image
-2. Installs dependencies into a `/package` directory
-3. Bundles each agent’s code + dependencies into a ZIP
-4. Produces one ZIP per Lambda agent
-
-Expected output (example):
-
-```text
-Packaging tagger...
-✅ Created tagger_lambda.zip (≈52 MB)
-
-Packaging reporter...
-✅ Created reporter_lambda.zip (≈68 MB)
-
-Packaging charter...
-✅ Created charter_lambda.zip (≈54 MB)
-
-Packaging retirement...
-✅ Created retirement_lambda.zip (≈55 MB)
-
-Packaging planner...
-✅ Created planner_lambda.zip (≈72 MB)
-
-All agents packaged successfully!
-```
-
-These ZIPs are then uploaded to an S3 code bucket and used by Terraform / deployment scripts.
-
-
-
-# 🌍 **Step 5 — Configure Terraform for Agent Infrastructure**
-
-Terraform in `terraform/6_agents` manages all agent-related infrastructure: Lambdas, SQS, IAM, logs, and S3 code bucket.
-
-### 5.1 Create and edit `terraform.tfvars`
-
-**From project root**:
-
-```bash
-cd terraform/6_agents
-cp terraform.tfvars.example terraform.tfvars
-```
-
-Open `terraform.tfvars` and adjust:
-
-```hcl
-# Your AWS region for Lambda functions (typically your main region)
-aws_region = "us-east-1"
-
-# Aurora cluster ARN from Part 5 (can be left empty; data sources will resolve)
-aurora_cluster_arn = ""
-
-# Aurora secret ARN from Part 5 (can be left empty; data sources will resolve)
-aurora_secret_arn = ""
-
-# S3 Vectors bucket name from Part 3
-vector_bucket = "alex-vectors-123456789012"  # Replace with your actual bucket
-
-# Bedrock model configuration
-bedrock_model_id = "amazon.nova-pro-v1:0"
-bedrock_region   = "us-east-1"
-
-# SageMaker endpoint name from Part 2
-sagemaker_endpoint = "alex-embedding-endpoint"
-
-# Polygon API configuration
-polygon_api_key = "your_polygon_api_key_here"
-polygon_plan    = "free"
-```
-
-Notes:
-
-* `aurora_cluster_arn` and `aurora_secret_arn` can be left blank – the module uses Terraform data sources to look them up based on naming.
-* Ensure `vector_bucket`, `sagemaker_endpoint`, and `polygon_api_key` match your actual values.
-
-
-
-# 🚀 **Step 6 — Deploy Agent Infrastructure with Terraform**
-
-### 6.1 Initialise Terraform
+You must also ensure your `.env` has the **SQS queue URL** from Part 6:
 
 From `terraform/6_agents`:
 
 ```bash
-terraform init
+terraform output sqs_queue_url
 ```
 
-### 6.2 Review Terraform plan
+Then in your root `.env`:
 
 ```bash
-terraform plan
+SQS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/123456789012/alex-analysis-jobs
 ```
 
-You should see planned creation of:
+For production, update `NEXT_PUBLIC_API_URL` in `frontend/.env.local` to your `api_gateway_url`.
 
-* 5 Lambda functions (`alex-planner`, `alex-tagger`, `alex-reporter`, `alex-charter`, `alex-retirement`)
-* SQS queue + dead letter queue
-* IAM roles and policies for each agent
-* S3 bucket for code artefacts
-* CloudWatch log groups
 
-### 6.3 Apply the changes
+
+# 📦 **Step 5 — Build & Deploy the Frontend**
+
+With the infrastructure in place, you can now ship the Next.js frontend to S3 + CloudFront.
+
+### 5.1 Build the production frontend
+
+From `frontend`:
 
 ```bash
-terraform apply
+npm run build
 ```
 
-Confirm with `yes`.
+This generates an optimised static export (e.g. `out/` / `.next` depending on deployment pattern specified in the repo).
 
-Typical completion message:
+### 5.2 Deploy to S3 + invalidate CloudFront
+
+From `scripts`:
+
+```bash
+cd ../scripts
+uv run deploy.py
+```
+
+The deployment script:
+
+1. Uploads the built frontend assets to the S3 bucket created by Terraform
+2. Applies correct content types and cache headers
+3. Invalidates the CloudFront cache so new versions show up immediately
+
+Typical duration: **1–2 minutes** after the build is done.
+
+
+
+# 🌍 **Step 6 — Test the Production Deployment**
+
+### 6.1 Open your CloudFront URL
+
+Use the `cloudfront_url` output from Terraform, for example:
 
 ```text
-Apply complete! Resources: 25 added, 0 changed, 0 destroyed.
-
-Outputs:
-lambda_functions = {
-  "charter"   = "alex-charter"
-  "planner"   = "alex-planner"
-  "reporter"  = "alex-reporter"
-  "retirement"= "alex-retirement"
-  "tagger"    = "alex-tagger"
-}
-sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/alex-analysis-jobs"
+https://d1234567890abcdef.cloudfront.net
 ```
 
-At this point the **infrastructure** exists, but the code still needs to be pushed from your freshly built ZIPs.
+1. **Sign in** with your Clerk account
+2. Confirm that the **dashboard** loads
+3. Check that **API-based data** appears (accounts, user profile)
 
+If API calls fail, double-check `NEXT_PUBLIC_API_URL` in `.env.local` and redeploy the frontend.
 
+### 6.2 Verify portfolio management in production
 
-# 📤 **Step 7 — Deploy Lambda Code Updates**
+1. Go to **Accounts**
+2. Click **Populate Test Data** if needed
+3. Edit an existing position and save
+4. Add a new position to an account
 
-After packaging, deploy the ZIPs to the live Lambda functions.
+All changes should be persisted in **Aurora through the `alex-api` Lambda**.
 
-**From** `backend`:
 
-```bash
-uv run deploy_all_lambdas.py
-```
 
-This script uploads the ZIPs (e.g. `planner_lambda.zip`, `tagger_lambda.zip`, etc.) to S3 and updates the corresponding Lambda functions.
+# 🤖 **Step 7 — Run AI Analysis in Production**
 
-Expected output:
+Now that the full stack is live, you can run a real multi-agent analysis from the UI.
 
-```text
-Updating alex-tagger... ✅
-Updating alex-reporter... ✅
-Updating alex-charter... ✅
-Updating alex-retirement... ✅
-Updating alex-planner... ✅
+### 7.1 Open the Advisor Team page
 
-All Lambda functions updated successfully!
-```
+In the frontend, navigate to **Advisor Team**. You’ll see four visible agents:
 
-Now your AWS Lambdas are running the same code you tested locally.
+* 🎯 **Financial Planner** – orchestrates the workflow
+* 📊 **Portfolio Analyst** – detailed portfolio analysis (Reporter)
+* 📈 **Chart Specialist** – charts & visualisations (Charter)
+* 🎯 **Retirement Planner** – retirement modelling (Retirement agent)
 
+The fifth agent (InstrumentTagger) runs automatically behind the scenes when needed.
 
+### 7.2 Start an analysis job
 
-# ☁️ **Step 8 — Test Deployed Agents in AWS**
+1. Click **Start New Analysis** (prominent purple button)
+2. Watch the agent states:
 
-Each agent has a **full remote test** that exercises its Lambda via AWS (and any configured tools).
+   * Planner lights up first
+   * Analysis agents activate in parallel
+   * Each agent glows / shows “Running” while working
+3. In 60–90 seconds, the analysis finishes and the UI redirects to a **results view**.
 
-### 8.1 Tagger – full remote test
+### 7.3 Review the analysis results
 
-**From** `backend/tagger`:
+The analysis view typically has **multiple tabs**, for example:
 
-```bash
-uv run test_full.py
-```
+* **Overview**
 
-Run this 2–3 times; it should consistently succeed.
+  * Executive summary
+  * Key observations
+  * Risk profile and high-level recommendations
 
-### 8.2 Reporter – full remote test
+* **Charts**
 
-**From** `backend/reporter`:
+  * Asset allocation
+  * Geographic exposure
+  * Sector breakdown
+  * Top holdings
 
-```bash
-uv run test_full.py
-```
+* **Retirement**
 
-Verifies:
+  * Monte Carlo simulation outcomes
+  * Success probability
+  * Projected balances over time
+  * Retirement readiness score
 
-* Lambda invocation
-* S3 Vectors access
-* DB writes into `jobs.report_payload`
+* **Recommendations**
 
-### 8.3 Charter – full remote test
+  * Concrete action items
+  * Rebalancing suggestions
+  * Risk and contribution adjustments
 
-**From** `backend/charter`:
+All of this data comes from the orchestrated agents writing into the `jobs` table and being surfaced by the API.
 
-```bash
-uv run test_full.py
-```
 
-Ensures chart JSON is generated and persisted correctly.
 
-### 8.4 Retirement – full remote test
+# 🔎 **Step 8 — Observe Behaviour in AWS Consoles**
 
-**From** `backend/retirement`:
+### 8.1 CloudWatch logs (API)
 
-```bash
-uv run test_full.py
-```
+1. Go to the **CloudWatch Console**
+2. Click **Log groups**
+3. Open `/aws/lambda/alex-api`
+4. Inspect the latest log stream:
 
-Checks Monte Carlo projections run successfully and results are stored.
+   * Incoming requests
+   * Auth checks (JWT validation)
+   * Calls to Aurora/SQS
+   * Errors and stack traces
 
-### 8.5 Planner – full remote test
+### 8.2 API Gateway metrics
 
-**From** `backend/planner`:
+1. Open **API Gateway Console**
+2. Select your `alex-api` API
+3. Go to the **Dashboard**
+4. Review:
 
-```bash
-uv run test_full.py
-```
+   * Request count
+   * Latency
+   * 4xx / 5xx rates
 
-This is the most involved test:
+### 8.3 Lambda performance
 
-* Creates a job
-* Triggers Planner
-* Planner coordinates Tagger / Reporter / Charter / Retirement
-* Job is updated as completed in Aurora
+1. Open **Lambda Console**
+2. Click on `alex-api`
+3. Explore the **Monitor** tab:
 
-It may take **60–90 seconds** on the first run.
+   * Invocations
+   * Duration
+   * Errors and throttles
+   * Concurrent executions
 
-### 8.6 Full system test via SQS
+### 8.4 SQS queue activity
 
-**From** `backend`:
+When you trigger an analysis:
 
-```bash
-uv run test_full.py
-```
+1. Go to the **SQS Console**
+2. Click on `alex-analysis-jobs`
+3. Watch metrics like **Messages available** and **Messages in flight**
+4. Check the DLQ `alex-analysis-jobs-dlq` for any failed messages
 
-This:
+### 8.5 CloudFront distribution
 
-1. Creates a new `jobs` row
-2. Sends a message to the **SQS** queue
-3. Lets the Planner Lambda consume and orchestrate the whole pipeline
-4. Waits for completion and verifies results
+1. Open **CloudFront Console**
+2. Select your distribution
+3. Check **Monitoring**:
 
-End result: a fully end-to-end test of the distributed system.
+   * Requests
+   * Cache hit ratio
+   * Data transfer
+   * Error rates
 
 
 
-# 📈 **Step 9 — Advanced Scenario Tests**
+# 💰 **Step 9 — Cost Awareness & Optimisation**
 
-### 9.1 Multiple accounts per user
+### 9.1 Inspect current month costs
 
-**From** `backend`:
+As root (or billing-enabled user):
 
-```bash
-uv run test_multiple_accounts.py
-```
-
-This creates a user with multiple accounts (e.g. 401k, IRA, Taxable) and runs a full analysis. It verifies:
-
-* Correct aggregation across accounts
-* Proper handling of different wrappers and cash balances
-
-### 9.2 Scale / concurrency test
-
-**From** `backend`:
-
-```bash
-uv run test_scale.py
-```
-
-This:
-
-* Creates several users with varying portfolio sizes
-* Dispatches multiple jobs concurrently
-* Validates that the system can handle parallel workloads using SQS + Lambda concurrency
-
-Use this to get a feel for how the system behaves under moderate load.
-
-
-
-# 🗄️ **Step 10 — Inspect Jobs and Results in the Database**
-
-Once remote tests pass, inspect what the agents actually wrote to Aurora.
-
-**From** `backend`:
-
-```bash
-uv run check_jobs.py
-```
-
-This script prints recent jobs, including:
-
-* Job ID and timestamps
-* User information
-* Status (`pending`, `processing`, `completed`, `error`)
-* Sizes of each payload (`report_payload`, `charts_payload`, `retirement_payload`, `summary_payload`)
-
-This is a convenient way to confirm that all agents are writing into the `jobs` table as expected.
-
-
-
-# 📊 **Step 11 — Explore AWS Console & Monitoring**
-
-### 11.1 Lambda functions
-
-1. Open the **Lambda Console**
-2. Locate:
-
-   * `alex-planner`
-   * `alex-tagger`
-   * `alex-reporter`
-   * `alex-charter`
-   * `alex-retirement`
-3. Click into `alex-planner`
-4. Open the **Monitor** tab → **View logs in CloudWatch**
-5. Inspect the latest log stream for detailed execution traces and agent reasoning logs
-
-### 11.2 SQS queue
-
-1. Open the **SQS Console**
-2. Select `alex-analysis-jobs`
-3. Check:
-
-   * **Messages available** – should be 0 when idle
-   * **Monitoring** tab – for throughput and error metrics
-4. Inspect the DLQ (`alex-analysis-jobs-dlq`) – ideally empty
-
-### 11.3 Cost management
-
-1. Open **Cost Management → Cost Explorer**
-2. Filter by service:
+1. Go to the **Billing Dashboard**
+2. Open **Bills** or **Cost Explorer**
+3. Review costs by service:
 
    * Lambda
+   * API Gateway
    * Aurora
-   * Bedrock
+   * S3 / CloudFront
    * SQS
-3. Estimate a monthly development cost; typical ranges:
+   * CloudWatch
+   * Bedrock
 
-   * Aurora baseline (depending on ACUs)
-   * Lambda invocations (very cheap at low volume)
-   * Bedrock tokens (main variable cost)
-   * SQS (fractions of a cent at low usage)
+### 9.2 Typical development cost breakdown
+
+Approximate monthly costs for a light dev workload:
+
+* **Lambda** – < $1
+* **API Gateway** – ~$1–4 (1M requests free tier)
+* **Aurora** – $43–60 (largest component)
+* **S3 + CloudFront** – < $1 for low traffic
+* **SQS** – < $1
+* **CloudWatch** – ~$3–5
+* **Bedrock** – $0.01–0.10 per analysis, depending on token usage
+
+Total: roughly **$50–70/month** for an actively used dev environment.
+
+### 9.3 Reducing costs when idle
+
+If you are not actively developing:
+
+```bash
+# To save Aurora costs (Part 5)
+cd terraform/5_database
+terraform destroy
+
+# To tear down all infra (reverse order: 7 → 6 → 5 → …)
+cd ../7_frontend
+terraform destroy
+
+cd ../6_agents
+terraform destroy
+
+# and so on for earlier parts
+```
+
+Destroying resources removes ongoing costs but also deletes data. Re-deploy when you return and re-run migrations/seed steps.
 
 
 
-# 🧯 **Troubleshooting & Deep-Dive Notes**
+# 🛠️ **Troubleshooting Guide**
 
-### Agent timeouts
+### Frontend build failures (`npm run build`)
 
-If an agent times out:
+* Check Node version (use Node 20+ if required by the repo)
+* Delete `node_modules` and `.next` if needed, then re-run `npm install`
+* Fix any TypeScript or ESLint errors surfaced during the build
 
-1. Check each Lambda’s timeout (agents ≈ 60s, Planner ≈ 300s)
-2. Verify Bedrock permissions and model access in the configured region
-3. Inspect CloudWatch logs for stack traces or retry behaviour
+### 401 / 403 from API
 
-### Database connection errors
+If the frontend gets `401 Unauthorized` or `403`:
 
-1. Confirm the Aurora cluster is **available** (not paused)
-2. Check `AURORA_CLUSTER_ARN` / `AURORA_SECRET_ARN` in Lambda environment variables
-3. Ensure RDS Data API IAM permissions are present for the Lambda role
+1. Verify Clerk keys in `frontend/.env.local`
+2. Check `CLERK_JWKS_URL` and `clerk_jwks_url`/`clerk_issuer` in Terraform/Lambda env
+3. Sign out, sign in again to refresh tokens
+4. Check `alex-api` logs for details on JWT validation failures
 
-### SQS messages not being processed
+### Analysis never completes
 
-1. Confirm that `alex-planner` has an SQS trigger bound to the queue
-2. Check Lambda’s IAM policy for SQS `ReceiveMessage/DeleteMessage`
-3. Inspect the DLQ for failed messages
+If jobs stay in `pending` or `processing`:
 
-### Rate limiting (LLM / Polygon)
+1. Confirm **SQS messages** are being created (`SQS_QUEUE_URL` set correctly)
+2. Verify the **planner Lambda** has an SQS trigger in the console
+3. Check planner/agent logs in CloudWatch for errors (e.g., DB connection issues)
+4. Make sure the Aurora cluster is available and Data API enabled
 
-1. Logs may show TooManyRequests / rate-limit messages
-2. The code includes retry with exponential backoff, but bursts can still fail
-3. For heavy testing, slow down or consider higher-tier plans
+### CloudFront 403 / AccessDenied
 
-### Model / region errors
+1. Ensure S3 bucket policy allows access from CloudFront’s origin access (OAI / OAC)
+2. Confirm Terraform completed without errors
+3. Wait 10–15 minutes for propagation
+4. Try an incognito window to avoid cached errors
 
-If you see “model not found” or similar:
+### Charts not rendering
 
-1. Confirm `BEDROCK_MODEL_ID` and `BEDROCK_REGION` in `.env` and Lambda env
-2. Ensure the model (e.g. `amazon.nova-pro-v1:0`) is enabled in the selected region
+1. Check the browser console for JS errors
+2. Inspect the `jobs.charts_payload` data via `check_jobs.py` or the API
+3. ensure Recharts is loaded and the component isn’t failing on `undefined` data
+
+
+
+# 🧱 **Architecture & Best Practices**
+
+### Security highlights
+
+* Clerk handles authentication; no passwords are stored in your app
+* JWTs are validated on every API request using Clerk’s JWKS (aud/iss checks)
+* HTTPS enforced via CloudFront
+* Pydantic schemas protect API inputs and outputs
+* AWS Secrets Manager handles sensitive values (DB, API keys)
+
+### Performance and scalability
+
+* Static assets served via CloudFront for minimal latency
+* Next.js uses code splitting and optimisation during build
+* API Gateway + Lambda scale automatically with traffic
+* Aurora Serverless adjusts capacity via ACUs
+* SQS decouples request handling from agent workload
+
+### Extension ideas
+
+Once everything is stable, you can:
+
+* Add more visualisations or drill-downs
+* Implement portfolio rebalancing tools
+* Add notifications (email, SMS) for completed analyses
+* Extend retirement inputs (target ages, withdrawal strategies)
+* Build a mobile-friendly view or a dedicated mobile client
 
 
 
 # ✅ **Summary**
 
-In this branch you:
+In this branch, you:
 
-* ✅ Configured environment variables for **Bedrock** and **Polygon**
-* ✅ Explored five specialised agents and their prompts
-* ✅ Ran **local smoke tests** for each agent and the planner
-* ✅ Packaged all Lambda functions using a Docker-based build
-* ✅ Deployed full **agent infrastructure** with Terraform
-* ✅ Deployed updated Lambda code ZIPs
-* ✅ Validated remote execution via **test_full** scripts and SQS
-* ✅ Explored jobs, logs, and costs in AWS
+* ✅ Set up **Clerk authentication** for frontend and backend
+* ✅ Ran the **Next.js frontend** and **FastAPI backend** locally
+* ✅ Populated test portfolios via the UI
+* ✅ Deployed **CloudFront + S3** for the frontend
+* ✅ Deployed **API Gateway + Lambda (alex-api)** for the backend
+* ✅ Wired the frontend to the production API and agent pipeline
+* ✅ Ran full multi-agent analyses from the browser
+* ✅ Monitored behaviour and costs across AWS services
 
-Your **AI Agent Orchestra** is now fully live – Planner, Tagger, Reporter, Charter, and Retirement are all working together to analyse portfolios, generate reports, create charts, and model retirement outcomes.
+Your Alex Financial Advisor is now a **fully deployed SaaS application**, with a secure frontend, a robust API, and a powerful multi-agent backend all working together. 🎉
+
+
+
+## 📌 Quick Reference
+
+### Key URLs
+
+* **Frontend (production)** – `cloudfront_url` from `terraform/7_frontend`
+* **API docs (production)** – `api_gateway_url` + `/docs`
+* **Clerk Dashboard** – [https://dashboard.clerk.com](https://dashboard.clerk.com)
+
+### Common commands
+
+```bash
+# Local dev (backend + frontend)
+cd scripts
+uv run run_local.py
+
+# Build frontend
+cd ../frontend
+npm run build
+
+# Deploy frontend to S3 + CloudFront
+cd ../scripts
+uv run deploy.py
+
+# Tail API logs
+aws logs tail /aws/lambda/alex-api --follow
+
+# Check AWS account ID
+aws sts get-caller-identity --query Account --output text
+```
+
+### Cost management reminders
+
+* Set up billing alerts in AWS
+* Review Cost Explorer weekly
+* Destroy heavy resources (especially Aurora) when idle
+* Stay within free tier limits where possible

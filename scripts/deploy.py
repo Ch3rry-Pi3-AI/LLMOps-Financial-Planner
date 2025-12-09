@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -135,9 +136,15 @@ def check_prerequisites() -> None:
         "aws": "AWS CLI is required for S3 sync and CloudFront invalidation",
     }
 
+    is_win = platform.system() == "Windows"
+
     for tool, message in tools.items():
         try:
-            run_command([tool, "--version"], capture_output=True)
+            if tool == "npm" and is_win:
+                # Windows: run via shell so npm.cmd / npm.ps1 is picked up
+                run_command("npm --version", capture_output=True)
+            else:
+                run_command([tool, "--version"], capture_output=True)
             print(f"  ✅ {tool} is installed")
         except SystemExit:
             # run_command already printed an error
@@ -244,52 +251,60 @@ def _prepare_env_production_local(api_url: str) -> None:
 
 
 def build_frontend(api_url: str | None = None) -> None:
-    """
-    Build the Next.js frontend as a static export.
+  """
+  Build the Next.js frontend as a static export.
 
-    Parameters
-    ----------
-    api_url :
-        If provided, this URL is written to ``.env.production.local`` as
-        ``NEXT_PUBLIC_API_URL`` so that the static build points at the
-        deployed API Gateway endpoint.
+  Parameters
+  ----------
+  api_url :
+      If provided, this URL is written to ``.env.production.local`` as
+      ``NEXT_PUBLIC_API_URL`` so that the static build points at the
+      deployed API Gateway endpoint.
 
-    Behaviour
-    ---------
-    - Ensures ``node_modules`` is installed via ``npm install`` if missing
-    - Sets ``NODE_ENV=production`` for the build
-    - Runs ``npm run build`` in the frontend directory
-    - Validates that the ``out`` directory (static export) exists
-    """
-    print("\n🎨 Building frontend...")
+  Behaviour
+  ---------
+  - Ensures ``node_modules`` is installed via ``npm install`` if missing
+  - Sets ``NODE_ENV=production`` for the build
+  - Runs ``npm run build`` in the frontend directory
+  - Validates that the ``out`` directory (static export) exists
+  """
+  print("\n🎨 Building frontend...")
 
-    if not FRONTEND_DIR.exists():
-        print(f"  ❌ Frontend directory not found: {FRONTEND_DIR}")
-        sys.exit(1)
+  if not FRONTEND_DIR.exists():
+      print(f"  ❌ Frontend directory not found: {FRONTEND_DIR}")
+      sys.exit(1)
 
-    # Install dependencies if required
-    node_modules = FRONTEND_DIR / "node_modules"
-    if not node_modules.exists():
-        print("  📦 Installing frontend dependencies (npm install)...")
-        run_command(["npm", "install"], cwd=FRONTEND_DIR)
+  is_win = platform.system() == "Windows"
 
-    # Optionally override API URL for production build
-    if api_url:
-        _prepare_env_production_local(api_url)
+  # Install dependencies if required
+  node_modules = FRONTEND_DIR / "node_modules"
+  if not node_modules.exists():
+      print("  📦 Installing frontend dependencies (npm install)...")
+      if is_win:
+          run_command("npm install", cwd=FRONTEND_DIR)
+      else:
+          run_command(["npm", "install"], cwd=FRONTEND_DIR)
 
-    print("  🏗️  Building Next.js app for production...")
-    build_env = os.environ.copy()
-    build_env["NODE_ENV"] = "production"
+  # Optionally override API URL for production build
+  if api_url:
+      _prepare_env_production_local(api_url)
 
-    run_command(["npm", "run", "build"], cwd=FRONTEND_DIR, env=build_env)
+  print("  🏗️  Building Next.js app for production...")
+  build_env = os.environ.copy()
+  build_env["NODE_ENV"] = "production"
 
-    out_dir = FRONTEND_DIR / "out"
-    if not out_dir.exists():
-        print(f"  ❌ Build output not found: {out_dir}")
-        print("  Ensure next.config.ts uses `output: 'export'` for static export.")
-        sys.exit(1)
+  if is_win:
+      run_command("npm run build", cwd=FRONTEND_DIR, env=build_env)
+  else:
+      run_command(["npm", "run", "build"], cwd=FRONTEND_DIR, env=build_env)
 
-    print("  ✅ Frontend built successfully")
+  out_dir = FRONTEND_DIR / "out"
+  if not out_dir.exists():
+      print(f"  ❌ Build output not found: {out_dir}")
+      print("  Ensure next.config.ts uses `output: 'export'` for static export.")
+      sys.exit(1)
+
+  print("  ✅ Frontend built successfully")
 
 
 # ============================================================

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * Analysis Page
  *
@@ -53,7 +54,6 @@ interface Job {
     generated_at: string;
   };
   // Charter stores charts with dynamic keys and arbitrary payload structures
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   charts_payload?: Record<string, any> | null;
   retirement_payload?: {
     agent: string;
@@ -458,7 +458,6 @@ export default function Analysis() {
      *  - Explicit `type` field from the charter agent (if present)
      *  - Fallback heuristics based on data shape
      */
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const getChartType = (
       chartData: any
     ): "pie" | "donut" | "bar" | "horizontalBar" | "line" => {
@@ -492,7 +491,6 @@ export default function Analysis() {
 
     return (
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
         {chartEntries.map(([key, chartData]: [string, any]) => {
           if (!chartData?.data || chartData.data.length === 0) return null;
 
@@ -521,7 +519,6 @@ export default function Analysis() {
                       fill="#8884d8"
                       dataKey="value"
                     >
-                      {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
                       {chartData.data.map((entry: any, idx: number) => (
                         <Cell
                           key={`cell-${idx}`}
@@ -559,7 +556,6 @@ export default function Analysis() {
                       }
                     />
                     <Bar dataKey="value">
-                      {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
                       {chartData.data?.map((entry: any, index: number) => (
                         <Cell
                           key={`cell-${index}`}
@@ -620,7 +616,6 @@ export default function Analysis() {
               {(chartType === "pie" || chartType === "donut") &&
                 chartData.data.length > 6 && (
                   <div className="mt-4 grid grid-cols-2 gap-2">
-                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
                     {chartData.data.map((entry: any, idx: number) => (
                       <div
                         key={entry.name}
