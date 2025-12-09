@@ -230,14 +230,14 @@ Now you’ll deploy the **API Gateway + Lambda API** and **CloudFront + S3 front
 
 ### 4.1 Configure Terraform variables
 
-From the project root:
+**From** `backend/reporter`:
 
 ```bash
 cd terraform/7_frontend
 cp terraform.tfvars.example terraform.tfvars
 ```
 
-Edit `terraform.tfvars`:
+Expected:
 
 ```hcl
 # AWS region for frontend + API
@@ -276,9 +276,11 @@ terraform plan
 terraform apply
 ```
 
-Confirm with `yes`.
+Expected:
 
-Terraform will create:
+* `Success: 1`
+* `Message: Retirement analysis completed`
+* Body describes:
 
 * S3 bucket for static frontend files
 * CloudFront distribution for global delivery
@@ -293,7 +295,7 @@ Provisioning typically takes **10–15 minutes** (CloudFront takes the longest).
 After apply:
 
 ```bash
-terraform output
+uv run test_simple.py
 ```
 
 You should see values like:
