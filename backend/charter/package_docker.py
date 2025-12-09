@@ -4,7 +4,7 @@ Packaging and deployment utility for the Charter Lambda function.
 
 This module provides a small CLI tool to:
 
-* Build an AWS Lambda–compatible deployment package for the **Charter** service
+* Build an AWS Lambda–compatible deployment package for the Charter service
   (chart-making agent) using Docker and `uv` dependency export.
 * Zip the Lambda handler, agent, templates, observability, and all required
   dependencies into `charter_lambda.zip`.
@@ -30,6 +30,7 @@ from typing import List, Optional, Union
 # Shell Command Utilities
 # =========================
 
+
 def run_command(cmd: List[str], cwd: Optional[Union[str, Path]] = None) -> str:
     """
     Run a shell command and exit the process on failure.
@@ -45,7 +46,8 @@ def run_command(cmd: List[str], cwd: Optional[Union[str, Path]] = None) -> str:
     Returns
     -------
     str
-        Standard output produced by the command.
+        Standard output produced by the command (decoded with replacement
+        for any invalid characters).
 
     Raises
     ------
@@ -59,21 +61,31 @@ def run_command(cmd: List[str], cwd: Optional[Union[str, Path]] = None) -> str:
     # Ensure cwd is a string path if provided
     cwd_str = str(cwd) if cwd is not None else None
 
-    # Execute the command and capture stdout/stderr
-    result = subprocess.run(cmd, cwd=cwd_str, capture_output=True, text=True)
+    # Execute the command and capture stdout/stderr as bytes
+    result = subprocess.run(
+        cmd,
+        cwd=cwd_str,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    # Decode with replacement to avoid UnicodeDecodeError on Windows cp1252
+    stdout = result.stdout.decode(errors="replace")
+    stderr = result.stderr.decode(errors="replace")
 
     # If the command failed, print stderr and exit
     if result.returncode != 0:
-        print(f"Error: {result.stderr}")
+        print(f"Error: {stderr or 'No stderr output.'}")
         sys.exit(1)
 
     # Return captured stdout for further use
-    return result.stdout
+    return stdout
 
 
 # =========================
 # Lambda Packaging Logic
 # =========================
+
 
 def package_lambda() -> Path:
     """
@@ -189,6 +201,7 @@ def package_lambda() -> Path:
 # Lambda Deployment Logic
 # =========================
 
+
 def deploy_lambda(zip_path: Path) -> None:
     """
     Deploy the packaged Charter Lambda ZIP to AWS.
@@ -245,6 +258,7 @@ def deploy_lambda(zip_path: Path) -> None:
 # =========================
 # Command-Line Interface
 # =========================
+
 
 def main() -> None:
     """

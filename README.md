@@ -1,234 +1,278 @@
-# 🧮 **Part 5 — Database & Shared Infrastructure**
+# 🖥️ **Part 7 — Frontend & API**
 
-In this branch, you give Alex a **proper backend brain**: a shared Aurora Serverless v2 PostgreSQL database, plus a reusable database layer that all agents (Planner, Tagger, Reporter, Retirement, etc.) will share.
+In this branch, you deploy the **user interface and HTTP API** that bring Alex to life: a modern React (Next.js) frontend plus a FastAPI backend running on Lambda and API Gateway.
 
-By the end of this branch, Alex is no longer just a research toy – it has a **multi-agent, multi-user SaaS-style data model** with proper schema, validation, and scripts for seeding, resetting, and verifying the database.
+By the end of this branch, you will have a **full SaaS experience**:
 
-## 🏦 **Why Aurora Serverless v2 with the Data API?**
+* Clerk-based authentication and automatic user creation
+* Portfolio management (accounts, positions, cash)
+* Real-time multi-agent analysis triggering and status checks
+* Interactive reports, charts, and retirement projections
+* Production-grade infrastructure: CloudFront, S3 static hosting, API Gateway, Lambda
 
-AWS offers many database services. For Alex, we need:
+## 🌐 **What This Branch Builds**
 
-* Strong relational modelling (users, accounts, positions, jobs)
-* JSONB for flexible payloads (charts, reports, retirement projections)
-* Minimal networking/VPC complexity
-* Easy integration with Lambda and other serverless components
+This branch wires up:
 
-### Common AWS database options
+* ✅ Next.js frontend with TailwindCSS and Clerk authentication
+* ✅ FastAPI backend deployed as `alex-api` Lambda behind API Gateway
+* ✅ Local dev harness for running frontend + API together
+* ✅ Production S3 + CloudFront static site hosting
+* ✅ JWT-secured API integrated with the existing Aurora + SQS + agents stack
 
-| Service            | Type           | Best For                                | Why Not for Alex (here)                                     |
-| ------------------ | -------------- | --------------------------------------- | ----------------------------------------------------------- |
-| **DynamoDB**       | NoSQL          | Key-value lookups, very high-scale apps | No SQL joins; awkward for relational portfolio data         |
-| **RDS (standard)** | SQL (managed)  | Predictable, always-on workloads        | Needs VPC + networking; always running → higher idle cost   |
-| **DocumentDB**     | Document NoSQL | MongoDB-compatible apps                 | Overkill; poorer fit for strongly structured financial data |
-| **Neptune**        | Graph          | Social / graph relationships            | Wrong model – we do not need graph queries                  |
-| **Timestream**     | Time-series    | Metrics, IoT, telemetry                 | Too specialised; we need full relational + JSONB            |
-
-### Why Aurora Serverless v2 PostgreSQL + Data API?
-
-We use **Aurora Serverless v2 with the Data API** because it offers:
-
-1. **No VPC hassle** – Data API gives HTTPS access; no private networking setup
-2. **Scales to near-zero** – Low baseline cost for a learning project
-3. **PostgreSQL** – Mature SQL with JSONB support for flexible payloads
-4. **Serverless** – Auto-scales for spikes when agents run heavy workloads
-5. **Data API** – Lambda-friendly; no persistent connections or pooling required
-6. **Pay-per-use** – Good cost profile while you iterate on the system
-
-You get a production-grade relational database without having to dive into VPCs, bastion hosts, or connection-pool tuning on day one.
-
-## 🧱 **What This Branch Builds**
-
-This branch deploys and wires up:
-
-* ✅ Aurora Serverless v2 PostgreSQL cluster with the Data API enabled
-* ✅ Core schema for users, accounts, positions, instruments, and jobs
-* ✅ Shared database package (Pydantic-backed) for all backend agents
-* ✅ Seed data: 22 popular ETFs with allocation breakdowns
-* ✅ Reset + verification scripts for fast, repeatable local development
-
-Architecture context:
+Architecture overview:
 
 ```mermaid
 graph TB
-    User[User] -->|Manage Portfolio| API[API Gateway]
-    API -->|CRUD Operations| Lambda[API Lambda]
-    Lambda -->|Data API| Aurora[(Aurora Serverless v2<br/>PostgreSQL)]
+    User[User Browser] -->|HTTPS| CF[CloudFront CDN]
+    CF -->|Static Files| S3[S3 Static Site]
+    CF -->|/api/*| APIG[API Gateway]
 
-    Planner[Financial Planner<br/>Orchestrator] -->|Read/Write| Aurora
-    Tagger[Instrument Tagger] -->|Update Instruments| Aurora
-    Reporter[Report Writer] -->|Store Reports| Aurora
-    Charter[Chart Maker] -->|Store Charts| Aurora
-    Retirement[Retirement Specialist] -->|Store Projections| Aurora
+    User -->|Auth| Clerk[Clerk Auth]
+    APIG -->|JWT| Lambda[API Lambda]
 
-    style Aurora fill:#FF9900
-    style Planner fill:#FFD700
-    style API fill:#90EE90
+    Lambda -->|Data API| Aurora[(Aurora DB)]
+    Lambda -->|Trigger| SQS[SQS Queue]
+
+    SQS -->|Process| Agents[AI Agents]
+    Agents -->|Results| Aurora
+
+    style CF fill:#FF9900
+    style S3 fill:#569A31
+    style Lambda fill:#FF9900
+    style Clerk fill:#6C5CE7
 ```
 
-# 🪜 **Step 0 — Add Required IAM Permissions**
+Pre-requisites:
 
-Before Terraform can create Aurora, subnets, secrets, and Data API resources, your IAM user must have the right permissions.
+* Database, SQS, agents, and vectors deployed in earlier parts
+* `.env` set up for Aurora, Bedrock, SQS, etc.
 
-### 0.1 Create a custom RDS + Data API policy
 
-1. Sign in as the **root user** (only for IAM setup)
-2. Go to **IAM → Policies → Create policy**
-3. Switch to the **JSON** tab and paste:
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "RDSPermissions",
-      "Effect": "Allow",
-      "Action": [
-        "rds:CreateDBCluster",
-        "rds:CreateDBInstance",
-        "rds:CreateDBSubnetGroup",
-        "rds:DeleteDBCluster",
-        "rds:DeleteDBInstance",
-        "rds:DeleteDBSubnetGroup",
-        "rds:DescribeDBClusters",
-        "rds:DescribeDBInstances",
-        "rds:DescribeDBSubnetGroups",
-        "rds:DescribeGlobalClusters",
-        "rds:ModifyDBCluster",
-        "rds:ModifyDBInstance",
-        "rds:ModifyDBSubnetGroup",
-        "rds:AddTagsToResource",
-        "rds:ListTagsForResource",
-        "rds:RemoveTagsFromResource",
-        "rds-data:ExecuteStatement",
-        "rds-data:BatchExecuteStatement",
-        "rds-data:BeginTransaction",
-        "rds-data:CommitTransaction",
-        "rds-data:RollbackTransaction"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "EC2Permissions",
-      "Effect": "Allow",
-      "Action": [
-        "ec2:DescribeVpcs",
-        "ec2:DescribeVpcAttribute",
-        "ec2:DescribeSubnets",
-        "ec2:DescribeAvailabilityZones",
-        "ec2:DescribeSecurityGroups",
-        "ec2:CreateSecurityGroup",
-        "ec2:DeleteSecurityGroup",
-        "ec2:AuthorizeSecurityGroupIngress",
-        "ec2:AuthorizeSecurityGroupEgress",
-        "ec2:RevokeSecurityGroupIngress",
-        "ec2:RevokeSecurityGroupEgress",
-        "ec2:CreateTags",
-        "ec2:DescribeTags"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "SecretsManagerPermissions",
-      "Effect": "Allow",
-      "Action": [
-        "secretsmanager:CreateSecret",
-        "secretsmanager:DeleteSecret",
-        "secretsmanager:DescribeSecret",
-        "secretsmanager:GetSecretValue",
-        "secretsmanager:PutSecretValue",
-        "secretsmanager:UpdateSecret"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "KMSPermissions",
-      "Effect": "Allow",
-      "Action": [
-        "kms:CreateGrant",
-        "kms:Decrypt",
-        "kms:DescribeKey",
-        "kms:Encrypt"
-      ],
-      "Resource": "*"
-    }
-  ]
-}
-```
+# 🔐 **Step 1 — Configure Clerk Authentication**
 
-4. Continue → name the policy **`AlexRDSCustomPolicy`**
-5. Set a description, e.g. `RDS and Data API permissions for Alex project`
-6. Create the policy
+You’ll use **Clerk** for authentication (same provider as earlier projects). You can reuse an existing Clerk app or create a new one.
 
-### 0.2 Attach policies to the `AlexAccess` group
+### 1.1 Get your Clerk credentials
 
-1. In IAM, go to **User groups → AlexAccess**
+If you already have a Clerk app:
 
-2. Open the **Permissions** tab → **Add permissions → Attach policies**
+1. Sign in at [https://dashboard.clerk.com](https://dashboard.clerk.com)
+2. Select your existing application
+3. Go to **API Keys**
+4. Note:
 
-3. Attach these AWS managed policies:
+   * **Publishable Key** (starts with `pk_`)
+   * **Secret Key** (starts with `sk_`)
+5. In the same area, open **Show JWT Public Key** → copy:
 
-   * `AmazonRDSDataFullAccess`
-   * `AWSLambda_FullAccess`
-   * `AmazonSQSFullAccess`
-   * `AmazonEventBridgeFullAccess`
-   * `SecretsManagerReadWrite`
+   * **JWKS Endpoint URL** (JWKS)
 
-4. Also attach your custom policy:
+If you need a new app:
 
-   * `AlexRDSCustomPolicy`
+1. Sign up at [https://clerk.com](https://clerk.com)
+2. Create a new application
+3. Choose **Email** (and optionally Google) as sign-in methods
+4. Grab your publishable + secret keys from **API Keys**
 
-5. Save changes
+### 1.2 Configure frontend environment
 
-### 0.3 Verify from your IAM user
-
-Sign out from root, sign back in as your **IAM user** (`aiengineer`), then run:
+Create `.env.local` in the `frontend` directory:
 
 ```bash
-aws rds describe-db-clusters
+# Clerk Authentication (use your own keys)
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_your-key-here
+CLERK_SECRET_KEY=sk_test_your-secret-here
+
+# Sign-in/up redirects (these paths are wired into the app)
+NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL=/dashboard
+NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL=/dashboard
+
+# API URL - localhost for dev, API Gateway URL for prod
+NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
-This should return either an empty list or any existing clusters (no AccessDenied).
+For production you’ll later change `NEXT_PUBLIC_API_URL` to your API Gateway base URL.
 
-Check the Data API CLI is available:
+### 1.3 Configure backend environment for JWT validation
+
+In your **root** `.env` file, add:
 
 ```bash
-aws rds-data execute-statement --help
+# Part 7 - Clerk Authentication
+CLERK_JWKS_URL=https://your-app.clerk.accounts.dev/.well-known/jwks.json
 ```
 
-You should see usage information mentioning required arguments like `--resource-arn`, `--secret-arn`, `--sql`.
+To find it:
 
-# 🧱 **Step 1 — Deploy Aurora Serverless v2 with Terraform**
+1. Clerk Dashboard → **API Keys**
+2. Click **Show JWT Public Key**
+3. Copy the **JWKS Endpoint** URL
 
-### 1.1 Configure Terraform variables
+Later, Terraform will also need the JWKS URL and issuer.
+
+
+
+# 🧪 **Step 2 — Run Frontend & API Locally**
+
+Before deploying to AWS, verify that the full stack works locally.
+
+### 2.1 Install frontend dependencies
 
 From the project root:
 
 ```bash
-cd terraform/5_database
+cd frontend
+npm install
+```
+
+This installs React, Next.js, Tailwind, Clerk, etc.
+
+### 2.2 Start local backend + frontend
+
+Use the helper script that runs both FastAPI and Next.js together.
+
+From the `scripts` directory:
+
+```bash
+cd ../scripts   # if you are in frontend
+uv run run_local.py
+```
+
+Expected output:
+
+```text
+🚀 Starting FastAPI backend...
+  ✅ Backend running at http://localhost:8000
+     API docs: http://localhost:8000/docs
+
+🚀 Starting NextJS frontend...
+  ✅ Frontend running at http://localhost:3000
+```
+
+### 2.3 Explore the local app
+
+Open [http://localhost:3000](http://localhost:3000):
+
+1. **Landing page** – Alex AI Financial Advisor homepage
+2. **Sign in** – click “Sign In”, use your Clerk account or create one
+3. **Dashboard** – after sign-in you’re redirected to `/dashboard`
+4. The backend automatically **creates your user record** in Aurora (via `GET /api/user` on first visit)
+
+### 2.4 Inspect the API documentation
+
+Open [http://localhost:8000/docs](http://localhost:8000/docs).
+
+You’ll see FastAPI’s Swagger UI:
+
+* Available endpoints
+* Request/response schemas
+* Auth requirements
+* Try-it-out UI (you will need a valid JWT)
+
+Key API routes include:
+
+* `GET /api/user` – get or create logged-in user
+* `GET /api/accounts` – list accounts for the current user
+* `POST /api/positions` – create/update positions
+* `POST /api/analyze` – trigger AI analysis (Planner + agents)
+* `GET /api/jobs/{job_id}` – fetch job status and results
+
+
+
+# 💼 **Step 3 — Populate a Test Portfolio**
+
+To make the UI and agents interesting, you’ll create some sample accounts and positions.
+
+### 3.1 Use the Accounts page
+
+In the frontend:
+
+1. Click **Accounts** in the navigation
+2. Initially, you’ll see “No accounts found”
+3. Click **Populate Test Data**
+
+The system will create:
+
+* 3 accounts:
+
+  * 401k
+  * Roth IRA
+  * Taxable brokerage
+* A spread of ETF/stock positions
+* Cash balances per account
+
+### 3.2 Explore account & position management
+
+Click an account to:
+
+* View positions with current values
+* Edit quantities
+* Add new positions (by ticker)
+* Delete positions
+* Update cash balances
+
+Example flow:
+
+1. Click the edit icon next to a position
+2. Change the quantity
+3. Save
+4. Confirm the total value updates
+
+> Note: **AI analysis won’t run end-to-end** until the AWS infra (SQS, agents, Lambda API) is deployed and correctly wired. Local portfolio management will still work.
+
+
+
+# ☁️ **Step 4 — Deploy API & Frontend Infrastructure with Terraform**
+
+Now you’ll deploy the **API Gateway + Lambda API** and **CloudFront + S3 frontend hosting**.
+
+### 4.1 Configure Terraform variables
+
+From the project root:
+
+```bash
+cd terraform/7_frontend
 cp terraform.tfvars.example terraform.tfvars
 ```
 
 Edit `terraform.tfvars`:
 
 ```hcl
-aws_region   = "us-east-1"  # Your main region
-min_capacity = 0.5          # Minimum ACUs (keep low for dev)
-max_capacity = 1.0          # Maximum ACUs (small for dev)
+# AWS region for frontend + API
+aws_region = "us-east-1"
+
+# Clerk configuration for JWT validation
+# Use values from your Clerk dashboard
+clerk_jwks_url = "https://your-instance.clerk.accounts.dev/.well-known/jwks.json"
+clerk_issuer   = "https://your-instance.clerk.accounts.dev"
 ```
 
-### 1.2 Deploy the database
+To find your AWS account ID (used in some bucket names and outputs):
 
-Mac / Linux:
+```bash
+aws sts get-caller-identity --query Account --output text
+```
+
+### 4.2 Package the API Lambda
+
+From the project root:
+
+```bash
+cd backend/api
+uv run package_docker.py
+```
+
+This builds a Lambda-compatible ZIP (e.g. `api_lambda.zip`) inside the `backend/api` folder.
+
+### 4.3 Deploy frontend & API infrastructure
+
+From `terraform/7_frontend`:
 
 ```bash
 terraform init
-terraform apply
-```
-
-Windows PowerShell:
-
-```powershell
-terraform init
+terraform plan
 terraform apply
 ```
 
@@ -236,322 +280,399 @@ Confirm with `yes`.
 
 Terraform will create:
 
-* Aurora Serverless v2 cluster with the Data API enabled
-* Subnet group, security group, and networking basics
-* Secrets Manager entry for DB credentials
-* Database **`alex`** inside the cluster
+* S3 bucket for static frontend files
+* CloudFront distribution for global delivery
+* API Gateway REST API (or HTTP API) for `/api/*` routes
+* `alex-api` Lambda for FastAPI backend
+* IAM roles/policies and log groups
 
-First-time provisioning typically takes **10–15 minutes**.
+Provisioning typically takes **10–15 minutes** (CloudFront takes the longest).
 
-### 1.3 Save the outputs into `.env`
+### 4.4 Capture Terraform outputs and update `.env`
 
-After Terraform completes:
+After apply:
 
 ```bash
 terraform output
 ```
 
-Note the values for:
+You should see values like:
 
-* `aurora_cluster_arn`
-* `aurora_secret_arn`
+* `cloudfront_url` – frontend URL
+* `api_gateway_url` – production API base URL
+* `s3_bucket` – static site bucket
 
-In the project root, open your `.env` file and add:
+You must also ensure your `.env` has the **SQS queue URL** from Part 6:
+
+From `terraform/6_agents`:
+
+```bash
+terraform output sqs_queue_url
+```
+
+Then in your root `.env`:
+
+```bash
+SQS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/123456789012/alex-analysis-jobs
+```
+
+For production, update `NEXT_PUBLIC_API_URL` in `frontend/.env.local` to your `api_gateway_url`.
+
+
+
+# 📦 **Step 5 — Build & Deploy the Frontend**
+
+With the infrastructure in place, you can now ship the Next.js frontend to S3 + CloudFront.
+
+### 5.1 Build the production frontend
+
+From `frontend`:
+
+```bash
+npm run build
+```
+
+This generates an optimised static export (e.g. `out/` / `.next` depending on deployment pattern specified in the repo).
+
+### 5.2 Deploy to S3 + invalidate CloudFront
+
+From `scripts`:
+
+```bash
+cd ../scripts
+uv run deploy.py
+```
+
+The deployment script:
+
+1. Uploads the built frontend assets to the S3 bucket created by Terraform
+2. Applies correct content types and cache headers
+3. Invalidates the CloudFront cache so new versions show up immediately
+
+Typical duration: **1–2 minutes** after the build is done.
+
+
+
+# 🌍 **Step 6 — Test the Production Deployment**
+
+### 6.1 Open your CloudFront URL
+
+Use the `cloudfront_url` output from Terraform, for example:
 
 ```text
-# Part 5 - Database
-AURORA_CLUSTER_ARN=arn:aws:rds:us-east-1:123456789012:cluster:alex-aurora-cluster
-AURORA_SECRET_ARN=arn:aws:secretsmanager:us-east-1:123456789012:secret:alex-aurora-credentials-xxxxx
+https://d1234567890abcdef.cloudfront.net
 ```
 
-Use the exact values from your own Terraform output.
+1. **Sign in** with your Clerk account
+2. Confirm that the **dashboard** loads
+3. Check that **API-based data** appears (accounts, user profile)
 
-# 🔌 **Step 2 — Test the Data API Connection**
+If API calls fail, double-check `NEXT_PUBLIC_API_URL` in `.env.local` and redeploy the frontend.
 
-From the project root:
+### 6.2 Verify portfolio management in production
+
+1. Go to **Accounts**
+2. Click **Populate Test Data** if needed
+3. Edit an existing position and save
+4. Add a new position to an account
+
+All changes should be persisted in **Aurora through the `alex-api` Lambda**.
+
+
+
+# 🤖 **Step 7 — Run AI Analysis in Production**
+
+Now that the full stack is live, you can run a real multi-agent analysis from the UI.
+
+### 7.1 Open the Advisor Team page
+
+In the frontend, navigate to **Advisor Team**. You’ll see four visible agents:
+
+* 🎯 **Financial Planner** – orchestrates the workflow
+* 📊 **Portfolio Analyst** – detailed portfolio analysis (Reporter)
+* 📈 **Chart Specialist** – charts & visualisations (Charter)
+* 🎯 **Retirement Planner** – retirement modelling (Retirement agent)
+
+The fifth agent (InstrumentTagger) runs automatically behind the scenes when needed.
+
+### 7.2 Start an analysis job
+
+1. Click **Start New Analysis** (prominent purple button)
+2. Watch the agent states:
+
+   * Planner lights up first
+   * Analysis agents activate in parallel
+   * Each agent glows / shows “Running” while working
+3. In 60–90 seconds, the analysis finishes and the UI redirects to a **results view**.
+
+### 7.3 Review the analysis results
+
+The analysis view typically has **multiple tabs**, for example:
+
+* **Overview**
+
+  * Executive summary
+  * Key observations
+  * Risk profile and high-level recommendations
+
+* **Charts**
+
+  * Asset allocation
+  * Geographic exposure
+  * Sector breakdown
+  * Top holdings
+
+* **Retirement**
+
+  * Monte Carlo simulation outcomes
+  * Success probability
+  * Projected balances over time
+  * Retirement readiness score
+
+* **Recommendations**
+
+  * Concrete action items
+  * Rebalancing suggestions
+  * Risk and contribution adjustments
+
+All of this data comes from the orchestrated agents writing into the `jobs` table and being surfaced by the API.
+
+
+
+# 🔎 **Step 8 — Observe Behaviour in AWS Consoles**
+
+### 8.1 CloudWatch logs (API)
+
+1. Go to the **CloudWatch Console**
+2. Click **Log groups**
+3. Open `/aws/lambda/alex-api`
+4. Inspect the latest log stream:
+
+   * Incoming requests
+   * Auth checks (JWT validation)
+   * Calls to Aurora/SQS
+   * Errors and stack traces
+
+### 8.2 API Gateway metrics
+
+1. Open **API Gateway Console**
+2. Select your `alex-api` API
+3. Go to the **Dashboard**
+4. Review:
+
+   * Request count
+   * Latency
+   * 4xx / 5xx rates
+
+### 8.3 Lambda performance
+
+1. Open **Lambda Console**
+2. Click on `alex-api`
+3. Explore the **Monitor** tab:
+
+   * Invocations
+   * Duration
+   * Errors and throttles
+   * Concurrent executions
+
+### 8.4 SQS queue activity
+
+When you trigger an analysis:
+
+1. Go to the **SQS Console**
+2. Click on `alex-analysis-jobs`
+3. Watch metrics like **Messages available** and **Messages in flight**
+4. Check the DLQ `alex-analysis-jobs-dlq` for any failed messages
+
+### 8.5 CloudFront distribution
+
+1. Open **CloudFront Console**
+2. Select your distribution
+3. Check **Monitoring**:
+
+   * Requests
+   * Cache hit ratio
+   * Data transfer
+   * Error rates
+
+
+
+# 💰 **Step 9 — Cost Awareness & Optimisation**
+
+### 9.1 Inspect current month costs
+
+As root (or billing-enabled user):
+
+1. Go to the **Billing Dashboard**
+2. Open **Bills** or **Cost Explorer**
+3. Review costs by service:
+
+   * Lambda
+   * API Gateway
+   * Aurora
+   * S3 / CloudFront
+   * SQS
+   * CloudWatch
+   * Bedrock
+
+### 9.2 Typical development cost breakdown
+
+Approximate monthly costs for a light dev workload:
+
+* **Lambda** – < $1
+* **API Gateway** – ~$1–4 (1M requests free tier)
+* **Aurora** – $43–60 (largest component)
+* **S3 + CloudFront** – < $1 for low traffic
+* **SQS** – < $1
+* **CloudWatch** – ~$3–5
+* **Bedrock** – $0.01–0.10 per analysis, depending on token usage
+
+Total: roughly **$50–70/month** for an actively used dev environment.
+
+### 9.3 Reducing costs when idle
+
+If you are not actively developing:
 
 ```bash
-cd backend/database
-uv run test_data_api.py
-```
-
-Expected output (or similar):
-
-```text
-✅ Successfully connected to Aurora using Data API!
-Database version: PostgreSQL 15.x
-```
-
-If this works, your IAM, secrets, and Data API configuration are all correct.
-
-# 🧬 **Step 3 — Run Database Migrations**
-
-Create the schema (tables, indexes, triggers) via the Data API:
-
-```bash
-# From backend/database
-uv run run_migrations.py
-```
-
-You should see a step-by-step log of each statement being executed, followed by a summary indicating success.
-
-# 🌱 **Step 4 — Load Seed Data (ETFs)**
-
-Populate the `instruments` table with 22 popular ETFs:
-
-```bash
-# From backend/database
-uv run seed_data.py
-```
-
-Example output:
-
-```text
-Seeding 22 instruments...
-✅ SPY - SPDR S&P 500 ETF
-✅ QQQ - Invesco QQQ Trust
-✅ BND - Vanguard Total Bond Market ETF
-...
-✅ Successfully seeded 22 instruments
-```
-
-# 🧪 **Step 5 — Create Test Data (Optional)**
-
-For development, you can reset the database and create a fully-populated test user and portfolio:
-
-```bash
-# From backend/database
-uv run reset_db.py --with-test-data
-```
-
-Typical output:
-
-```text
-Dropping existing tables...
-Running migrations...
-Loading default instruments...
-Creating test user with portfolio...
-✅ Database reset complete with test data!
-
-Test user created:
-- User ID: test_user_001
-- Display Name: Test User
-- 3 accounts (401k, Roth IRA, Taxable)
-- 5 positions in 401k account
-```
-
-This is useful for quickly bootstrapping a realistic dataset.
-
-# ✅ **Step 6 — Verify Database Integrity**
-
-The verification script gives you a “pre-flight check” before wiring agents into the database.
-
-```bash
-# From backend/database
-uv run verify_database.py
-```
-
-It reports:
-
-* Table presence and row counts
-* Instrument allocation sanity checks (e.g. percentages sum to 100)
-* Indexes and triggers
-* Overall status
-
-Look for the final confirmation section indicating the database is ready for use in the next branch.
-
-# 🧩 **Understanding the Database Schema**
-
-The schema is deliberately compact but expressive enough for multi-agent workflows.
-
-```mermaid
-erDiagram
-    users ||--o{ accounts : "owns"
-    users ||--o{ jobs : "requests"
-    accounts ||--o{ positions : "contains"
-    positions }o--|| instruments : "references"
-
-    users {
-        varchar clerk_user_id PK
-        varchar display_name
-        integer years_until_retirement
-        decimal target_retirement_income
-        jsonb asset_class_targets
-        jsonb region_targets
-    }
-
-    accounts {
-        uuid id PK
-        varchar clerk_user_id FK
-        varchar account_name
-        text account_purpose
-        decimal cash_balance
-        decimal cash_interest
-    }
-
-    positions {
-        uuid id PK
-        uuid account_id FK
-        varchar symbol FK
-        decimal quantity
-        date as_of_date
-    }
-
-    instruments {
-        varchar symbol PK
-        varchar name
-        varchar instrument_type
-        decimal current_price
-        jsonb allocation_regions
-        jsonb allocation_sectors
-        jsonb allocation_asset_class
-    }
-
-    jobs {
-        uuid id PK
-        varchar clerk_user_id FK
-        varchar job_type
-        varchar status
-        jsonb request_payload
-        jsonb report_payload
-        jsonb charts_payload
-        jsonb retirement_payload
-        jsonb summary_payload
-        text error_message
-        timestamp started_at
-        timestamp completed_at
-    }
-```
-
-### Table roles
-
-* **users**
-  Minimal profile data; authentication is handled by Clerk. Includes retirement preferences and allocation targets.
-
-* **instruments**
-  Master list of ETFs/stocks/funds. Contains allocation JSONB fields used by the Tagger, Planner, and Reporter.
-
-* **accounts**
-  Logical investment accounts (401k, ISA, brokerage, etc.) per user.
-
-* **positions**
-  Holdings (symbol + quantity per account) with `as_of_date`.
-
-* **jobs**
-  Tracks asynchronous work across the system. Each agent writes into its own JSONB payload:
-
-  * `request_payload` – original request (e.g. “Build a retirement plan”)
-  * `report_payload` – Reporter’s markdown analysis
-  * `charts_payload` – Charter’s chart specs
-  * `retirement_payload` – Retirement agent’s projections
-  * `summary_payload` – Planner’s final summary / metadata
-
-All inserts/updates are validated via Pydantic schemas before hitting the database, helping maintain integrity across agents.
-
-# 💸 **Cost Management**
-
-Aurora Serverless v2 approximate costs:
-
-* **0.5 ACU minimum capacity**: roughly **$40–45/month** if left running
-* Actual daily cost depends on activity and scale
-
-To keep costs under control:
-
-```bash
+# To save Aurora costs (Part 5)
 cd terraform/5_database
 terraform destroy
+
+# To tear down all infra (reverse order: 7 → 6 → 5 → …)
+cd ../7_frontend
+terraform destroy
+
+cd ../6_agents
+terraform destroy
+
+# and so on for earlier parts
 ```
 
-This:
+Destroying resources removes ongoing costs but also deletes data. Re-deploy when you return and re-run migrations/seed steps.
 
-* Stops all Aurora charges
-* Deletes the cluster and all data
 
-When you are ready to continue:
+
+# 🛠️ **Troubleshooting Guide**
+
+### Frontend build failures (`npm run build`)
+
+* Check Node version (use Node 20+ if required by the repo)
+* Delete `node_modules` and `.next` if needed, then re-run `npm install`
+* Fix any TypeScript or ESLint errors surfaced during the build
+
+### 401 / 403 from API
+
+If the frontend gets `401 Unauthorized` or `403`:
+
+1. Verify Clerk keys in `frontend/.env.local`
+2. Check `CLERK_JWKS_URL` and `clerk_jwks_url`/`clerk_issuer` in Terraform/Lambda env
+3. Sign out, sign in again to refresh tokens
+4. Check `alex-api` logs for details on JWT validation failures
+
+### Analysis never completes
+
+If jobs stay in `pending` or `processing`:
+
+1. Confirm **SQS messages** are being created (`SQS_QUEUE_URL` set correctly)
+2. Verify the **planner Lambda** has an SQS trigger in the console
+3. Check planner/agent logs in CloudWatch for errors (e.g., DB connection issues)
+4. Make sure the Aurora cluster is available and Data API enabled
+
+### CloudFront 403 / AccessDenied
+
+1. Ensure S3 bucket policy allows access from CloudFront’s origin access (OAI / OAC)
+2. Confirm Terraform completed without errors
+3. Wait 10–15 minutes for propagation
+4. Try an incognito window to avoid cached errors
+
+### Charts not rendering
+
+1. Check the browser console for JS errors
+2. Inspect the `jobs.charts_payload` data via `check_jobs.py` or the API
+3. ensure Recharts is loaded and the component isn’t failing on `undefined` data
+
+
+
+# 🧱 **Architecture & Best Practices**
+
+### Security highlights
+
+* Clerk handles authentication; no passwords are stored in your app
+* JWTs are validated on every API request using Clerk’s JWKS (aud/iss checks)
+* HTTPS enforced via CloudFront
+* Pydantic schemas protect API inputs and outputs
+* AWS Secrets Manager handles sensitive values (DB, API keys)
+
+### Performance and scalability
+
+* Static assets served via CloudFront for minimal latency
+* Next.js uses code splitting and optimisation during build
+* API Gateway + Lambda scale automatically with traffic
+* Aurora Serverless adjusts capacity via ACUs
+* SQS decouples request handling from agent workload
+
+### Extension ideas
+
+Once everything is stable, you can:
+
+* Add more visualisations or drill-downs
+* Implement portfolio rebalancing tools
+* Add notifications (email, SMS) for completed analyses
+* Extend retirement inputs (target ages, withdrawal strategies)
+* Build a mobile-friendly view or a dedicated mobile client
+
+
+
+# ✅ **Summary**
+
+In this branch, you:
+
+* ✅ Set up **Clerk authentication** for frontend and backend
+* ✅ Ran the **Next.js frontend** and **FastAPI backend** locally
+* ✅ Populated test portfolios via the UI
+* ✅ Deployed **CloudFront + S3** for the frontend
+* ✅ Deployed **API Gateway + Lambda (alex-api)** for the backend
+* ✅ Wired the frontend to the production API and agent pipeline
+* ✅ Ran full multi-agent analyses from the browser
+* ✅ Monitored behaviour and costs across AWS services
+
+Your Alex Financial Advisor is now a **fully deployed SaaS application**, with a secure frontend, a robust API, and a powerful multi-agent backend all working together. 🎉
+
+
+
+## 📌 Quick Reference
+
+### Key URLs
+
+* **Frontend (production)** – `cloudfront_url` from `terraform/7_frontend`
+* **API docs (production)** – `api_gateway_url` + `/docs`
+* **Clerk Dashboard** – [https://dashboard.clerk.com](https://dashboard.clerk.com)
+
+### Common commands
 
 ```bash
-terraform apply
+# Local dev (backend + frontend)
+cd scripts
+uv run run_local.py
+
+# Build frontend
+cd ../frontend
+npm run build
+
+# Deploy frontend to S3 + CloudFront
+cd ../scripts
+uv run deploy.py
+
+# Tail API logs
+aws logs tail /aws/lambda/alex-api --follow
+
+# Check AWS account ID
+aws sts get-caller-identity --query Account --output text
 ```
 
-You can then re-run migrations and seed scripts to restore the baseline dataset.
+### Cost management reminders
 
-> Only run `terraform destroy` when you’re comfortable losing all data in the cluster.
-
-# 🛠️ **Troubleshooting**
-
-### Data API connection issues
-
-Check cluster status:
-
-```bash
-aws rds describe-db-clusters --db-cluster-identifier alex-aurora-cluster
-```
-
-Status should be `available`.
-
-Check Data API is enabled:
-
-```bash
-aws rds describe-db-clusters \
-  --db-cluster-identifier alex-aurora-cluster \
-  --query 'DBClusters[0].EnableHttpEndpoint'
-```
-
-Should return `true`.
-
-Check secrets:
-
-```bash
-aws secretsmanager list-secrets \
-  --query "SecretList[?contains(Name, 'alex-aurora-credentials')].Name"
-```
-
-Then:
-
-```bash
-aws secretsmanager get-secret-value \
-  --secret-id alex-aurora-credentials-XXXX \
-  --query SecretString \
-  --output text
-```
-
-This should contain username and password in JSON form.
-
-### Migration failures
-
-From `backend/database`:
-
-* Inspect the migration definitions (in this project they’re embedded in Python; for any SQL file based migrations, inspect the relevant file).
-
-To reset and retry:
-
-```bash
-uv run reset_db.py
-```
-
-This drops tables, re-runs migrations, and reloads seed data.
-
-### Pydantic validation errors
-
-Typical causes:
-
-* Allocation dictionaries not summing to exactly `100.0`
-* Invalid enum / literal values for regions, sectors, or asset classes
-
-Review schema definitions:
-
-```bash
-# From backend/database
-cat src/schemas.py
-```
-
-Check that your custom data respects the expected value ranges and formats.
-
-# 📍 **Next Steps**
-
-With this branch complete, you now have:
-
-* Aurora Serverless v2 PostgreSQL with the Data API enabled
-* A clean, validated schema for users, portfolios, instruments, and jobs
-* Seeded ETF data and optional test user portfolios
-* A shared database package ready to be used by all backend agents
+* Set up billing alerts in AWS
+* Review Cost Explorer weekly
+* Destroy heavy resources (especially Aurora) when idle
+* Stay within free tier limits where possible

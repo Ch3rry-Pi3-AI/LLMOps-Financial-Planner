@@ -31,29 +31,30 @@ from typing import Dict, List, Tuple
 # ============================================================
 
 
-def run_command(cmd: List[str], cwd: Path) -> Tuple[bool, str, str]:
+def run_command(
+    cmd: List[str],
+    cwd: Path,
+    env: dict | None = None,
+) -> Tuple[bool, str, str]:
     """
     Run a command in a given working directory and capture output.
 
-    Parameters
-    ----------
-    cmd : list of str
-        Command and arguments to execute.
-    cwd : pathlib.Path
-        Directory to run the command in.
-
     Returns
     -------
-    (bool, str, str)
-        Tuple of (success, stdout, stderr).
+    (success, stdout, stderr)
     """
     print(f"Running in {cwd}: {' '.join(cmd)}")
+
     result = subprocess.run(
         cmd,
         cwd=str(cwd),
+        env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",  # Prevent UnicodeDecodeError from emojis/etc.
     )
+
     return result.returncode == 0, result.stdout, result.stderr
 
 
@@ -92,13 +93,29 @@ def test_agent(agent_name: str, test_file: str = "test_simple.py") -> bool:
         # Not a failure – just report that this agent has no simple test
         return True
 
-    # Set environment for mocked Lambda execution
+    # Prepare environment for the agent test
     env = os.environ.copy()
+
+    # Remove any pre-set VIRTUAL_ENV to avoid uv's project-env warning
+    env.pop("VIRTUAL_ENV", None)
+
+    # Mock Lambda-style execution
     env["MOCK_LAMBDAS"] = "true"
 
+    # Force Python in the child process to use UTF-8 for stdout/stderr,
+    # so emoji prints inside agent test_simple.py don't crash on Windows.
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+
+    # If you want to mirror what you did in the planner tests and
+    # explicitly target the active environment, you can uncomment:
+    # cmd = ["uv", "run", "--active", test_file]
+    cmd = ["uv", "run", test_file]
+
     success, stdout, stderr = run_command(
-        ["uv", "run", test_file],
+        cmd,
         cwd=agent_dir,
+        env=env,
     )
 
     if success:
@@ -114,11 +131,17 @@ def test_agent(agent_name: str, test_file: str = "test_simple.py") -> bool:
                     print(f"     {line.strip()}")
     else:
         print(f"  ❌ {agent_name}: Test failed")
+
         if stderr:
-            # Show the first non-empty error line (trimmed)
-            error_lines = [ln for ln in stderr.splitlines() if ln.strip()]
-            if error_lines:
-                print(f"     Error: {error_lines[0][:100]}")
+            print("     Error (stderr):")
+            for line in stderr.splitlines():
+                if line.strip():
+                    print(f"       {line}")
+        elif stdout:
+            print("     Output (stdout):")
+            for line in stdout.splitlines():
+                if line.strip():
+                    print(f"       {line}")
 
     return success
 
