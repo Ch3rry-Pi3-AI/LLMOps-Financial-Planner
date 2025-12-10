@@ -13,5 +13,5 @@ variable "clerk_jwks_url" {
 variable "clerk_issuer" {
   description = "Clerk issuer URL (kept for Lambda environment)"
   type        = string
-  default     = ""  # Not actually used but kept for backwards compatibility
+  default     = "" # Not actually used but kept for backwards compatibility
 }
