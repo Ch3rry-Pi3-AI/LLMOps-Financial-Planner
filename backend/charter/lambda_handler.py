@@ -29,6 +29,7 @@ import os
 import json
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Union, List
 
 from agents import Agent, Runner, trace
@@ -69,7 +70,13 @@ logger.setLevel(logging.INFO)
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=4, max=60),
     before_sleep=lambda retry_state: logger.info(
-        f"Charter: Rate limit hit, retrying in {retry_state.next_action.sleep} seconds..."
+        json.dumps(
+            {
+                "event": "CHARTER_RATE_LIMIT",
+                "sleep_seconds": getattr(retry_state.next_action, "sleep", "unknown"),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
     ),
 )
 async def run_charter_agent(
@@ -110,6 +117,20 @@ async def run_charter_agent(
         * ``charts_generated`` (int): count of charts generated.
         * ``chart_keys`` (list of str): keys of charts in the payload.
     """
+    start_time = datetime.now(timezone.utc)
+
+    # Structured "charter started" event
+    logger.info(
+        json.dumps(
+            {
+                "event": "CHARTER_STARTED",
+                "job_id": job_id,
+                "account_count": len(portfolio_data.get("accounts", [])),
+                "timestamp": start_time.isoformat(),
+            }
+        )
+    )
+
     # Create the charter agent configuration (LLM model + task prompt)
     model, task = create_agent(job_id, portfolio_data, db)
 
@@ -179,6 +200,18 @@ async def run_charter_agent(
                         len(charts),
                     )
 
+                    # Structured JSON-parse log
+                    logger.info(
+                        json.dumps(
+                            {
+                                "event": "CHARTER_JSON_PARSED",
+                                "job_id": job_id,
+                                "charts_found": len(charts),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
+                    )
+
                     # Only build charts payload if charts exist
                     if charts:
                         charts_data = {}
@@ -198,6 +231,18 @@ async def run_charter_agent(
                             # Store the normalised chart under its key
                             charts_data[chart_key] = chart_copy
 
+                            # Structured per-chart event
+                            logger.info(
+                                json.dumps(
+                                    {
+                                        "event": "CHART_GENERATED",
+                                        "job_id": job_id,
+                                        "chart_key": chart_key,
+                                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    }
+                                )
+                            )
+
                         logger.info(
                             "Charter: Created charts_data with keys: %s",
                             list(charts_data.keys()),
@@ -211,9 +256,31 @@ async def run_charter_agent(
                                 logger.info(
                                     "Charter: Database update returned: %s", success
                                 )
+
+                                logger.info(
+                                    json.dumps(
+                                        {
+                                            "event": "CHARTS_SAVED",
+                                            "job_id": job_id,
+                                            "success": charts_saved,
+                                            "chart_count": len(charts_data),
+                                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                                        }
+                                    )
+                                )
                             except Exception as e:
                                 # Log DB errors but still return chart payload info
                                 logger.error("Charter: Database error: %s", e)
+                                logger.error(
+                                    json.dumps(
+                                        {
+                                            "event": "CHARTS_SAVE_ERROR",
+                                            "job_id": job_id,
+                                            "error": str(e),
+                                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                                        }
+                                    )
+                                )
                     else:
                         logger.warning("Charter: No charts found in parsed JSON")
 
@@ -224,6 +291,16 @@ async def run_charter_agent(
                         "Charter: JSON string attempted: %s...",
                         json_str[:500],
                     )
+                    logger.error(
+                        json.dumps(
+                            {
+                                "event": "CHARTER_JSON_DECODE_ERROR",
+                                "job_id": job_id,
+                                "error": str(e),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
+                    )
             else:
                 # If braces cannot be found, log that the output has no JSON object
                 logger.error("Charter: No JSON structure found in output")
@@ -231,10 +308,33 @@ async def run_charter_agent(
                     "Charter: Output preview: %s...",
                     output[:500],
                 )
+                logger.error(
+                    json.dumps(
+                        {
+                            "event": "CHARTER_NO_JSON_FOUND",
+                            "job_id": job_id,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                )
 
         # Derive chart statistics for the response payload
         charts_count: int = len(charts_data) if charts_data else 0
         chart_keys: List[str] = list(charts_data.keys()) if charts_data else []
+
+        end_time = datetime.now(timezone.utc)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "CHARTER_COMPLETED",
+                    "job_id": job_id,
+                    "success": charts_saved,
+                    "charts_generated": charts_count,
+                    "duration_seconds": (end_time - start_time).total_seconds(),
+                    "timestamp": end_time.isoformat(),
+                }
+            )
+        )
 
         # Build the final result summary to be returned to the caller
         return {
@@ -313,12 +413,31 @@ def lambda_handler(
 
             # Extract the job identifier from the event
             job_id: Optional[str] = event.get("job_id") if isinstance(event, dict) else None
+
             if not job_id:
+                logger.warning(
+                    json.dumps(
+                        {
+                            "event": "CHARTER_MISSING_JOB_ID",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                )
                 # Return a 400 response if job_id is missing
                 return {
                     "statusCode": 400,
                     "body": json.dumps({"error": "job_id is required"}),
                 }
+
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "CHARTER_LAMBDA_STARTED",
+                        "job_id": job_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
 
             # Initialise the database handle used throughout the handler
             db = Database()
@@ -386,9 +505,30 @@ def lambda_handler(
                             "Charter: Loaded %d accounts with positions",
                             len(portfolio_data["accounts"]),
                         )
+
+                        logger.info(
+                            json.dumps(
+                                {
+                                    "event": "CHARTER_PORTFOLIO_LOADED",
+                                    "job_id": job_id,
+                                    "user_id": user_id,
+                                    "account_count": len(portfolio_data["accounts"]),
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                }
+                            )
+                        )
                     else:
                         # If the job cannot be found, return a 404-style response
                         logger.error("Charter: Job %s not found", job_id)
+                        logger.error(
+                            json.dumps(
+                                {
+                                    "event": "CHARTER_JOB_NOT_FOUND",
+                                    "job_id": job_id,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                }
+                            )
+                        )
                         return {
                             "statusCode": 404,
                             "body": json.dumps({"error": "Job not found"}),
@@ -396,6 +536,16 @@ def lambda_handler(
                 except Exception as e:
                     # Handle any failure while reconstructing portfolio data
                     logger.error("Charter: Error loading portfolio data: %s", e)
+                    logger.error(
+                        json.dumps(
+                            {
+                                "event": "CHARTER_PORTFOLIO_LOAD_ERROR",
+                                "job_id": job_id,
+                                "error": str(e),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
+                    )
                     return {
                         "statusCode": 500,
                         "body": json.dumps(
@@ -421,6 +571,16 @@ def lambda_handler(
         except Exception as e:
             # Log any unexpected top-level exception with full stack trace
             logger.error("Error in charter: %s", e, exc_info=True)
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "CHARTER_UNHANDLED_ERROR",
+                        "job_id": event.get("job_id") if isinstance(event, dict) else None,
+                        "error": str(e),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
             # Return a generic 500 response indicating failure
             return {
                 "statusCode": 500,

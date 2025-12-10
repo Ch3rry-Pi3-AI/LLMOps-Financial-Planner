@@ -18,7 +18,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from agents import Agent, Runner, trace
@@ -33,7 +33,8 @@ from agent import ReporterContext, create_agent
 from observability import observe
 from templates import REPORTER_INSTRUCTIONS
 
-logger = logging.getLogger(__name__)
+# Use root logger for consistency with other Lambdas / CloudWatch
+logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 GUARD_AGAINST_SCORE = 0.3  # Guard against score being too low (scaled 0–1)
@@ -100,6 +101,19 @@ async def run_reporter_agent(
         * ``message`` – human-readable status message
         * ``final_output`` – the raw report text from the Reporter agent
     """
+    start_time = datetime.now(timezone.utc)
+
+    # Structured "reporter started" event
+    logger.info(
+        json.dumps(
+            {
+                "event": "REPORTER_STARTED",
+                "job_id": job_id,
+                "timestamp": start_time.isoformat(),
+            }
+        )
+    )
+
     # Create agent with tools and context
     model, tools, task, context = create_agent(job_id, portfolio_data, user_data, db)
 
@@ -140,8 +154,32 @@ async def run_reporter_agent(
                     status_message=observation,
                 )
 
+                # Structured Judge evaluation log
+                logger.info(
+                    json.dumps(
+                        {
+                            "event": "REPORTER_JUDGE_EVAL",
+                            "job_id": job_id,
+                            "score": score,
+                            "threshold": GUARD_AGAINST_SCORE,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                )
+
                 if score < GUARD_AGAINST_SCORE:
                     logger.error("Reporter score is too low: %.3f", score)
+                    logger.error(
+                        json.dumps(
+                            {
+                                "event": "REPORTER_JUDGE_REJECT",
+                                "job_id": job_id,
+                                "score": score,
+                                "threshold": GUARD_AGAINST_SCORE,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
+                    )
                     response = (
                         "I'm sorry, I'm not able to generate a report for you. "
                         "Please try again later."
@@ -158,6 +196,28 @@ async def run_reporter_agent(
 
         if not success:
             logger.error("Failed to save report for job %s", job_id)
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "REPORTER_SAVE_FAILED",
+                        "job_id": job_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
+
+        end_time = datetime.now(timezone.utc)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "REPORTER_COMPLETED",
+                    "job_id": job_id,
+                    "success": success,
+                    "duration_seconds": (end_time - start_time).total_seconds(),
+                    "timestamp": end_time.isoformat(),
+                }
+            )
+        )
 
         return {
             "success": success,
@@ -225,6 +285,14 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
             # ------------------------------------------------------------------
             job_id = event.get("job_id")
             if not job_id:
+                logger.warning(
+                    json.dumps(
+                        {
+                            "event": "REPORTER_MISSING_JOB_ID",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                )
                 return {
                     "statusCode": 400,
                     "body": json.dumps({"error": "job_id is required"}),
@@ -239,10 +307,21 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
             # Portfolio data: from event or database
             # ------------------------------------------------------------------
             portfolio_data: Dict[str, Any] | None = event.get("portfolio_data")
+            user_id: str | None = None
+
             if not portfolio_data:
                 try:
                     job = db.jobs.find_by_id(job_id)
                     if not job:
+                        logger.warning(
+                            json.dumps(
+                                {
+                                    "event": "REPORTER_JOB_NOT_FOUND",
+                                    "job_id": job_id,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                }
+                            )
+                        )
                         return {
                             "statusCode": 404,
                             "body": json.dumps(
@@ -251,6 +330,18 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
                         }
 
                     user_id = job["clerk_user_id"]
+
+                    # Structured "reporter lambda started" event once we know user_id
+                    logger.info(
+                        json.dumps(
+                            {
+                                "event": "REPORTER_LAMBDA_STARTED",
+                                "job_id": job_id,
+                                "user_id": user_id,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
+                    )
 
                     if observability:
                         observability.create_event(
@@ -277,7 +368,7 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
                             "positions": [],
                         }
 
-                            # Attach positions with instrument details
+                        # Attach positions with instrument details
                         for position in positions:
                             instrument = db.instruments.find_by_symbol(
                                 position["symbol"],
@@ -295,6 +386,16 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
 
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Could not load portfolio from database: %s", exc)
+                    logger.error(
+                        json.dumps(
+                            {
+                                "event": "REPORTER_PORTFOLIO_LOAD_ERROR",
+                                "job_id": job_id,
+                                "error": str(exc),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
+                    )
                     return {
                         "statusCode": 400,
                         "body": json.dumps(
@@ -341,6 +442,16 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
                         "Could not load user data: %s. Using defaults.",
                         exc,
                     )
+                    logger.warning(
+                        json.dumps(
+                            {
+                                "event": "REPORTER_USER_DATA_FALLBACK",
+                                "job_id": job_id,
+                                "error": str(exc),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
+                    )
                     user_data = {
                         "years_until_retirement": 30,
                         "target_retirement_income": 80000,
@@ -368,6 +479,16 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
 
         except Exception as exc:  # noqa: BLE001
             logger.error("Error in reporter: %s", exc, exc_info=True)
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "REPORTER_UNHANDLED_ERROR",
+                        "job_id": event.get("job_id") if isinstance(event, dict) else None,
+                        "error": str(exc),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
             return {
                 "statusCode": 500,
                 "body": json.dumps(

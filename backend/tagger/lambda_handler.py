@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from agent import classification_to_db_format, tag_instruments
@@ -49,7 +50,8 @@ from src import Database
 # Logging / Database Initialisation
 # ============================================================
 
-logger = logging.getLogger(__name__)
+# Use the root logger so CloudWatch picks everything up consistently
+logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Initialise database client (reused across Lambda invocations)
@@ -81,6 +83,21 @@ async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, An
         - ``errors``: list of per-symbol error details
         - ``classifications``: serialisable view of the classifications
     """
+    start_time = datetime.now(timezone.utc)
+    symbols = [inst.get("symbol") for inst in instruments]
+
+    # Structured "tagger started" event for CloudWatch dashboards
+    logger.info(
+        json.dumps(
+            {
+                "event": "TAGGER_STARTED",
+                "instrument_count": len(instruments),
+                "symbols": symbols,
+                "timestamp": start_time.isoformat(),
+            }
+        )
+    )
+
     logger.info("Classifying %d instruments", len(instruments))
 
     # Run the agent classification for all instruments
@@ -114,12 +131,26 @@ async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, An
                     classification.symbol,
                     rows,
                 )
+                operation = "update"
             else:
                 # Insert new instrument row
                 db.instruments.create_instrument(db_instrument)
                 logger.info("Created %s in database", classification.symbol)
+                operation = "create"
 
             updated.append(classification.symbol)
+
+            # Structured per-instrument event
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "INSTRUMENT_TAGGED",
+                        "symbol": classification.symbol,
+                        "operation": operation,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
 
         except Exception as exc:  # noqa: BLE001
             logger.error("Error updating %s: %s", classification.symbol, exc)
@@ -128,6 +159,17 @@ async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, An
                     "symbol": classification.symbol,
                     "error": str(exc),
                 }
+            )
+            # Structured error event
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "INSTRUMENT_TAG_ERROR",
+                        "symbol": classification.symbol,
+                        "error": str(exc),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
             )
 
     # Prepare a JSON-serialisable view of classifications
@@ -143,6 +185,20 @@ async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, An
         }
         for c in classifications
     ]
+
+    end_time = datetime.now(timezone.utc)
+    logger.info(
+        json.dumps(
+            {
+                "event": "TAGGER_COMPLETED",
+                "instrument_count": len(instruments),
+                "tagged": len(classifications),
+                "errors": len(errors),
+                "duration_seconds": (end_time - start_time).total_seconds(),
+                "timestamp": end_time.isoformat(),
+            }
+        )
+    )
 
     return {
         "tagged": len(classifications),
@@ -184,6 +240,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     with observe():
         try:
+            logger.info(
+                "Tagger Lambda invoked with event: %s",
+                json.dumps(event)[:500],
+            )
+
             instruments = event.get("instruments", [])
 
             if not instruments:
@@ -202,7 +263,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             }
 
         except Exception as exc:  # noqa: BLE001
-            logger.error("Lambda handler error: %s", exc)
+            logger.error("Lambda handler error: %s", exc, exc_info=True)
             return {
                 "statusCode": 500,
                 "body": json.dumps({"error": str(exc)}),
