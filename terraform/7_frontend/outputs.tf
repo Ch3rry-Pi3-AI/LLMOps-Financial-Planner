@@ -20,7 +20,7 @@ output "lambda_function_name" {
 
 output "setup_instructions" {
   description = "Instructions for completing the deployment"
-  value = <<-EOT
+  value       = <<-EOT
 
     ✅ Frontend & API infrastructure deployed successfully!
 

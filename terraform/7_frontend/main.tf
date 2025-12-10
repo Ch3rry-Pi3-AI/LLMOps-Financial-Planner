@@ -39,9 +39,9 @@ locals {
   name_prefix = "alex"
 
   common_tags = {
-    Project     = "alex"
-    Part        = "7_frontend"
-    ManagedBy   = "terraform"
+    Project   = "alex"
+    Part      = "7_frontend"
+    ManagedBy = "terraform"
   }
 }
 
@@ -238,12 +238,77 @@ resource "aws_apigatewayv2_api" "main" {
   tags          = local.common_tags
 
   cors_configuration {
-    allow_credentials = false  # Cannot be true when allow_origins is "*"
+    allow_credentials = false # Cannot be true when allow_origins is "*"
     allow_headers     = ["authorization", "content-type", "x-amz-date", "x-api-key", "x-amz-security-token"]
     allow_methods     = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-    allow_origins     = ["*"]  # CORS is handled in Lambda via environment variables
+    allow_origins     = ["*"] # CORS is handled in Lambda via environment variables
     max_age           = 300
   }
+}
+
+# WAF Web ACL to protect the API (or other regional resources)
+resource "aws_wafv2_web_acl" "api_protection" {
+  name  = "alex-api-waf"
+  scope = "REGIONAL"
+
+  default_action {
+    allow {}
+  }
+
+  # Top-level visibility config (required)
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "alex-api-waf"
+    sampled_requests_enabled   = true
+  }
+
+  rule {
+    name     = "RateLimitRule"
+    priority = 1
+
+    statement {
+      rate_based_statement {
+        limit              = 2000
+        aggregate_key_type = "IP"
+      }
+    }
+
+    action {
+      block {}
+    }
+
+    # Per-rule visibility config (required)
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "RateLimitRule"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  rule {
+    name     = "SQLiRule"
+    priority = 2
+
+    statement {
+      managed_rule_group_statement {
+        vendor_name = "AWS"
+        name        = "AWSManagedRulesSQLiRuleSet"
+      }
+    }
+
+    override_action {
+      none {}
+    }
+
+    # Per-rule visibility config (required)
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "SQLiRule"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  tags = local.common_tags
 }
 
 # No JWT authorizer needed - authentication is handled in Lambda like in the saas reference
@@ -388,4 +453,3 @@ resource "aws_cloudfront_distribution" "main" {
     cloudfront_default_certificate = true
   }
 }
-
