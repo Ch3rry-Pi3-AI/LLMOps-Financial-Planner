@@ -93,6 +93,7 @@ PLANNER_SOURCE_FILES: list[str] = [
     "lambda_handler.py",
     "agent.py",
     "market.py",
+    "prices.py",         
     "templates.py",
     "observability.py",
 ]
