@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Alex Financial Planner – Reporter Lambda Docker Packager.
+Alex Financial Planner – Planner Lambda Docker Packager.
 
 This script builds an AWS Lambda-compatible deployment package for the
-Reporter Lambda function using Docker. It is intended to be run from
-local development or CI to produce (and optionally deploy) a single ZIP
-artifact.
+Planner Orchestrator Lambda function using Docker. It is intended to be
+run from local development or CI to produce (and optionally deploy) a
+single ZIP artefact.
 
 Core responsibilities
 ---------------------
-* Export Python dependencies from ``uv.lock`` for the Reporter module
+* Export Python dependencies from ``uv.lock`` for the Planner module
 * Build a Lambda-compatible dependency tree inside Docker (linux/amd64)
 * Vendor the local ``database`` package into the Lambda bundle
-* Bundle Reporter source files (handler, agent, templates, observability, judge)
-* Optionally deploy the ZIP to the ``alex-reporter`` Lambda function
+* Bundle Planner source files (handler, agent, market, templates, observability)
+* Optionally deploy the ZIP to the ``alex-planner`` Lambda function
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from typing import Optional, List
 # Configuration
 # ============================================================
 
-LAMBDA_FUNCTION_NAME = "alex-reporter"
+LAMBDA_FUNCTION_NAME = "alex-planner"
 LAMBDA_BASE_IMAGE = "public.ecr.aws/lambda/python:3.12"
 
 
@@ -89,9 +89,17 @@ def run_command(cmd: List[str], cwd: Optional[str | Path] = None) -> str:
 # Packaging Logic
 # ============================================================
 
+PLANNER_SOURCE_FILES: list[str] = [
+    "lambda_handler.py",
+    "agent.py",
+    "market.py",
+    "templates.py",
+    "observability.py",
+]
+
 
 def package_lambda() -> Path:
-    """Build the Reporter Lambda ZIP using Docker and return its path.
+    """Build the Planner Lambda ZIP using Docker and return its path.
 
     Steps
     -----
@@ -101,12 +109,12 @@ def package_lambda() -> Path:
     3. Use a Docker container based on the Lambda Python 3.12 image to
        ``pip install`` dependencies into a ``package/`` directory.
     4. Vendor the local ``database`` package into the Lambda bundle.
-    5. Copy Reporter-related source files into the package.
-    6. Create ``reporter_lambda.zip`` in the Reporter folder.
+    5. Copy Planner-related source files into the package.
+    6. Create ``planner_lambda.zip`` in the Planner folder.
     """
-    # Directory containing this script (backend/reporter)
-    reporter_dir = Path(__file__).parent.absolute()
-    backend_dir = reporter_dir.parent
+    # Directory containing this script (backend/planner)
+    planner_dir = Path(__file__).parent.absolute()
+    backend_dir = planner_dir.parent
 
     # Use a temporary directory for build artefacts
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -114,7 +122,7 @@ def package_lambda() -> Path:
         package_dir = temp_path / "package"
         package_dir.mkdir(parents=True, exist_ok=True)
 
-        print("Creating Reporter Lambda package using Docker...")
+        print("🚀 Creating Planner Lambda package using Docker...")
 
         # ------------------------------------------------------
         # Export requirements from uv.lock
@@ -122,7 +130,7 @@ def package_lambda() -> Path:
         print("Exporting requirements from uv.lock...")
         requirements_result = run_command(
             ["uv", "export", "--no-hashes", "--no-emit-project"],
-            cwd=reporter_dir,
+            cwd=planner_dir,
         )
 
         # Filter out packages not needed or not suitable in Lambda
@@ -166,28 +174,29 @@ def package_lambda() -> Path:
         run_command(docker_cmd)
 
         # ------------------------------------------------------
-        # Copy Reporter source files into the package
+        # Copy Planner source files into the package
         # ------------------------------------------------------
-        print("Copying Reporter source files into package...")
+        print("Copying Planner source files into package...")
 
-        files_to_copy = [
-            "lambda_handler.py",
-            "agent.py",
-            "templates.py",
-            "observability.py",
-            "judge.py",
-        ]
-
-        for filename in files_to_copy:
-            src = reporter_dir / filename
+        for filename in PLANNER_SOURCE_FILES:
+            src = planner_dir / filename
             dst = package_dir / filename
+
+            if not src.exists():
+                print(f"ERROR: Expected source file not found: {src}")
+                print(
+                    "Make sure you are running this from backend/planner and that "
+                    f"all of {PLANNER_SOURCE_FILES} exist."
+                )
+                sys.exit(1)
+
             shutil.copy(src, dst)
             print(f"  Included: {filename}")
 
         # ------------------------------------------------------
         # Create the ZIP archive
         # ------------------------------------------------------
-        zip_path = reporter_dir / "reporter_lambda.zip"
+        zip_path = planner_dir / "planner_lambda.zip"
 
         if zip_path.exists():
             print(f"Removing existing zip: {zip_path}")
@@ -197,7 +206,7 @@ def package_lambda() -> Path:
         run_command(["zip", "-r", str(zip_path), "."], cwd=package_dir)
 
         size_mb = zip_path.stat().st_size / (1024 * 1024)
-        print(f"Package created: {zip_path} ({size_mb:.1f} MB)")
+        print(f"✅ Package created: {zip_path} ({size_mb:.1f} MB)")
 
         return zip_path
 
@@ -208,7 +217,7 @@ def package_lambda() -> Path:
 
 
 def deploy_lambda(zip_path: Path) -> None:
-    """Deploy the Reporter Lambda ZIP to AWS.
+    """Deploy the Planner Lambda ZIP to AWS.
 
     Parameters
     ----------
@@ -217,7 +226,7 @@ def deploy_lambda(zip_path: Path) -> None:
 
     Notes
     -----
-    * Updates code for the existing ``alex-reporter`` Lambda function.
+    * Updates code for the existing ``alex-planner`` Lambda function.
     * If the function does not exist, the script exits with an error and
       instructs you to deploy via Terraform first.
     """
@@ -255,7 +264,7 @@ def deploy_lambda(zip_path: Path) -> None:
 def main() -> None:
     """Command-line entrypoint for packaging (and optionally deploying) Lambda."""
     parser = argparse.ArgumentParser(
-        description="Package Reporter Lambda for deployment",
+        description="Package Planner Lambda for deployment",
     )
     parser.add_argument(
         "--deploy",

@@ -41,7 +41,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from agents import Agent, Runner, trace
@@ -67,7 +67,8 @@ from agent import create_agent
 from observability import observe
 from templates import RETIREMENT_INSTRUCTIONS
 
-logger = logging.getLogger(__name__)
+# Use root logger for consistency across Lambdas / CloudWatch
+logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
@@ -131,6 +132,16 @@ def get_user_preferences(job_id: str) -> Dict[str, Any]:
                 }
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not load user data: %s. Using defaults.", exc)
+        logger.warning(
+            json.dumps(
+                {
+                    "event": "RETIREMENT_USER_PREF_FALLBACK",
+                    "job_id": job_id,
+                    "error": str(exc),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        )
 
     # Fallback defaults
     return {
@@ -152,8 +163,13 @@ def get_user_preferences(job_id: str) -> Dict[str, Any]:
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=4, max=60),
     before_sleep=lambda retry_state: logger.info(
-        "Retirement: Temporary error, retrying in %s seconds...",
-        getattr(retry_state.next_action, "sleep", "unknown"),
+        json.dumps(
+            {
+                "event": "RETIREMENT_RATE_LIMIT_OR_TEMP_ERROR",
+                "sleep_seconds": getattr(retry_state.next_action, "sleep", "unknown"),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
     ),
 )
 async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -183,8 +199,22 @@ async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> D
         - ``message`` (str)
         - ``final_output`` (markdown analysis from the LLM)
     """
+    start_time = datetime.now(timezone.utc)
+
     # Load user preferences for this job
     user_preferences = get_user_preferences(job_id)
+
+    # Structured "retirement started" event
+    logger.info(
+        json.dumps(
+            {
+                "event": "RETIREMENT_STARTED",
+                "job_id": job_id,
+                "account_count": len(portfolio_data.get("accounts", [])),
+                "timestamp": start_time.isoformat(),
+            }
+        )
+    )
 
     # Initialise database access
     db = Database()
@@ -209,11 +239,31 @@ async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> D
             )
         except (TimeoutError, asyncio.TimeoutError) as exc:
             logger.warning("Retirement agent timeout: %s", exc)
+            logger.warning(
+                json.dumps(
+                    {
+                        "event": "RETIREMENT_TIMEOUT",
+                        "job_id": job_id,
+                        "error": str(exc),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
             raise AgentTemporaryError(f"Timeout during agent execution: {exc}") from exc
         except Exception as exc:  # noqa: BLE001
             error_str = str(exc).lower()
             if "timeout" in error_str or "throttled" in error_str:
                 logger.warning("Retirement temporary error: %s", exc)
+                logger.warning(
+                    json.dumps(
+                        {
+                            "event": "RETIREMENT_TEMPORARY_ERROR",
+                            "job_id": job_id,
+                            "error": str(exc),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                )
                 raise AgentTemporaryError(f"Temporary error: {exc}") from exc
             # Non-retryable errors propagate up
             raise
@@ -227,6 +277,38 @@ async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> D
         success = db.jobs.update_retirement(job_id, retirement_payload)
         if not success:
             logger.error("Failed to save retirement analysis for job %s", job_id)
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "RETIREMENT_SAVE_FAILED",
+                        "job_id": job_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
+        else:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "RETIREMENT_SAVED",
+                        "job_id": job_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
+
+        end_time = datetime.now(timezone.utc)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "RETIREMENT_COMPLETED",
+                    "job_id": job_id,
+                    "success": success,
+                    "duration_seconds": (end_time - start_time).total_seconds(),
+                    "timestamp": end_time.isoformat(),
+                }
+            )
+        )
 
         return {
             "success": success,
@@ -290,10 +372,28 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
 
             job_id = event.get("job_id")
             if not job_id:
+                logger.warning(
+                    json.dumps(
+                        {
+                            "event": "RETIREMENT_MISSING_JOB_ID",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                )
                 return {
                     "statusCode": 400,
                     "body": json.dumps({"error": "job_id is required"}),
                 }
+
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "RETIREMENT_LAMBDA_STARTED",
+                        "job_id": job_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
 
             portfolio_data = event.get("portfolio_data")
 
@@ -361,14 +461,44 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
                             "Retirement: Loaded %d accounts with positions",
                             len(portfolio_data["accounts"]),
                         )
+                        logger.info(
+                            json.dumps(
+                                {
+                                    "event": "RETIREMENT_PORTFOLIO_LOADED",
+                                    "job_id": job_id,
+                                    "user_id": user_id,
+                                    "account_count": len(portfolio_data["accounts"]),
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                }
+                            )
+                        )
                     else:
                         logger.error("Retirement: Job %s not found", job_id)
+                        logger.error(
+                            json.dumps(
+                                {
+                                    "event": "RETIREMENT_JOB_NOT_FOUND",
+                                    "job_id": job_id,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                }
+                            )
+                        )
                         return {
                             "statusCode": 404,
                             "body": json.dumps({"error": f"Job {job_id} not found"}),
                         }
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Could not load portfolio from database: %s", exc)
+                    logger.error(
+                        json.dumps(
+                            {
+                                "event": "RETIREMENT_PORTFOLIO_LOAD_ERROR",
+                                "job_id": job_id,
+                                "error": str(exc),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
+                    )
                     return {
                         "statusCode": 400,
                         "body": json.dumps(
@@ -390,6 +520,16 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
 
         except Exception as exc:  # noqa: BLE001
             logger.error("Error in retirement: %s", exc, exc_info=True)
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "RETIREMENT_UNHANDLED_ERROR",
+                        "job_id": event.get("job_id") if isinstance(event, dict) else None,
+                        "error": str(exc),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
             return {
                 "statusCode": 500,
                 "body": json.dumps(

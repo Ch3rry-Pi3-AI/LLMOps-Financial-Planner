@@ -41,6 +41,7 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from agents import Agent, Runner, trace
@@ -88,8 +89,13 @@ db = Database()
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=4, max=60),
     before_sleep=lambda state: logger.info(
-        "Planner: Rate limit hit, retrying in %s seconds...",
-        getattr(state.next_action, "sleep", "unknown"),
+        json.dumps(
+            {
+                "event": "PLANNER_RATE_LIMIT_RETRY",
+                "sleep_seconds": getattr(state.next_action, "sleep", "unknown"),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
     ),
 )
 async def run_orchestrator(job_id: str) -> None:
@@ -111,7 +117,38 @@ async def run_orchestrator(job_id: str) -> None:
     job_id :
         The ID of the job in the backend database.
     """
+    start_time = datetime.now(timezone.utc)
+
     try:
+        # Fetch the job first so we can attribute logs to the triggering user
+        job = db.jobs.find_by_id(job_id)
+        if not job:
+            logger.error(f"Planner: Job {job_id} not found.")
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "PLANNER_JOB_NOT_FOUND",
+                        "job_id": job_id,
+                        "timestamp": start_time.isoformat(),
+                    }
+                )
+            )
+            return
+
+        user_id = job.get("clerk_user_id")
+
+        # Structured "planner started" event for CloudWatch dashboards
+        logger.info(
+            json.dumps(
+                {
+                    "event": "PLANNER_STARTED",
+                    "job_id": job_id,
+                    "user_id": user_id,
+                    "timestamp": start_time.isoformat(),
+                }
+            )
+        )
+
         # Mark job as running
         db.jobs.update_status(job_id, "running")
 
@@ -120,6 +157,15 @@ async def run_orchestrator(job_id: str) -> None:
 
         # Step 2: Refresh instrument prices
         logger.info("Planner: Updating instrument prices from market data")
+        logger.info(
+            json.dumps(
+                {
+                    "event": "PLANNER_MARKET_REFRESH",
+                    "job_id": job_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        )
         await asyncio.to_thread(update_instrument_prices, job_id, db)
 
         # Step 3: Load compact portfolio summary (no full data pull)
@@ -131,6 +177,19 @@ async def run_orchestrator(job_id: str) -> None:
 
         # Step 4: Build the planner agent, its tools, and context
         model, tools, task, context = create_agent(job_id, portfolio_summary, db)
+
+        # Log downstream agent invocations that the planner will orchestrate
+        for agent_name in ["reporter", "charter", "retirement"]:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "AGENT_INVOKED",
+                        "agent": agent_name,
+                        "job_id": job_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
 
         # Step 5: Run the planner using the agent runtime
         with trace("Planner Orchestrator"):
@@ -154,9 +213,33 @@ async def run_orchestrator(job_id: str) -> None:
         db.jobs.update_status(job_id, "completed")
         logger.info("Planner: Job %s completed successfully", job_id)
 
+        end_time = datetime.now(timezone.utc)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "PLANNER_COMPLETED",
+                    "job_id": job_id,
+                    "user_id": user_id,
+                    "duration_seconds": (end_time - start_time).total_seconds(),
+                    "status": "success",
+                    "timestamp": end_time.isoformat(),
+                }
+            )
+        )
+
     except Exception as exc:  # noqa: BLE001
         logger.error("Planner: Error in orchestration: %s", exc, exc_info=True)
         db.jobs.update_status(job_id, "failed", error_message=str(exc))
+        logger.error(
+            json.dumps(
+                {
+                    "event": "PLANNER_FAILED",
+                    "job_id": job_id,
+                    "error": str(exc),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        )
         raise
 
 
@@ -191,6 +274,15 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "Planner Lambda invoked with event: %s",
                 json.dumps(event)[:500],
             )
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "PLANNER_LAMBDA_INVOKED",
+                        "has_records": "Records" in event,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
 
             job_id: str | None = None
 
@@ -214,15 +306,42 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
             if not job_id:
                 logger.error("No job_id found in event")
+                logger.error(
+                    json.dumps(
+                        {
+                            "event": "PLANNER_MISSING_JOB_ID",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                )
                 return {
                     "statusCode": 400,
                     "body": json.dumps({"error": "No job_id provided"}),
                 }
 
             logger.info("Planner: Starting orchestration for job %s", job_id)
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "PLANNER_LAMBDA_START",
+                        "job_id": job_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
 
             # Run the orchestration pipeline
             asyncio.run(run_orchestrator(job_id))
+
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "PLANNER_LAMBDA_COMPLETED",
+                        "job_id": job_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
 
             return {
                 "statusCode": 200,
@@ -239,6 +358,16 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "Planner: Error in lambda handler: %s",
                 exc,
                 exc_info=True,
+            )
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "PLANNER_LAMBDA_ERROR",
+                        "job_id": event.get("job_id") if isinstance(event, dict) else None,
+                        "error": str(exc),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
             )
             return {
                 "statusCode": 500,
