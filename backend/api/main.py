@@ -58,46 +58,8 @@ load_dotenv(override=True)
 
 # Configure root logger with INFO level for structured backend logging
 logging.basicConfig(level=logging.INFO)
-
 # Create module-level logger for this file
 logger = logging.getLogger(__name__)
-
-# Ensure the root logger is also set to INFO (important for Lambda / CloudWatch)
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-
-
-class StructuredLogger:
-    """
-    Helper for emitting structured JSON log entries for key application events.
-    """
-
-    @staticmethod
-    def log_event(
-        event_type: str,
-        user_id: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        """
-        Emit a structured log entry to the application logger.
-
-        Parameters
-        ----------
-        event_type : str
-            High-level name describing the event (e.g. 'ANALYSIS_TRIGGERED').
-        user_id : str, optional
-            Identifier of the user associated with the event, if applicable.
-        details : dict, optional
-            Additional contextual metadata to include in the log entry.
-        """
-        log_entry: Dict[str, Any] = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "event_type": event_type,
-            "user_id": user_id,
-            "details": details or {},
-        }
-        logger.info(json.dumps(log_entry))
-
 
 # =========================
 # FastAPI Application Setup
@@ -1118,16 +1080,6 @@ async def trigger_analysis(
         if not user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-        # Emit a structured log entry for the analysis trigger event
-        StructuredLogger.log_event(
-            "ANALYSIS_TRIGGERED",
-            user_id=clerk_user_id,
-            details={
-                "analysis_type": request.analysis_type,
-                "options": request.options,
-            },
-        )
-
         # Create a job record representing this analysis request
         job_id: str = db.jobs.create_job(
             clerk_user_id=clerk_user_id,
@@ -1414,7 +1366,6 @@ async def populate_test_data(
                         name=info["name"],
                         instrument_type=info["type"],
                         current_price=Decimal(str(info["current_price"])),
-
                         allocation_regions=info["allocation_regions"],
                         allocation_sectors=info["allocation_sectors"],
                         allocation_asset_class=info["allocation_asset_class"],
