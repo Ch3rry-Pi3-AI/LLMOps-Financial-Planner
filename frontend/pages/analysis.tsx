@@ -102,6 +102,28 @@ const COLORS = [
 ];
 
 /**
+ * Format numeric values as GBP currency (2 decimal places).
+ */
+const formatCurrencyGBP = (value: number): string =>
+  new Intl.NumberFormat("en-GB", {
+    style: "currency",
+    currency: "GBP",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
+
+/**
+ * Convert keys like "fixed_income" or "cash" into "Fixed Income" / "Cash".
+ */
+const formatLabelName = (name: string): string =>
+  name
+    .replace(/_/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+
+/**
  * Analysis
  *
  * Main page component that:
@@ -175,7 +197,8 @@ export default function Analysis() {
             .filter((j) => j.status === "completed")
             .sort(
               (a, b) =>
-                new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+                new Date(b.created_at).getTime() -
+                new Date(a.created_at).getTime(),
             )[0];
 
           if (latestCompletedJob) {
@@ -185,7 +208,7 @@ export default function Analysis() {
             router.replace(
               `/analysis?job_id=${latestCompletedJob.id}`,
               undefined,
-              { shallow: true }
+              { shallow: true },
             );
           } else {
             setLoading(false);
@@ -258,7 +281,9 @@ export default function Analysis() {
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="bg-white rounded-lg shadow px-8 py-12 text-center">
               <h2 className="text-2xl font-bold text-gray-900 mb-4">
-                {fetchingLatest ? "Loading Latest Analysis..." : "No Analysis Available"}
+                {fetchingLatest
+                  ? "Loading Latest Analysis..."
+                  : "No Analysis Available"}
               </h2>
               <p className="text-gray-600 mb-6">
                 {fetchingLatest
@@ -294,8 +319,8 @@ export default function Analysis() {
                 Analysis In Progress
               </h2>
               <p className="text-gray-600 mb-6">
-                Your analysis is still being processed. Please check back in a few
-                moments.
+                Your analysis is still being processed. Please check back in a
+                few moments.
               </p>
               <div className="flex justify-center space-x-2 mb-6">
                 <div className="w-3 h-3 bg-ai-accent rounded-full animate-pulse" />
@@ -325,7 +350,9 @@ export default function Analysis() {
         <div className="min-h-screen bg-gray-50 py-8">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="bg-white rounded-lg shadow px-8 py-12">
-              <h2 className="text-2xl font-bold text-red-600 mb-4">Analysis Failed</h2>
+              <h2 className="text-2xl font-bold text-red-600 mb-4">
+                Analysis Failed
+              </h2>
               <p className="text-gray-600 mb-4">
                 The analysis encountered an error and could not be completed.
               </p>
@@ -369,7 +396,9 @@ export default function Analysis() {
           remarkPlugins={[remarkGfm, remarkBreaks]}
           components={{
             h1: ({ children }) => (
-              <h1 className="text-3xl font-bold mb-4 text-gray-900">{children}</h1>
+              <h1 className="text-3xl font-bold mb-4 text-gray-900">
+                {children}
+              </h1>
             ),
             h2: ({ children }) => (
               <h2 className="text-2xl font-semibold mb-3 text-gray-800 mt-6">
@@ -410,7 +439,9 @@ export default function Analysis() {
               <td className="p-3 border border-gray-300">{children}</td>
             ),
             strong: ({ children }) => (
-              <strong className="font-semibold text-gray-900">{children}</strong>
+              <strong className="font-semibold text-gray-900">
+                {children}
+              </strong>
             ),
             blockquote: ({ children }) => (
               <blockquote className="border-l-4 border-primary pl-4 my-4 italic text-gray-600">
@@ -445,11 +476,7 @@ export default function Analysis() {
     }
 
     // Helper to turn a key like "sector_allocation" into "Sector Allocation"
-    const formatTitle = (key: string): string =>
-      key
-        .split("_")
-        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-        .join(" ");
+    const formatTitle = (key: string): string => formatLabelName(key);
 
     /**
      * getChartType
@@ -459,7 +486,7 @@ export default function Analysis() {
      *  - Fallback heuristics based on data shape
      */
     const getChartType = (
-      chartData: any
+      chartData: any,
     ): "pie" | "donut" | "bar" | "horizontalBar" | "line" => {
       if (chartData.type) {
         const supportedTypes = ["pie", "donut", "bar", "horizontalBar", "line"];
@@ -482,7 +509,8 @@ export default function Analysis() {
 
       // Simple heuristics when no explicit type is given
       if (chartData.data?.[0]?.date || chartData.data?.[0]?.year) return "line";
-      if (chartData.data?.length <= 10 && chartData.data?.[0]?.value) return "pie";
+      if (chartData.data?.length <= 10 && chartData.data?.[0]?.value)
+        return "pie";
 
       return "bar";
     };
@@ -513,7 +541,12 @@ export default function Analysis() {
                       cx="50%"
                       cy="50%"
                       labelLine={false}
-                      label
+                      label={(props: any) => {
+                        const { name, value, percent } = props;
+                        return `${formatLabelName(String(name))}: ${formatCurrencyGBP(
+                          Number(value),
+                        )} (${(percent * 100).toFixed(1)}%)`;
+                      }}
                       outerRadius={100}
                       innerRadius={chartType === "donut" ? 60 : 0}
                       fill="#8884d8"
@@ -527,8 +560,13 @@ export default function Analysis() {
                       ))}
                     </Pie>
                     <Tooltip
-                      formatter={(value: number) =>
-                        `$${value.toLocaleString("en-US")}`
+                      formatter={(value: number | string) =>
+                        typeof value === "number"
+                          ? formatCurrencyGBP(value)
+                          : formatCurrencyGBP(Number(value))
+                      }
+                      labelFormatter={(name) =>
+                        formatLabelName(String(name))
                       }
                     />
                   </PieChart>
@@ -547,12 +585,17 @@ export default function Analysis() {
                     />
                     <YAxis
                       tickFormatter={(value) =>
-                        `$${(value / 1000).toFixed(0)}k`
+                        formatCurrencyGBP(Number(value))
                       }
                     />
                     <Tooltip
-                      formatter={(value: number) =>
-                        `$${value.toLocaleString("en-US")}`
+                      formatter={(value: number | string) =>
+                        typeof value === "number"
+                          ? formatCurrencyGBP(value)
+                          : formatCurrencyGBP(Number(value))
+                      }
+                      labelFormatter={(name) =>
+                        formatLabelName(String(name))
                       }
                     />
                     <Bar dataKey="value">
@@ -575,12 +618,17 @@ export default function Analysis() {
                     />
                     <YAxis
                       tickFormatter={(value) =>
-                        `$${(value / 1000).toFixed(0)}k`
+                        formatCurrencyGBP(Number(value))
                       }
                     />
                     <Tooltip
-                      formatter={(value: number) =>
-                        `$${value.toLocaleString("en-US")}`
+                      formatter={(value: number | string) =>
+                        typeof value === "number"
+                          ? formatCurrencyGBP(value)
+                          : formatCurrencyGBP(Number(value))
+                      }
+                      labelFormatter={(name) =>
+                        formatLabelName(String(name))
                       }
                     />
                     <Bar
@@ -594,12 +642,17 @@ export default function Analysis() {
                     <XAxis dataKey={chartData.xKey || "year"} />
                     <YAxis
                       tickFormatter={(value) =>
-                        `$${(value / 1000).toFixed(0)}k`
+                        formatCurrencyGBP(Number(value))
                       }
                     />
                     <Tooltip
-                      formatter={(value: number) =>
-                        `$${value.toLocaleString("en-US")}`
+                      formatter={(value: number | string) =>
+                        typeof value === "number"
+                          ? formatCurrencyGBP(value)
+                          : formatCurrencyGBP(Number(value))
+                      }
+                      labelFormatter={(name) =>
+                        formatLabelName(String(name))
                       }
                     />
                     <Line
@@ -628,7 +681,9 @@ export default function Analysis() {
                               entry.color || COLORS[idx % COLORS.length],
                           }}
                         />
-                        <span className="text-gray-600">{entry.name}</span>
+                        <span className="text-gray-600">
+                          {formatLabelName(String(entry.name))}
+                        </span>
                       </div>
                     ))}
                   </div>

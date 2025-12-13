@@ -722,60 +722,32 @@ async def delete_account(
 async def list_positions(
     account_id: str, clerk_user_id: str = Depends(get_current_user_id)
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """
-    List all positions for a specific account owned by the current user.
-
-    Parameters
-    ----------
-    account_id : str
-        Identifier of the account whose positions should be returned.
-    clerk_user_id : str
-        Authenticated Clerk user identifier injected by dependency.
-
-    Returns
-    -------
-    dict
-        Dictionary with a single `positions` key containing enriched positions.
-
-    Raises
-    ------
-    fastapi.HTTPException
-        If the account is not found, ownership does not match,
-        or an internal error occurs.
-    """
     try:
-        # Retrieve the account record to ensure it exists
-        account: Optional[Dict[str, Any]] = db.accounts.find_by_id(account_id)
+        account = db.accounts.find_by_id(account_id)
         if not account:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+            raise HTTPException(404, "Account not found")
 
-        # Ensure the account belongs to the user making the request
         if account.get("clerk_user_id") != clerk_user_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+            raise HTTPException(403, "Not authorized")
 
-        # Fetch all positions associated with this account
-        positions: List[Dict[str, Any]] = db.positions.find_by_account(account_id)
+        positions = db.positions.find_by_account(account_id)
 
-        # Build a list of positions augmented with instrument metadata
-        formatted_positions: List[Dict[str, Any]] = []
+        formatted_positions = []
         for pos in positions:
-            # Look up instrument details to enrich the position for the frontend
-            instrument: Optional[Dict[str, Any]] = db.instruments.find_by_symbol(
-                pos["symbol"]
-            )
-            formatted_positions.append({**pos, "instrument": instrument})
+            # ✔ Use the repository method (it actually works)
+            instrument = db.instruments.find_by_symbol(pos["symbol"])
+
+            formatted_positions.append({
+                **pos,
+                "instrument": instrument,
+            })
 
         return {"positions": formatted_positions}
 
-    except HTTPException:
-        # Forward specific HTTP exceptions as is
-        raise
     except Exception as e:
-        # Log any unexpected error while listing positions
         logger.error("Error listing positions: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
-        ) from e
+        raise HTTPException(500, str(e))
+
 
 
 @app.post("/api/positions")

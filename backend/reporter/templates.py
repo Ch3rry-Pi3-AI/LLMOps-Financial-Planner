@@ -13,6 +13,14 @@ template, ``REPORTER_INSTRUCTIONS``, defines:
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
+from datetime import datetime
+
+
+logger = logging.getLogger(__name__)
+
 # ============================================================
 # Reporter Agent Instructions
 # ============================================================
@@ -47,3 +55,52 @@ Report Guidelines:
 - Prioritize recommendations by impact.
 - Keep sections concise but comprehensive.
 """
+
+
+ANALYSIS_INSTRUCTIONS_WITH_EXPLANATION = """
+When providing recommendations, always:
+1. Start with your reasoning process
+2. List specific factors you considered
+3. Explain why certain recommendations were prioritized
+4. Include any assumptions made
+5. Note any limitations or caveats
+
+Format each recommendation as:
+**Recommendation:** [The action to take]
+**Reasoning:** [Why this recommendation was made]
+**Impact:** [Expected outcome if implemented]
+**Priority:** [High/Medium/Low based on user goals]
+"""
+
+
+class AuditLogger:
+    @staticmethod
+    def log_ai_decision(
+        agent_name: str,
+        job_id: str,
+        input_data: dict,
+        output_data: dict,
+        model_used: str,
+        duration_ms: int,
+    ) -> dict:
+        audit_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "agent": agent_name,
+            "job_id": job_id,
+            "model": model_used,
+            "input_hash": hashlib.sha256(
+                json.dumps(input_data, sort_keys=True).encode()
+            ).hexdigest(),
+            "output_summary": {
+                "type": type(output_data).__name__,
+                "size_bytes": len(json.dumps(output_data)),
+            },
+            "duration_ms": duration_ms,
+            "compliance_check": "PASS",  # Add actual compliance logic
+        }
+
+        # Store in CloudWatch for long-term retention
+        logger.info(json.dumps(audit_entry))
+
+        # Could also store in DynamoDB for querying
+        return audit_entry

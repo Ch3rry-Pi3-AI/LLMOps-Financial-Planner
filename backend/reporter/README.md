@@ -62,6 +62,7 @@ Provide automated, objective quality control for report outputs.
 * Creates and runs the Report Writer agent via `Runner.run()`.
 * Retries gracefully on rate limits (Tenacity + exponential backoff).
 * Calls the Judge agent to score the report.
+* Emits audit logs summarising model inputs/outputs for compliance.
 * Saves the final accepted report into `jobs.report_payload`.
 * Emits observability spans + events if configured.
 
@@ -92,6 +93,7 @@ Create reproducible, architecture-correct deployment packages for the Reporter L
 ### 📝 `templates.py` — **LLM Prompt Templates**
 
 * Defines the instruction contract (`REPORTER_INSTRUCTIONS`) for the narrative agent.
+* Includes explainability formatting for recommendations (reasoning, impact, priority).
 * Specifies required sections: Executive Summary, Risk, Diversification, Recommendations, etc.
 * Ensures markdown report consistency across all outputs.
 

@@ -14,6 +14,8 @@ Core responsibilities
 * Apply basic guardrails for:
   - Input sanitisation (prompt injection defence for free-text fields)
   - Response / prompt size limits to avoid runaway token usage
+* Enforce the explainability-first recommendation format defined in
+  ``ANALYSIS_INSTRUCTIONS_WITH_EXPLANATION``
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from typing import Any, Dict, List, Optional
 
 from agents import RunContextWrapper, function_tool
 from agents.extensions.models.litellm_model import LitellmModel
+from templates import ANALYSIS_INSTRUCTIONS_WITH_EXPLANATION
 
 logger = logging.getLogger(__name__)
 
@@ -487,7 +490,10 @@ The report should include:
 - Market Context (from insights)
 
 Provide your complete analysis as the final output in clear markdown format.
-Make the report informative yet accessible to a retail investor."""
+Make the report informative yet accessible to a retail investor.
+
+Recommendations must include clear reasoning and follow this format:
+{ANALYSIS_INSTRUCTIONS_WITH_EXPLANATION}"""
 
     # Apply a size guardrail to avoid excessively large prompts
     task = truncate_response(task, max_length=50_000)
