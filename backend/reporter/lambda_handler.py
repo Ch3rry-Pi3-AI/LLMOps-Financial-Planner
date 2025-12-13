@@ -54,6 +54,44 @@ except ImportError:
 # Reporter Agent Runner
 # ============================================================
 
+def _normalize_markdown_report(text: str) -> str:
+    """
+    Normalize agent-produced markdown for consistent UI rendering.
+
+    Removes conversational preambles (e.g. "Great! Here's...") and ensures the
+    report starts at the expected H1 header when present.
+    """
+    if not text:
+        return text
+
+    stripped = text.strip()
+
+    # Unwrap fenced markdown blocks if the model included them.
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            try:
+                end_idx = lines[1:].index("```") + 1
+                stripped = "\n".join(lines[1:end_idx]).strip()
+            except ValueError:
+                stripped = "\n".join(lines[1:]).strip()
+
+    lines = stripped.splitlines()
+    target = "Investment Portfolio Analysis Report"
+
+    # Prefer starting from the expected title if it exists anywhere.
+    for idx, line in enumerate(lines):
+        candidate = line.lstrip("#").strip()
+        if candidate == target:
+            return "\n".join(lines[idx:]).lstrip()
+
+    # Otherwise, start from the first markdown heading.
+    for idx, line in enumerate(lines):
+        if line.lstrip().startswith("#"):
+            return "\n".join(lines[idx:]).lstrip()
+
+    return stripped
+
 
 @retry(
     retry=retry_if_exception_type(RateLimitError),
@@ -140,6 +178,7 @@ async def run_reporter_agent(
         )
 
         response = result.final_output
+        response = _normalize_markdown_report(response)
 
         # Judge the quality of the generated report, if observability is available
         if observability:
