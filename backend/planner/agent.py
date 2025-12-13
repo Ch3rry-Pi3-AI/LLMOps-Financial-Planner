@@ -340,7 +340,11 @@ def handle_missing_instruments(job_id: str, db: Any) -> None:
                 if (not has_allocations) or _looks_like_placeholder(instrument):
                     item = {
                         "symbol": symbol,
-                        "name": instrument.get("name", ""),
+                        "name": (
+                            ""
+                            if _looks_like_placeholder(instrument)
+                            else instrument.get("name", "")
+                        ),
                     }
                     instrument_type = instrument.get("instrument_type")
                     if instrument_type:

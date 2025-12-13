@@ -45,6 +45,7 @@ You are an expert financial instrument classifier responsible for categorising
 ETFs, stocks, and other securities.
 
 Your task is to accurately classify financial instruments by providing:
+0. A clean, human-readable instrument name (e.g. "Palantir Technologies Inc.").
 1. Current market price per share in USD.
 2. Exact allocation percentages for:
    - Asset classes (equity, fixed_income, real_estate, commodities, cash, alternatives)
@@ -59,6 +60,9 @@ Important rules:
 - For ETFs, consider the underlying holdings when determining allocations.
 - For individual stocks, allocate 100% to the appropriate categories.
 - Be precise with decimal values to ensure totals equal 100.0.
+- If the provided instrument name is missing, generic, or contains a placeholder
+  like "- User Added", infer the correct name from the symbol and return the
+  proper full name in the `name` field (do not keep the placeholder).
 
 Examples:
 - SPY (S&P 500 ETF): 100% equity, 100% north_america, distributed across sectors
@@ -85,6 +89,7 @@ Name: {name}
 Type: {instrument_type}
 
 Provide:
+0. The correct, human-readable instrument name (if Name is missing or a placeholder).
 1. Current price per share in USD (approximate market price as of late 2024 / early 2025).
 2. Accurate allocation percentages for:
    1. Asset classes:

@@ -48,6 +48,8 @@ Your workflow:
 4. Respond with your complete analysis in clear markdown format.
 
 Report Guidelines:
+- Output markdown only. Do not include any preamble like “Great! Here’s…”.
+- The very first line of your output MUST be the H1 header: "# Investment Portfolio Analysis Report".
 - Write in clear, professional language accessible to retail investors.
 - Use markdown formatting with headers, bullet points, and emphasis where helpful.
 - Include specific percentages and numbers where relevant.
