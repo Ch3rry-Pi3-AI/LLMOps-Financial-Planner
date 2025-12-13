@@ -296,10 +296,39 @@ def handle_missing_instruments(job_id: str, db: Any) -> None:
 
     missing: List[Dict[str, str]] = []
 
+    def _looks_like_placeholder(instrument: dict) -> bool:
+        name = (instrument.get('name') or '').strip()
+        if name.endswith(' - User Added'):
+            return True
+
+        current_price = instrument.get('current_price')
+        try:
+            if current_price is not None and float(current_price) == 0.0:
+                return True
+        except (TypeError, ValueError):
+            pass
+
+        sectors = instrument.get('allocation_sectors') or {}
+        if isinstance(sectors, dict) and len(sectors) == 1 and 'other' in sectors:
+            try:
+                if abs(float(sectors.get('other', 0)) - 100.0) < 1e-6:
+                    return True
+            except (TypeError, ValueError):
+                pass
+
+        return False
+
+    seen_symbols: set[str] = set()
+
     for account in accounts:
         positions = db.positions.find_by_account(account["id"])
         for position in positions:
-            instrument = db.instruments.find_by_symbol(position["symbol"])
+            symbol = position["symbol"]
+            if symbol in seen_symbols:
+                continue
+            seen_symbols.add(symbol)
+
+            instrument = db.instruments.find_by_symbol(symbol)
 
             if instrument:
                 has_allocations = bool(
@@ -308,15 +337,17 @@ def handle_missing_instruments(job_id: str, db: Any) -> None:
                     and instrument.get("allocation_asset_class")
                 )
 
-                if not has_allocations:
-                    missing.append(
-                        {
-                            "symbol": position["symbol"],
-                            "name": instrument.get("name", ""),
-                        }
-                    )
+                if (not has_allocations) or _looks_like_placeholder(instrument):
+                    item = {
+                        "symbol": symbol,
+                        "name": instrument.get("name", ""),
+                    }
+                    instrument_type = instrument.get("instrument_type")
+                    if instrument_type:
+                        item["instrument_type"] = instrument_type
+                    missing.append(item)
             else:
-                missing.append({"symbol": position["symbol"], "name": ""})
+                missing.append({"symbol": symbol, "name": ""})
 
     if not missing:
         logger.info("Planner: All instruments have allocation data")

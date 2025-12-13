@@ -160,54 +160,6 @@ async def run_orchestrator(job_id: str) -> None:
         # Step 1: Non-agent pre-processing – tag missing instruments
         await asyncio.to_thread(handle_missing_instruments, job_id, db)
 
-        # ============================================================
-        # Tagger Lambda invocation (SMOKE TEST FOR INVOCATION ONLY)
-        # ============================================================
-        try:
-            logger.info(
-                json.dumps(
-                    {
-                        "event": "PLANNER_TAGGER_INVOKE",
-                        "job_id": job_id,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }
-                )
-            )
-
-            # NOTE:
-            # This sends an EMPTY instruments list on purpose.
-            # Goal right now = prove alex-tagger *is invoked* and logs to CloudWatch.
-            response = lambda_client.invoke(
-                FunctionName="alex-tagger",
-                InvocationType="RequestResponse",
-                Payload=json.dumps({"instruments": []}).encode("utf-8"),
-            )
-
-            logger.info(
-                json.dumps(
-                    {
-                        "event": "PLANNER_TAGGER_RESPONSE",
-                        "job_id": job_id,
-                        "status_code": response.get("StatusCode"),
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }
-                )
-            )
-
-        except Exception as exc:
-            logger.error(
-                json.dumps(
-                    {
-                        "event": "PLANNER_TAGGER_ERROR",
-                        "job_id": job_id,
-                        "error": str(exc),
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }
-                )
-            )
-        # ============================================================
-        # END Tagger smoke test
-        # ============================================================
 
         # Step 2: Refresh instrument prices
         logger.info("Planner: Updating instrument prices from market data")
