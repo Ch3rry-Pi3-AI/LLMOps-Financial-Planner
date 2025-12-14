@@ -17,10 +17,17 @@ Its responsibilities are:
   - Batch-tagging multiple instruments with retry & backoff
   - Converting the structured classification into a database-ready
     `InstrumentCreate` payload
+* Applying basic **guardrails** for:
+  - Input sanitisation (prompt injection defence)
+  - Resilient retries with exponential backoff for transient errors
 
 Typical usage (inside a scheduler / job runner):
 
-    from backend.scheduler.agent import classify_instrument, tag_instruments, classification_to_db_format
+    from backend.scheduler.agent import (
+        classify_instrument,
+        tag_instruments,
+        classification_to_db_format,
+    )
 
     # Single instrument
     classification = await classify_instrument("SPY", "SPDR S&P 500 ETF")
@@ -69,6 +76,98 @@ BEDROCK_MODEL_ID = os.getenv(
     "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
 )
 BEDROCK_REGION = os.getenv("BEDROCK_REGION", "us-west-2")
+
+
+# ============================================================
+# Guardrail Helpers – Input & Output Validation
+# ============================================================
+
+
+def sanitize_user_input(text: str) -> str:
+    """
+    Basic prompt-injection guardrail for user-provided text.
+
+    The goal is *not* to perfectly detect all attacks, but to catch common
+    patterns that try to override system / developer instructions. If any
+    suspicious pattern is found, the text is replaced with a neutral marker
+    so it cannot be used to subvert the agent.
+
+    Parameters
+    ----------
+    text :
+        Raw user-provided string (e.g. instrument name, description, notes).
+
+    Returns
+    -------
+    str
+        Sanitised text. Either the original text or a fixed
+        "[INVALID INPUT DETECTED]" marker when a pattern is matched.
+    """
+    dangerous_patterns = [
+        "ignore previous instructions",
+        "disregard all prior",
+        "forget everything",
+        "new instructions:",
+        "system:",
+        "assistant:",
+    ]
+
+    lowered = text.lower()
+    for pattern in dangerous_patterns:
+        if pattern in lowered:
+            logger.warning("Tagger: Potential prompt injection detected: %s", pattern)
+            return "[INVALID INPUT DETECTED]"
+
+    return text
+
+
+def truncate_response(text: str, max_length: int = 50_000) -> str:
+    """
+    Guardrail to ensure responses do not exceed a reasonable size.
+
+    Although the tagger agent primarily returns structured Pydantic objects
+    rather than raw text, this helper is provided for future use wherever
+    large LLM responses might be logged or stored.
+
+    Parameters
+    ----------
+    text :
+        Raw response text to be checked.
+    max_length :
+        Maximum allowed length in characters. Defaults to 50,000.
+
+    Returns
+    -------
+    str
+        Potentially truncated text. If truncation occurs, a marker is
+        appended to indicate that the response was shortened.
+    """
+    if len(text) > max_length:
+        logger.warning(
+            "Tagger: Response truncated from %d to %d characters",
+            len(text),
+            max_length,
+        )
+        return text[:max_length] + "\n\n[Response truncated due to length]"
+    return text
+
+
+# ============================================================
+# Custom Error Types for Retry Logic
+# ============================================================
+
+
+class AgentTemporaryError(Exception):
+    """
+    Error type signalling a temporary failure in agent execution.
+
+    This is used with tenacity's retry logic to automatically retry
+    transient errors such as:
+
+    * Timeouts
+    * Throttling / rate limiting
+    * Other intermittent upstream issues
+    """
 
 
 # ============================================================
@@ -158,6 +257,14 @@ class InstrumentClassification(BaseModel):
     instrument_type: str = Field(description="Type: etf, stock, mutual_fund, bond_fund, etc.")
     current_price: float = Field(description="Current price per share in USD", gt=0)
 
+    # Explainability / rationale – placed before allocation fields
+    rationale: str = Field(
+        description=(
+            "Detailed explanation of why these classifications were chosen, "
+            "including specific factors considered"
+        ),
+    )
+
     # Allocation breakdowns
     allocation_asset_class: AllocationBreakdown = Field(
         description="Asset class breakdown",
@@ -244,6 +351,10 @@ async def classify_instrument(
     """
     Classify a single financial instrument using the InstrumentTagger agent.
 
+    Guardrails applied:
+    * Sanitises the instrument name to defend against prompt-injection text
+    * Uses retry-aware error types for downstream backoff logic
+
     Parameters
     ----------
     symbol :
@@ -260,40 +371,80 @@ async def classify_instrument(
 
     Raises
     ------
+    AgentTemporaryError
+        For transient errors that should be retried by the caller.
     Exception
-        Propagates any unexpected agent / model errors after logging.
+        For unexpected / non-retryable errors.
     """
-    try:
-        # Set region for LiteLLM Bedrock calls
-        os.environ["AWS_REGION_NAME"] = BEDROCK_REGION
+    # Set region for LiteLLM Bedrock calls
+    os.environ["AWS_REGION_NAME"] = BEDROCK_REGION
 
-        # Initialise the model wrapper
-        model = LitellmModel(model=f"bedrock/{BEDROCK_MODEL_ID}")
+    # Initialise the model wrapper
+    model = LitellmModel(model=f"bedrock/{BEDROCK_MODEL_ID}")
 
-        # Create the classification task from the prompt template
-        task = CLASSIFICATION_PROMPT.format(
-            symbol=symbol,
-            name=name,
-            instrument_type=instrument_type,
+    # Apply basic input sanitisation to defend against prompt injection
+    safe_name = sanitize_user_input(name)
+
+    # Create the classification task from the prompt template
+    task = CLASSIFICATION_PROMPT.format(
+        symbol=symbol,
+        name=safe_name,
+        instrument_type=instrument_type,
+    )
+
+    # Run the agent (gameplan pattern)
+    with trace(f"Classify {symbol}"):
+        agent = Agent(
+            name="InstrumentTagger",
+            instructions=TAGGER_INSTRUCTIONS,
+            model=model,
+            tools=[],  # No tools needed for this classification task
+            output_type=InstrumentClassification,  # Structured output type
         )
 
-        # Run the agent (gameplan pattern)
-        with trace(f"Classify {symbol}"):
-            agent = Agent(
-                name="InstrumentTagger",
-                instructions=TAGGER_INSTRUCTIONS,
-                model=model,
-                tools=[],  # No tools needed for this classification task
-                output_type=InstrumentClassification,  # Structured output type
+        try:
+            result = await Runner.run(
+                agent,
+                input=task,
+                max_turns=5,
             )
+        except (TimeoutError, asyncio.TimeoutError) as exc:
+            # Explicit timeout handling – retryable
+            logger.warning("Tagger: Timeout while classifying %s: %s", symbol, exc)
+            raise AgentTemporaryError(
+                f"Timeout during classification for {symbol}: {exc}",
+            ) from exc
+        except RateLimitError:
+            # Let RateLimitError propagate so tenacity can handle it directly
+            logger.warning("Tagger: Rate limit hit while classifying %s", symbol)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Classify transient vs non-transient errors
+            error_str = str(exc).lower()
+            if "timeout" in error_str or "throttl" in error_str or "rate limit" in error_str:
+                logger.warning("Tagger: Temporary error for %s: %s", symbol, exc)
+                raise AgentTemporaryError(
+                    f"Temporary error during classification for {symbol}: {exc}",
+                ) from exc
 
-            result = await Runner.run(agent, input=task, max_turns=5)
+            logger.error("Tagger: Error classifying %s: %s", symbol, exc)
+            raise
 
-        # Extract the structured output via final_output_as
-        return result.final_output_as(InstrumentClassification)
+    # Extract the structured output via final_output_as
+    try:
+        classification = result.final_output_as(InstrumentClassification)
+        full_json = classification.model_dump_json()
 
+        logger.info(
+            "Tagger: Classification rationale for %s – %s",
+            symbol,
+            classification.rationale,
+        )
+        logger.debug("Tagger: Full classification object for %s: %s", symbol, full_json)
+
+        return classification
     except Exception as exc:  # noqa: BLE001
-        logger.error("Error classifying %s: %s", symbol, exc)
+        logger.error("Tagger: Failed to parse classification for %s: %s", symbol, exc)
         raise
 
 
@@ -304,7 +455,8 @@ async def classify_instrument(
 
 async def tag_instruments(instruments: List[dict]) -> List[InstrumentClassification]:
     """
-    Tag (classify) multiple instruments with retry logic for rate limits.
+    Tag (classify) multiple instruments with retry logic for rate limits
+    and other temporary errors.
 
     Parameters
     ----------
@@ -323,11 +475,13 @@ async def tag_instruments(instruments: List[dict]) -> List[InstrumentClassificat
     """
 
     @retry(
-        retry=retry_if_exception_type(RateLimitError),
+        retry=retry_if_exception_type(
+            (RateLimitError, AgentTemporaryError, TimeoutError, asyncio.TimeoutError),
+        ),
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=4, max=60),
         before_sleep=lambda retry_state: logger.info(
-            "Tagger: Rate limit hit, retrying in %s seconds...",
+            "Tagger: Temporary error, retrying in %s seconds...",
             getattr(retry_state.next_action, "sleep", "unknown"),
         ),
     )
@@ -336,7 +490,12 @@ async def tag_instruments(instruments: List[dict]) -> List[InstrumentClassificat
         name: str,
         instrument_type: str,
     ) -> InstrumentClassification:
-        """Wrapper around `classify_instrument` with retry and backoff."""
+        """
+        Wrapper around :func:`classify_instrument` with retry and backoff.
+
+        Any transient errors (rate limits, throttling, timeouts) are retried
+        according to the tenacity policy defined in the decorator above.
+        """
         return await classify_instrument(symbol, name, instrument_type)
 
     results: List[InstrumentClassification | None] = []
@@ -356,10 +515,10 @@ async def tag_instruments(instruments: List[dict]) -> List[InstrumentClassificat
                 name=name,
                 instrument_type=instrument_type,
             )
-            logger.info("Successfully classified %s", symbol)
+            logger.info("Tagger: Successfully classified %s", symbol)
             results.append(classification)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to classify %s: %s", symbol, exc)
+            logger.error("Tagger: Failed to classify %s: %s", symbol, exc)
             results.append(None)
 
     # Filter out failed classifications

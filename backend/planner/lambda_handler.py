@@ -9,7 +9,7 @@ Financial Planner Orchestrator. It ties together:
 * **Pre-processing** of missing instrument allocations
 * **Market data refresh** for instrument prices
 * **Planner LLM orchestration** using the `Agent` + `Runner` framework
-* **Retry logic** for transient LLM rate limits
+* **Retry logic** for transient LLM rate limits**
 * **Observability hooks** for tracing and logging
 
 Invocation patterns
@@ -43,6 +43,8 @@ import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict
+
+import boto3  # ✅ added
 
 from agents import Agent, Runner, trace
 from litellm.exceptions import RateLimitError
@@ -78,6 +80,9 @@ logger.setLevel(logging.INFO)
 
 # Single shared database instance for this Lambda runtime
 db = Database()
+
+# Lambda client for Tagger
+lambda_client = boto3.client("lambda")  # ✅ added
 
 
 # ============================================================
@@ -154,6 +159,7 @@ async def run_orchestrator(job_id: str) -> None:
 
         # Step 1: Non-agent pre-processing – tag missing instruments
         await asyncio.to_thread(handle_missing_instruments, job_id, db)
+
 
         # Step 2: Refresh instrument prices
         logger.info("Planner: Updating instrument prices from market data")

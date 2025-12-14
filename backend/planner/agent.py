@@ -16,6 +16,18 @@ High-level responsibilities
 2. Build a concise portfolio summary for LLM context
 3. Invoke downstream Lambda agents in a controlled, logged manner
 4. Expose tool functions (via `@function_tool`) for the planner LLM
+
+Guardrails
+----------
+This module also implements several safety and resilience guardrails:
+
+* Basic input sanitisation via :func:`sanitize_user_input` for any future
+  user-supplied free-text fields that may be embedded in prompts.
+* Response size limiting via :func:`truncate_response` to prevent the
+  planner prompt from becoming excessively large.
+* Robust agent invocation with automatic retries using
+  :func:`invoke_agent_with_retry`, powered by the ``tenacity`` library,
+  handling transient failures such as throttling and timeouts.
 """
 
 from __future__ import annotations
@@ -28,6 +40,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from agents import RunContextWrapper, function_tool
 from agents.extensions.models.litellm_model import LitellmModel
@@ -52,6 +65,79 @@ MOCK_LAMBDAS = os.getenv("MOCK_LAMBDAS", "false").lower() == "true"
 
 
 # ============================================================
+# Guardrail Helpers – Input & Response Controls
+# ============================================================
+
+def sanitize_user_input(text: str) -> str:
+    """
+    Basic prompt-injection guardrail for user-facing text fields.
+
+    The planner agent currently operates on numeric portfolio summaries, but
+    this helper is provided for future use when incorporating free-text fields
+    (for example, user notes or goals) into the planner prompt.
+
+    Parameters
+    ----------
+    text :
+        Raw text value potentially originating from user input.
+
+    Returns
+    -------
+    str
+        Sanitised text. Either the original value or the literal string
+        "[INVALID INPUT DETECTED]" if a suspicious pattern is detected.
+    """
+    dangerous_patterns = [
+        "ignore previous instructions",
+        "disregard all prior",
+        "forget everything",
+        "new instructions:",
+        "system:",
+        "assistant:",
+    ]
+
+    lowered = text.lower()
+    for pattern in dangerous_patterns:
+        if pattern in lowered:
+            logger.warning("Planner: Potential prompt injection detected: %s", pattern)
+            return "[INVALID INPUT DETECTED]"
+
+    return text
+
+
+def truncate_response(text: str, max_length: int = 50_000) -> str:
+    """
+    Ensure that large text blocks do not exceed a reasonable maximum length.
+
+    In this module, the primary usage is to cap the size of the planner
+    task prompt that is passed to the LLM. This prevents runaway token
+    usage if the context grows unexpectedly.
+
+    Parameters
+    ----------
+    text :
+        Text string to check and potentially truncate.
+    max_length :
+        Maximum allowed length in characters. Defaults to 50,000.
+
+    Returns
+    -------
+    str
+        Original text if within bounds, otherwise the truncated text with an
+        explanatory note appended.
+    """
+    length = len(text)
+    if length > max_length:
+        logger.warning(
+            "Planner: Task text truncated from %d to %d characters",
+            length,
+            max_length,
+        )
+        return text[:max_length] + "\n\n[Content truncated due to length]"
+    return text
+
+
+# ============================================================
 # Planner Context
 # ============================================================
 
@@ -69,16 +155,37 @@ class PlannerContext:
 
 
 # ============================================================
-# Core Lambda Invocation Utilities
+# Core Lambda Invocation Utilities (with Retry)
 # ============================================================
 
-async def invoke_lambda_agent(
+class AgentTemporaryError(Exception):
+    """
+    Temporary error type indicating that an agent invocation should be retried.
+
+    This is used together with the tenacity-based retry logic to handle
+    transient failures such as throttling, timeouts, or rate limits.
+    """
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((AgentTemporaryError, TimeoutError)),
+)
+async def invoke_agent_with_retry(
     agent_name: str,
     function_name: str,
     payload: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
-    Invoke a Lambda-based agent and normalise its response.
+    Invoke a Lambda-based agent with automatic retry and backoff.
+
+    This helper encapsulates:
+
+    * Optional mocking for local development
+    * Direct Lambda invocation via ``boto3``
+    * Unwrapping of API Gateway-style responses
+    * Detection of retryable errors (rate limiting, throttling, timeouts)
 
     Parameters
     ----------
@@ -92,14 +199,21 @@ async def invoke_lambda_agent(
     Returns
     -------
     Dict[str, Any]
-        Parsed JSON body of the Lambda response, or a dict containing
-        an `"error"` key when invocation fails.
+        Parsed JSON body of the Lambda response.
+
+    Raises
+    ------
+    AgentTemporaryError
+        When a transient, retryable failure is detected.
+    Exception
+        For non-retryable errors that should propagate to the caller.
     """
     # Local development shortcut – no real Lambda call
     if MOCK_LAMBDAS:
         logger.info(
-            "[MOCK] Would invoke %s with payload: %s",
+            "[MOCK] Would invoke %s (%s) with payload: %s",
             agent_name,
+            function_name,
             json.dumps(payload)[:200],
         )
         return {
@@ -109,7 +223,7 @@ async def invoke_lambda_agent(
         }
 
     try:
-        logger.info("Invoking %s Lambda: %s", agent_name, function_name)
+        logger.info("Planner: Invoking %s Lambda: %s", agent_name, function_name)
 
         response = lambda_client.invoke(
             FunctionName=function_name,
@@ -120,7 +234,7 @@ async def invoke_lambda_agent(
         raw = response["Payload"].read()
         result: Any = json.loads(raw)
 
-        # Unwrap API Gateway-style responses if present
+        # Unwrap potential API Gateway envelope
         if isinstance(result, dict) and "statusCode" in result and "body" in result:
             body = result["body"]
             if isinstance(body, str):
@@ -131,12 +245,23 @@ async def invoke_lambda_agent(
             else:
                 result = body
 
-        logger.info("%s completed successfully", agent_name)
+        # Inspect for explicit rate limit signal
+        if isinstance(result, dict) and result.get("error_type") == "RATE_LIMIT":
+            raise AgentTemporaryError(f"Rate limit hit for {agent_name}")
+
+        logger.info("Planner: %s completed successfully", agent_name)
         return result
 
     except Exception as exc:  # noqa: BLE001
-        logger.error("Error invoking %s: %s", agent_name, exc)
-        return {"error": str(exc)}
+        logger.warning("Planner: Agent %s invocation failed: %s", agent_name, exc)
+        message = str(exc).lower()
+
+        # Treat throttling and timeouts as transient
+        if "throttled" in message or "timeout" in message:
+            raise AgentTemporaryError(f"Temporary error for {agent_name}: {exc}") from exc
+
+        # Non-retryable error – propagate
+        raise
 
 
 # ============================================================
@@ -171,10 +296,39 @@ def handle_missing_instruments(job_id: str, db: Any) -> None:
 
     missing: List[Dict[str, str]] = []
 
+    def _looks_like_placeholder(instrument: dict) -> bool:
+        name = (instrument.get('name') or '').strip()
+        if name.endswith(' - User Added'):
+            return True
+
+        current_price = instrument.get('current_price')
+        try:
+            if current_price is not None and float(current_price) == 0.0:
+                return True
+        except (TypeError, ValueError):
+            pass
+
+        sectors = instrument.get('allocation_sectors') or {}
+        if isinstance(sectors, dict) and len(sectors) == 1 and 'other' in sectors:
+            try:
+                if abs(float(sectors.get('other', 0)) - 100.0) < 1e-6:
+                    return True
+            except (TypeError, ValueError):
+                pass
+
+        return False
+
+    seen_symbols: set[str] = set()
+
     for account in accounts:
         positions = db.positions.find_by_account(account["id"])
         for position in positions:
-            instrument = db.instruments.find_by_symbol(position["symbol"])
+            symbol = position["symbol"]
+            if symbol in seen_symbols:
+                continue
+            seen_symbols.add(symbol)
+
+            instrument = db.instruments.find_by_symbol(symbol)
 
             if instrument:
                 has_allocations = bool(
@@ -183,15 +337,21 @@ def handle_missing_instruments(job_id: str, db: Any) -> None:
                     and instrument.get("allocation_asset_class")
                 )
 
-                if not has_allocations:
-                    missing.append(
-                        {
-                            "symbol": position["symbol"],
-                            "name": instrument.get("name", ""),
-                        }
-                    )
+                if (not has_allocations) or _looks_like_placeholder(instrument):
+                    item = {
+                        "symbol": symbol,
+                        "name": (
+                            ""
+                            if _looks_like_placeholder(instrument)
+                            else instrument.get("name", "")
+                        ),
+                    }
+                    instrument_type = instrument.get("instrument_type")
+                    if instrument_type:
+                        item["instrument_type"] = instrument_type
+                    missing.append(item)
             else:
-                missing.append({"symbol": position["symbol"], "name": ""})
+                missing.append({"symbol": symbol, "name": ""})
 
     if not missing:
         logger.info("Planner: All instruments have allocation data")
@@ -203,6 +363,9 @@ def handle_missing_instruments(job_id: str, db: Any) -> None:
         [m["symbol"] for m in missing],
     )
 
+    # Note: this pre-check currently uses a direct Lambda invocation without
+    # tenacity-based retry. It could be migrated to `invoke_agent_with_retry`
+    # in the future if additional robustness is desired.
     try:
         response = lambda_client.invoke(
             FunctionName=TAGGER_FUNCTION,
@@ -328,13 +491,13 @@ async def invoke_reporter_internal(job_id: str) -> str:
     str
         Human-readable confirmation message describing the outcome.
     """
-    result = await invoke_lambda_agent(
+    result = await invoke_agent_with_retry(
         "Reporter",
         REPORTER_FUNCTION,
         {"job_id": job_id},
     )
 
-    if "error" in result:
+    if isinstance(result, dict) and "error" in result:
         return f"Reporter agent failed: {result['error']}"
 
     return (
@@ -357,13 +520,13 @@ async def invoke_charter_internal(job_id: str) -> str:
     str
         Human-readable confirmation message describing the outcome.
     """
-    result = await invoke_lambda_agent(
+    result = await invoke_agent_with_retry(
         "Charter",
         CHARTER_FUNCTION,
         {"job_id": job_id},
     )
 
-    if "error" in result:
+    if isinstance(result, dict) and "error" in result:
         return f"Charter agent failed: {result['error']}"
 
     return (
@@ -386,13 +549,13 @@ async def invoke_retirement_internal(job_id: str) -> str:
     str
         Human-readable confirmation message describing the outcome.
     """
-    result = await invoke_lambda_agent(
+    result = await invoke_agent_with_retry(
         "Retirement",
         RETIREMENT_FUNCTION,
         {"job_id": job_id},
     )
 
-    if "error" in result:
+    if isinstance(result, dict) and "error" in result:
         return f"Retirement agent failed: {result['error']}"
 
     return (
@@ -501,5 +664,8 @@ def create_agent(
         "Decide which specialised agents to call (Reporter, Charter, Retirement) "
         "and in which order to best serve the user. Call the appropriate tools."
     )
+
+    # Final guardrail: ensure the planner task is not excessively long
+    task = truncate_response(task, max_length=50_000)
 
     return model, tools, task, context

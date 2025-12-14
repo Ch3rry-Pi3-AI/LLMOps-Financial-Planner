@@ -11,12 +11,19 @@
 
 import { useUser, useAuth } from "@clerk/nextjs";
 import { useEffect, useState, useCallback } from "react";
-import { API_URL } from "../lib/config";
+import Head from "next/head";
 import Layout from "../components/Layout";
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from "recharts";
+import { API_URL } from "../lib/config";
 import { Skeleton, SkeletonCard } from "../components/Skeleton";
 import { showToast } from "../components/Toast";
-import Head from "next/head";
+import {
+  PieChart,
+  Pie,
+  Cell,
+  ResponsiveContainer,
+  Tooltip,
+  Legend,
+} from "recharts";
 
 /**
  * UserData
@@ -25,51 +32,54 @@ import Head from "next/head";
  *  - Clerk user ID
  *  - Basic display details
  *  - Retirement horizon and income target
- *  - Target allocations for asset classes and regions
+ *  - Target allocations by asset class and region
  */
 interface UserData {
   clerk_user_id: string;
-  display_name: string;
-  years_until_retirement: number;
-  target_retirement_income: number;
-  asset_class_targets: Record<string, number>;
-  region_targets: Record<string, number>;
+  display_name?: string;
+  years_until_retirement?: number;
+  target_retirement_income?: number | string;
+  asset_class_targets?: Record<string, number>;
+  region_targets?: Record<string, number>;
 }
 
 /**
  * Account
  *
- * Represents an investment account (e.g. brokerage, pension wrapper).
+ * High-level representation of an investment account:
+ *  - ID and user linkage
+ *  - Human-friendly name and purpose
+ *  - Cash balance (in base currency)
  */
 interface Account {
-  account_id: string;
+  id: string;
   clerk_user_id: string;
   account_name: string;
-  account_type: string;
-  account_purpose: string;
-  cash_balance: number;
-  created_at: string;
-  updated_at: string;
+  account_purpose?: string;
+  cash_balance?: number;
 }
 
 /**
  * Position
  *
- * Represents a holding in a specific instrument within an account.
+ * Representation of a holding within an account:
+ *  - ID and account linkage
+ *  - Symbol and quantity
+ *  - Optional instrument metadata (pricing + allocations)
  */
 interface Position {
-  position_id: string;
+  id: string;
   account_id: string;
   symbol: string;
   quantity: number;
-  created_at: string;
-  updated_at: string;
+  instrument?: Instrument | null;
 }
 
 /**
  * Instrument
  *
- * Describes a tradable instrument (ETF, stock, fund, etc.), including:
+ * Metadata for a tradable instrument:
+ *  - Symbol, name, type
  *  - Current price
  *  - Asset class / region / sector allocation breakdowns (in %)
  */
@@ -84,33 +94,184 @@ interface Instrument {
 }
 
 /**
+ * RawInstrument
+ *
+ * Helper type representing the shape returned by the backend, which may use
+ * `allocation_*` fields and/or JSON strings for allocation columns.
+ */
+interface RawInstrument {
+  symbol?: string;
+  name?: string;
+  instrument_type?: string;
+  current_price?: number | string | null;
+  asset_class_allocation?: Record<string, number> | string | null;
+  region_allocation?: Record<string, number> | string | null;
+  sector_allocation?: Record<string, number> | string | null;
+  allocation_asset_class?: Record<string, number> | string | null;
+  allocation_regions?: Record<string, number> | string | null;
+  allocation_sectors?: Record<string, number> | string | null;
+}
+
+/**
+ * Job
+ *
+ * Minimal job shape used for extracting the last completed analysis time.
+ */
+interface Job {
+  status?: string;
+  completed_at?: string;
+}
+
+/**
+ * normaliseAllocation
+ *
+ * Convert a value that may be:
+ *  - undefined
+ *  - a plain Record<string, number>
+ *  - a JSON string
+ * into a clean Record<string, number>.
+ */
+const normaliseAllocation = (
+  value: Record<string, number> | string | null | undefined,
+): Record<string, number> => {
+  if (!value) return {};
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (parsed && typeof parsed === "object") {
+        return parsed as Record<string, number>;
+      }
+      return {};
+    } catch {
+      return {};
+    }
+  }
+  return value;
+};
+
+/**
+ * normaliseInstrumentFromBackend
+ *
+ * The backend instruments table uses `allocation_*` column names, while the
+ * frontend expects `*_allocation`. This helper maps and normalises those
+ * fields (including JSON-string payloads) into a consistent `Instrument` shape.
+ */
+const normaliseInstrumentFromBackend = (rawInput: unknown): Instrument => {
+  const raw = rawInput as RawInstrument | null | undefined;
+
+  if (!raw) {
+    return {
+      symbol: "",
+      name: "",
+      instrument_type: "",
+      current_price: 0,
+      asset_class_allocation: {},
+      region_allocation: {},
+      sector_allocation: {},
+    };
+  }
+
+  const assetClassSource =
+    raw.asset_class_allocation ?? raw.allocation_asset_class;
+  const regionSource = raw.region_allocation ?? raw.allocation_regions;
+  const sectorSource = raw.sector_allocation ?? raw.allocation_sectors;
+
+  const currentPrice =
+    raw.current_price !== undefined && raw.current_price !== null
+      ? Number(raw.current_price)
+      : undefined;
+
+  return {
+    symbol: raw.symbol ?? "",
+    name: raw.name ?? "",
+    instrument_type: raw.instrument_type ?? "",
+    current_price: Number.isNaN(currentPrice) ? undefined : currentPrice,
+    asset_class_allocation: normaliseAllocation(assetClassSource),
+    region_allocation: normaliseAllocation(regionSource),
+    sector_allocation: normaliseAllocation(sectorSource),
+  };
+};
+
+/**
+ * Colour palette used for pie charts.
+ */
+const COLORS = [
+  "#209DD7",
+  "#FFB707",
+  "#753991",
+  "#10b981",
+  "#ef4444",
+  "#6366f1",
+];
+
+/**
+ * Format numeric values as GBP currency.
+ */
+const formatCurrency = (value: number): string =>
+  new Intl.NumberFormat("en-GB", {
+    style: "currency",
+    currency: "GBP",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
+
+/**
+ * Convert keys like "fixed_income" or "cash" into "Fixed Income" / "Cash".
+ */
+const formatAssetClassName = (name: string): string =>
+  name
+    .replace(/_/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+
+/**
+ * Props Recharts passes into the custom Pie label renderer.
+ */
+type AssetPieLabelProps = {
+  name?: string | number;
+  value?: number | string;
+  percent?: number;
+};
+
+/**
  * Dashboard
  *
  * Main component responsible for:
  *  - Fetching and syncing user + portfolio data
  *  - Calculating aggregate portfolio metrics
- *  - Rendering summary cards, miniature charts, and settings UI
+ *  - Displaying allocation charts and retirement targets
+ *  - Reacting to analysis completion events
  */
 export default function Dashboard() {
+  /**
+   * Authentication / user context
+   */
   const { user, isLoaded: userLoaded } = useUser();
   const { getToken } = useAuth();
 
-  // Core data fetched from the backend
-  const [userData, setUserData] = useState<UserData | null>(null);
+  /**
+   * Local state for:
+   *  - accounts: list of accounts
+   *  - positions: positions grouped by account
+   *  - instruments: instrument metadata keyed by symbol
+   *  - loading / error flags
+   *  - derived portfolio summary
+   *  - user-editable retirement + allocation targets
+   *  - lastAnalysisDate: most recent completed analysis job
+   */
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [positions, setPositions] = useState<Record<string, Position[]>>({});
   const [instruments, setInstruments] = useState<Record<string, Instrument>>({});
-
-  // UI / status flags
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lastAnalysisDate, setLastAnalysisDate] = useState<string | null>(null);
 
-  /**
-   * Form state for editable user settings
-   * (initialised separately to avoid flicker while loading).
-   */
+  const [totalPortfolioValue, setTotalPortfolioValue] = useState(0);
+  const [assetAllocationData, setAssetAllocationData] = useState<
+    { name: string; value: number }[]
+  >([]);
+
   const [displayName, setDisplayName] = useState("");
   const [yearsUntilRetirement, setYearsUntilRetirement] = useState(0);
   const [targetRetirementIncome, setTargetRetirementIncome] = useState(0);
@@ -118,6 +279,8 @@ export default function Dashboard() {
   const [fixedIncomeTarget, setFixedIncomeTarget] = useState(0);
   const [northAmericaTarget, setNorthAmericaTarget] = useState(0);
   const [internationalTarget, setInternationalTarget] = useState(0);
+
+  const [lastAnalysisDate, setLastAnalysisDate] = useState<Date | null>(null);
 
   /**
    * calculatePortfolioSummary
@@ -130,65 +293,96 @@ export default function Dashboard() {
    *  - totalValue: total portfolio market value
    *  - assetClassBreakdown: value by asset class (including cash)
    */
-  const calculatePortfolioSummary = useCallback(() => {
-    let totalValue = 0;
-    const assetClassBreakdown: Record<string, number> = {
-      equity: 0,
-      fixed_income: 0,
-      alternatives: 0,
-      cash: 0,
-    };
+  const calculatePortfolioSummary = useCallback(
+    (
+      accountsData: Account[],
+      positionsData: Record<string, Position[]>,
+      instrumentsData: Record<string, Instrument>,
+    ) => {
+      let totalValue = 0;
 
-    // 1. Add cash balances per account
-    accounts.forEach((account) => {
-      const cashBalance = Number(account.cash_balance);
-      totalValue += cashBalance;
-      assetClassBreakdown.cash += cashBalance;
-    });
+      // Track intermediate amounts by asset class
+      const assetClassValues: Record<string, number> = {
+        cash: 0,
+        equity: 0,
+        fixed_income: 0,
+        other: 0,
+      };
 
-    // 2. Add value of each position and allocate by instrument's asset_class_allocation
-    Object.entries(positions).forEach(([, accountPositions]) => {
-      accountPositions.forEach((position) => {
-        const instrument = instruments[position.symbol];
-        if (instrument?.current_price) {
-          const positionValue =
-            Number(position.quantity) * Number(instrument.current_price);
+      // 1) Add cash balances
+      for (const account of accountsData) {
+        const rawCash = account.cash_balance ?? 0;
+        const cashNumber =
+          typeof rawCash === "string" ? parseFloat(rawCash) : rawCash;
+
+        const cash = Number.isFinite(cashNumber) ? cashNumber : 0;
+
+        totalValue += cash;
+        assetClassValues.cash += cash;
+      }
+
+      // 2) Add positions (using instrument allocations)
+      Object.entries(positionsData).forEach(([accountId, accountPositions]) => {
+        if (!accountId) return;
+        for (const position of accountPositions) {
+          const symbol = position.symbol;
+          const instrument = instrumentsData[symbol];
+          const quantity = Number(position.quantity) || 0;
+          const price = instrument?.current_price ?? 0;
+          const positionValue = quantity * price;
           totalValue += positionValue;
 
-          if (instrument.asset_class_allocation) {
-            Object.entries(instrument.asset_class_allocation).forEach(
-              ([assetClass, percentage]) => {
-                assetClassBreakdown[assetClass] =
-                  (assetClassBreakdown[assetClass] || 0) +
-                  (positionValue * percentage) / 100;
-              }
-            );
-          }
+          // If we have allocation info, use it; otherwise classify as 'other'
+          const allocation = instrument?.asset_class_allocation ?? {};
+          const equityPct = allocation.equity ?? 0;
+          const fixedIncomePct = allocation.fixed_income ?? 0;
+          const otherPct = 100 - equityPct - fixedIncomePct;
+
+          assetClassValues.equity += (positionValue * equityPct) / 100;
+          assetClassValues.fixed_income +=
+            (positionValue * fixedIncomePct) / 100;
+          assetClassValues.other += (positionValue * otherPct) / 100;
         }
       });
-    });
 
-    return { totalValue, assetClassBreakdown };
-  }, [accounts, positions, instruments]);
+      // Convert asset-class amounts into chart-friendly data
+      const allocationData = Object.entries(assetClassValues)
+        .filter(([, value]) => value > 0)
+        .map(([name, value]) => ({
+          name,
+          value,
+        }));
+
+      setTotalPortfolioValue(totalValue);
+      setAssetAllocationData(allocationData);
+    },
+    [],
+  );
 
   /**
-   * Initial load: sync/create user and fetch accounts, positions, instruments.
-   *
-   * Steps:
-   *  1. Ensure Clerk user is loaded and authenticated
-   *  2. Call `/api/user` to sync user and retrieve profile data
-   *  3. Fetch `/api/accounts` to get account list
-   *  4. For each account, fetch `/api/accounts/{id}/positions`
-   *  5. Build positions and instruments maps for lookups
+   * Initial data load:
+   *  - Fetch backend user (sync with Clerk)
+   *  - Load accounts
+   *  - Load positions and instrument metadata
+   *  - Calculate initial portfolio summary
+   *  - Fetch latest completed analysis job for "Last analysis" badge
    */
   useEffect(() => {
     async function loadData() {
-      if (!userLoaded || !user) return;
+      if (!userLoaded) return;
+
+      if (!user) {
+        setLoading(false);
+        return;
+      }
 
       try {
+        setLoading(true);
+        setError(null);
+
         const token = await getToken();
         if (!token) {
-          setError("Not authenticated");
+          setError("Missing auth token");
           setLoading(false);
           return;
         }
@@ -204,26 +398,54 @@ export default function Dashboard() {
           throw new Error(`Failed to sync user: ${userResponse.status}`);
         }
 
-        const response = await userResponse.json();
-        const userData = response.user;
-        setUserData(userData);
+        const responseJson = (await userResponse.json()) as {
+          user: UserData;
+        };
+        const backendUser = responseJson.user;
 
         // Initialise editable fields from user profile
-        setDisplayName(userData.display_name || "");
-        setYearsUntilRetirement(userData.years_until_retirement || 0);
+        setDisplayName(backendUser.display_name ?? "");
+        setYearsUntilRetirement(backendUser.years_until_retirement ?? 0);
 
-        // Ensure target_retirement_income is a number
-        const income = userData.target_retirement_income
-          ? typeof userData.target_retirement_income === "string"
-            ? parseFloat(userData.target_retirement_income)
-            : userData.target_retirement_income
-          : 0;
+        const incomeRaw = backendUser.target_retirement_income ?? 0;
+        const income =
+          typeof incomeRaw === "string" ? parseFloat(incomeRaw) : incomeRaw;
         setTargetRetirementIncome(income);
 
-        setEquityTarget(userData.asset_class_targets?.equity || 0);
-        setFixedIncomeTarget(userData.asset_class_targets?.fixed_income || 0);
-        setNorthAmericaTarget(userData.region_targets?.north_america || 0);
-        setInternationalTarget(userData.region_targets?.international || 0);
+        setEquityTarget(backendUser.asset_class_targets?.equity ?? 0);
+        setFixedIncomeTarget(
+          backendUser.asset_class_targets?.fixed_income ?? 0,
+        );
+        setNorthAmericaTarget(
+          backendUser.region_targets?.north_america ?? 0,
+        );
+        setInternationalTarget(
+          backendUser.region_targets?.international ?? 0,
+        );
+
+        // Fetch most recent completed job to populate the "Last analysis" badge
+        try {
+          const jobsResponse = await fetch(`${API_URL}/api/jobs`, {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          });
+
+          if (jobsResponse.ok) {
+            const jobsPayload = (await jobsResponse.json()) as {
+              jobs?: Job[];
+            };
+            const jobsList = jobsPayload.jobs ?? [];
+            const completedJob = jobsList.find(
+              (job) => job.status === "completed",
+            );
+            if (completedJob?.completed_at) {
+              setLastAnalysisDate(new Date(completedJob.completed_at));
+            }
+          }
+        } catch (jobsErr) {
+          console.error("Error loading jobs for last analysis date:", jobsErr);
+        }
 
         // Fetch accounts
         const accountsResponse = await fetch(`${API_URL}/api/accounts`, {
@@ -232,57 +454,66 @@ export default function Dashboard() {
           },
         });
 
-        if (accountsResponse.ok) {
-          const accountsData = await accountsResponse.json();
-          setAccounts(accountsData);
+        if (!accountsResponse.ok) {
+          throw new Error(
+            `Failed to fetch accounts: ${accountsResponse.status}`,
+          );
+        }
 
-          // Positions and instruments maps (by account ID / symbol)
-          const positionsMap: Record<string, Position[]> = {};
-          const instrumentsMap: Record<string, Instrument> = {};
+        const accountsData = (await accountsResponse.json()) as
+          | Account[]
+          | { accounts: Account[] };
+        const accountsList: Account[] = Array.isArray(accountsData)
+          ? accountsData
+          : accountsData.accounts;
 
-          for (const account of accountsData) {
-            // Defensive: skip any account that does not expose an ID
-            // (API shape may differ from Account interface)
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const accountId = (account as any).id ?? account.account_id;
-            if (!accountId) {
-              console.warn("Account missing ID in dashboard:", account);
-              continue;
-            }
+        setAccounts(accountsList);
 
-            const positionsResponse = await fetch(
-              `${API_URL}/api/accounts/${accountId}/positions`,
-              {
-                headers: {
-                  Authorization: `Bearer ${token}`,
-                },
-              }
-            );
+        // Fetch positions + instrument metadata for each account
+        const positionsMap: Record<string, Position[]> = {};
+        const instrumentsMap: Record<string, Instrument> = {};
 
-            if (positionsResponse.ok) {
-              const positionsData = await positionsResponse.json();
-              positionsMap[accountId] = positionsData.positions || [];
+        for (const account of accountsList) {
+          const accountId = account.id;
+          if (!accountId) {
+            console.warn("Account missing ID in dashboard:", account);
+            continue;
+          }
 
-              // Extract instrument metadata for each position
-              for (const position of positionsData.positions || []) {
-                if (position.instrument) {
-                  instrumentsMap[position.symbol] =
-                    position.instrument as Instrument;
-                }
+          const positionsResponse = await fetch(
+            `${API_URL}/api/accounts/${accountId}/positions`,
+            {
+              headers: {
+                Authorization: `Bearer ${token}`,
+              },
+            },
+          );
+
+          if (positionsResponse.ok) {
+            const positionsPayload = (await positionsResponse.json()) as {
+              positions?: Position[];
+            };
+            const accountPositions = positionsPayload.positions ?? [];
+            positionsMap[accountId] = accountPositions;
+
+            // Extract instrument metadata for each position and normalise it
+            for (const position of accountPositions) {
+              if (position.instrument) {
+                const normalised = normaliseInstrumentFromBackend(
+                  position.instrument,
+                );
+                instrumentsMap[position.symbol] = normalised;
               }
             }
           }
-
-          setPositions(positionsMap);
-          setInstruments(instrumentsMap);
         }
 
-        // Placeholder for lastAnalysisDate – would be populated from jobs API
-        setLastAnalysisDate(null);
+        setPositions(positionsMap);
+        setInstruments(instrumentsMap);
       } catch (err) {
         console.error("Error loading data:", err);
         setError(
-          err instanceof Error ? err.message : "Failed to load data"
+          err instanceof Error ? err.message : "Failed to load data",
         );
       } finally {
         setLoading(false);
@@ -299,6 +530,7 @@ export default function Dashboard() {
    * an `analysis:completed` event, this handler:
    *  - Re-fetches accounts
    *  - Reloads positions and instrument data
+   *  - Refreshes the "last analysis" badge
    * so that the dashboard reflects the latest prices/allocations.
    */
   useEffect(() => {
@@ -317,45 +549,76 @@ export default function Dashboard() {
           },
         });
 
-        if (accountsResponse.ok) {
-          const accountsData = await accountsResponse.json();
-          // Some APIs return { accounts: [...] }, others a bare array; handle both
-          const accountsList = accountsData.accounts || accountsData;
-          setAccounts(accountsList);
+        if (!accountsResponse.ok) return;
 
-          const positionsData: Record<string, Position[]> = {};
-          const instrumentsData: Record<string, Instrument> = {};
+        const accountsData = (await accountsResponse.json()) as
+          | Account[]
+          | { accounts: Account[] };
+        const accountsList: Account[] = Array.isArray(accountsData)
+          ? accountsData
+          : accountsData.accounts;
 
-          for (const account of accountsList || []) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const accountId = (account as any).id ?? account.account_id;
-            if (!accountId) continue;
+        setAccounts(accountsList);
 
-            const positionsResponse = await fetch(
-              `${API_URL}/api/accounts/${accountId}/positions`,
-              {
-                headers: {
-                  Authorization: `Bearer ${token}`,
-                },
-              }
-            );
+        const positionsData: Record<string, Position[]> = {};
+        const instrumentsData: Record<string, Instrument> = {};
 
-            if (positionsResponse.ok) {
-              const data = await positionsResponse.json();
-              positionsData[accountId] = data.positions || [];
+        for (const account of accountsList) {
+          const accountId = account.id;
+          if (!accountId) continue;
 
-              for (const position of data.positions || []) {
-                if (position.instrument) {
-                  instrumentsData[position.symbol] = position.instrument;
-                }
-              }
+          const positionsResponse = await fetch(
+            `${API_URL}/api/accounts/${accountId}/positions`,
+            {
+              headers: {
+                Authorization: `Bearer ${token}`,
+              },
+            },
+          );
+
+          if (!positionsResponse.ok) continue;
+
+          const payload = (await positionsResponse.json()) as {
+            positions?: Position[];
+          };
+          const accountPositions = payload.positions ?? [];
+          positionsData[accountId] = accountPositions;
+
+          for (const position of accountPositions) {
+            if (position.instrument) {
+              const normalised = normaliseInstrumentFromBackend(
+                position.instrument,
+              );
+              instrumentsData[position.symbol] = normalised;
             }
           }
+        }
 
-          setPositions(positionsData);
-          setInstruments(instrumentsData);
+        setPositions(positionsData);
+        setInstruments(instrumentsData);
 
-          // Portfolio summary will be recalculated on next render
+        // Refresh "last analysis" timestamp from jobs API so the badge updates
+        try {
+          const jobsResponse = await fetch(`${API_URL}/api/jobs`, {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          });
+
+          if (jobsResponse.ok) {
+            const jobsPayload = (await jobsResponse.json()) as {
+              jobs?: Job[];
+            };
+            const jobsList = jobsPayload.jobs ?? [];
+            const completedJob = jobsList.find(
+              (job) => job.status === "completed",
+            );
+            if (completedJob?.completed_at) {
+              setLastAnalysisDate(new Date(completedJob.completed_at));
+            }
+          }
+        } catch (jobsErr) {
+          console.error("Error refreshing last analysis date:", jobsErr);
         }
       } catch (err) {
         console.error("Error refreshing dashboard data:", err);
@@ -365,65 +628,66 @@ export default function Dashboard() {
     window.addEventListener("analysis:completed", handleAnalysisCompleted);
 
     return () => {
-      window.removeEventListener("analysis:completed", handleAnalysisCompleted);
+      window.removeEventListener(
+        "analysis:completed",
+        handleAnalysisCompleted,
+      );
     };
-  }, [userLoaded, user, getToken, calculatePortfolioSummary]);
+  }, [userLoaded, user, getToken]);
 
   /**
    * handleSaveSettings
    *
-   * Validates and persists user settings (display name, horizon,
-   * retirement income, target allocations) via `PUT /api/user`.
-   * Displays success/error feedback using the toast system.
+   * Persists updated user settings (display name, retirement horizon,
+   * income target, allocation targets) to the backend via `/api/user`.
    */
   const handleSaveSettings = async () => {
-    if (!userData) return;
-
-    // Basic validation for required fields
-    if (!displayName || displayName.trim().length === 0) {
-      showToast("error", "Display name is required");
-      return;
-    }
-
-    if (yearsUntilRetirement < 0 || yearsUntilRetirement > 50) {
-      showToast(
-        "error",
-        "Years until retirement must be between 0 and 50"
-      );
-      return;
-    }
-
-    if (targetRetirementIncome < 0) {
-      showToast("error", "Target retirement income must be positive");
-      return;
-    }
-
-    // Validate asset-class allocation percentages
-    const equityFixed = equityTarget + fixedIncomeTarget;
-    if (Math.abs(equityFixed - 100) > 0.01) {
-      showToast("error", "Equity and Fixed Income must sum to 100%");
-      return;
-    }
-
-    // Validate regional allocation percentages
-    const regionTotal = northAmericaTarget + internationalTarget;
-    if (Math.abs(regionTotal - 100) > 0.01) {
-      showToast(
-        "error",
-        "North America and International must sum to 100%"
-      );
-      return;
-    }
-
-    setSaving(true);
-    setError(null);
+    if (!user) return;
 
     try {
       const token = await getToken();
-      if (!token) throw new Error("Not authenticated");
+      if (!token) {
+        showToast("error", "Missing auth token");
+        return;
+      }
 
-      const updateData = {
-        display_name: displayName.trim(),
+      if (!displayName || displayName.trim().length === 0) {
+        showToast("error", "Display name is required");
+        return;
+      }
+
+      if (yearsUntilRetirement < 0 || yearsUntilRetirement > 50) {
+        showToast(
+          "error",
+          "Years until retirement must be between 0 and 50",
+        );
+        return;
+      }
+
+      if (targetRetirementIncome < 0) {
+        showToast("error", "Target retirement income must be positive");
+        return;
+      }
+
+      // Validate asset-class allocation percentages
+      const equityFixed = equityTarget + fixedIncomeTarget;
+      if (Math.abs(equityFixed - 100) > 0.01) {
+        showToast("error", "Equity and Fixed Income must sum to 100%");
+        return;
+      }
+
+      // Validate region allocation percentages
+      const regionsTotal = northAmericaTarget + internationalTarget;
+      if (Math.abs(regionsTotal - 100) > 0.01) {
+        showToast(
+          "error",
+          "North America and International must sum to 100%",
+        );
+        return;
+      }
+
+      const payload = {
+        display_name: displayName,
         years_until_retirement: yearsUntilRetirement,
         target_retirement_income: targetRetirementIncome,
         asset_class_targets: {
@@ -442,55 +706,76 @@ export default function Dashboard() {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(updateData),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
-        throw new Error(`Failed to save settings: ${response.status}`);
+        throw new Error(
+          `Failed to update user settings: ${response.status}`,
+        );
       }
 
-      const updatedUser = await response.json();
-      setUserData(updatedUser);
-
-      // Report success via toast
-      showToast("success", "Settings saved successfully!");
+      showToast("success", "Settings updated successfully");
     } catch (err) {
-      console.error("Error saving settings:", err);
+      console.error("Error updating user:", err);
       showToast(
         "error",
-        err instanceof Error ? err.message : "Failed to save settings"
+        err instanceof Error ? err.message : "Failed to update settings",
       );
-    } finally {
-      setSaving(false);
     }
   };
 
-  // Compute aggregate portfolio metrics for summary cards and charts
-  const { totalValue, assetClassBreakdown } = calculatePortfolioSummary();
+  /**
+   * Update handlers for sliders (keep local state in sync with inputs)
+   */
+  const handleEquityChange = (value: number) => {
+    setEquityTarget(value);
+    setFixedIncomeTarget(100 - value);
+  };
+
+  const handleFixedIncomeChange = (value: number) => {
+    setFixedIncomeTarget(value);
+    setEquityTarget(100 - value);
+  };
+
+  const handleNorthAmericaChange = (value: number) => {
+    setNorthAmericaTarget(value);
+    setInternationalTarget(100 - value);
+  };
+
+  const handleInternationalChange = (value: number) => {
+    setInternationalTarget(value);
+    setNorthAmericaTarget(100 - value);
+  };
 
   /**
-   * Prepare data for main asset allocation pie chart:
-   *  - Filter out zero-value buckets
-   *  - Attach a percentage of total for each slice
+   * Derived label for the last analysis timestamp
    */
-  const pieChartData = Object.entries(assetClassBreakdown)
-    .filter(([, value]) => value > 0)
-    .map(([key, value]) => ({
-      name:
-        key.charAt(0).toUpperCase() + key.slice(1).replace("_", " "),
-      value: Math.round(value),
-      percentage:
-        totalValue > 0 ? Math.round((value / totalValue) * 100) : 0,
-    }));
+  const lastAnalysisLabel = lastAnalysisDate
+    ? lastAnalysisDate.toLocaleString()
+    : "Never";
 
-  // Local colour palette for the main portfolio allocation chart
-  const COLORS = ["#209DD7", "#753991", "#FFB707", "#062147", "#10B981"];
+  /**
+   * Recompute summary whenever accounts/positions/instruments change
+   */
+  useEffect(() => {
+    if (accounts.length === 0) {
+      setTotalPortfolioValue(0);
+      setAssetAllocationData([]);
+      return;
+    }
+    calculatePortfolioSummary(accounts, positions, instruments);
+  }, [accounts, positions, instruments, calculatePortfolioSummary]);
 
+  /**
+   * Render
+   */
   return (
     <>
       <Head>
-        <title>Dashboard - Alex AI Financial Advisor</title>
+        <title>Alex – Dashboard</title>
       </Head>
+
       <Layout>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           <h1 className="text-3xl font-bold text-dark mb-8">Dashboard</h1>
@@ -505,330 +790,311 @@ export default function Dashboard() {
                 {Array.from({ length: 4 }).map((_, i) => (
                   <div key={i} className="bg-white rounded-lg shadow p-6">
                     <Skeleton className="h-4 w-3/4 mx-auto mb-3" />
-                    <Skeleton className="h-8 w-1/2 mx-auto" />
+                    <Skeleton className="h-8 w-1/2 mx-auto mb-4" />
+                    <Skeleton className="h-4 w-full mb-2" />
+                    <Skeleton className="h-4 w-5/6 mx-auto" />
                   </div>
                 ))}
               </div>
               <SkeletonCard />
-              <SkeletonCard />
+            </div>
+          ) : error ? (
+            /**
+             * Error state:
+             * Display a user-friendly error message when something goes wrong.
+             */
+            <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-lg">
+              <h2 className="font-semibold mb-1">Something went wrong</h2>
+              <p className="text-sm">{error}</p>
             </div>
           ) : (
-            <>
-              {/* Portfolio Summary Cards */}
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            /**
+             * Main dashboard content:
+             *  - Portfolio overview cards
+             *  - Allocation charts
+             *  - User settings / retirement goals
+             */
+            <div className="space-y-8">
+              {/* Top stats cards */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                 {/* Total Portfolio Value */}
-                <div className="bg-white rounded-lg shadow p-6 text-center">
-                  <h3 className="text-sm font-medium text-gray-500 mb-3">
+                <div className="bg-white rounded-lg shadow p-6">
+                  <h2 className="text-sm font-medium text-gray-500">
                     Total Portfolio Value
-                  </h3>
-                  <p className="text-3xl font-bold text-primary">
-                    {totalValue % 1 === 0
-                      ? `$${totalValue.toLocaleString("en-US")}`
-                      : `$${totalValue.toLocaleString("en-US", {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}`}
+                  </h2>
+                  <p className="mt-2 text-2xl font-semibold text-dark">
+                    £{totalPortfolioValue.toLocaleString(undefined, {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </p>
+                  <p className="mt-1 text-xs text-gray-400">
+                    Includes cash + market value of all positions
                   </p>
                 </div>
 
                 {/* Number of Accounts */}
-                <div className="bg-white rounded-lg shadow p-6 text-center">
-                  <h3 className="text-sm font-medium text-gray-500 mb-3">
-                    Number of Accounts
-                  </h3>
-                  <p className="text-3xl font-bold text-dark">
+                <div className="bg-white rounded-lg shadow p-6">
+                  <h2 className="text-sm font-medium text-gray-500">
+                    Accounts
+                  </h2>
+                  <p className="mt-2 text-2xl font-semibold text-dark">
                     {accounts.length}
+                  </p>
+                  <p className="mt-1 text-xs text-gray-400">
+                    Investment accounts linked to your profile
                   </p>
                 </div>
 
-                {/* Asset Allocation Mini Chart */}
+                {/* Last Analysis */}
                 <div className="bg-white rounded-lg shadow p-6">
-                  <h3 className="text-sm font-medium text-gray-500 mb-2 text-center">
-                    Asset Allocation
-                  </h3>
-                  {pieChartData.length > 0 ? (
-                    <div className="h-24">
+                  <h2 className="text-sm font-medium text-gray-500">
+                    Last Analysis
+                  </h2>
+                  <p className="mt-2 text-2xl font-semibold text-dark">
+                    {lastAnalysisLabel}
+                  </p>
+                  <p className="mt-1 text-xs text-gray-400">
+                    Updated when an analysis job completes
+                  </p>
+                </div>
+
+                {/* Years until retirement */}
+                <div className="bg-white rounded-lg shadow p-6">
+                  <h2 className="text-sm font-medium text-gray-500">
+                    Years Until Retirement
+                  </h2>
+                  <p className="mt-2 text-2xl font-semibold text-dark">
+                    {yearsUntilRetirement}
+                  </p>
+                  <p className="mt-1 text-xs text-gray-400">
+                    Based on your saved preferences
+                  </p>
+                </div>
+              </div>
+
+              {/* Middle section: Asset allocation + retirement targets */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Asset Allocation Chart */}
+                <div className="bg-white rounded-lg shadow p-6 lg:col-span-2">
+                  <h2 className="text-lg font-semibold text-dark mb-4">
+                    Asset Allocation (Actual)
+                  </h2>
+                  {assetAllocationData.length === 0 ? (
+                    <p className="text-sm text-gray-500">
+                      No allocation data available yet. Add positions to your
+                      accounts or run an analysis.
+                    </p>
+                  ) : (
+                    <div className="h-64">
                       <ResponsiveContainer width="100%" height="100%">
                         <PieChart>
                           <Pie
-                            data={pieChartData}
+                            data={assetAllocationData}
+                            dataKey="value"
+                            nameKey="name"
                             cx="50%"
                             cy="50%"
-                            innerRadius={20}
-                            outerRadius={40}
-                            paddingAngle={2}
-                            dataKey="value"
+                            outerRadius={80}
+                            label={(props: AssetPieLabelProps) => {
+                              const { name, value, percent } = props;
+                              const safeName =
+                                name !== undefined ? String(name) : "";
+                              const safeValue = Number(value ?? 0);
+                              const pct =
+                                typeof percent === "number"
+                                  ? percent * 100
+                                  : 0;
+
+                              return `${formatAssetClassName(
+                                safeName,
+                              )}: ${formatCurrency(
+                                safeValue,
+                              )} (${pct.toFixed(1)}%)`;
+                            }}
                           >
-                            {pieChartData.map((entry, index) => (
+                            {assetAllocationData.map((entry, index) => (
                               <Cell
-                                key={`cell-${index}`}
+                                key={entry.name}
                                 fill={COLORS[index % COLORS.length]}
                               />
                             ))}
                           </Pie>
                           <Tooltip
-                            formatter={(value: number) =>
-                              `$${value.toLocaleString()}`
+                            formatter={(value: number | string) =>
+                              typeof value === "number"
+                                ? formatCurrency(value)
+                                : formatCurrency(Number(value))
+                            }
+                            labelFormatter={(name) =>
+                              formatAssetClassName(String(name))
+                            }
+                          />
+                          <Legend
+                            formatter={(value) =>
+                              formatAssetClassName(String(value))
                             }
                           />
                         </PieChart>
                       </ResponsiveContainer>
                     </div>
-                  ) : (
-                    <p className="text-sm text-gray-500">No positions yet</p>
                   )}
                 </div>
 
-                {/* Last Analysis Timestamp */}
-                <div className="bg-white rounded-lg shadow p-6 text-center">
-                  <h3 className="text-sm font-medium text-gray-500 mb-3">
-                    Last Analysis
-                  </h3>
-                  <p className="text-3xl font-bold text-dark">
-                    {lastAnalysisDate
-                      ? new Date(lastAnalysisDate).toLocaleDateString()
-                      : "Never"}
-                  </p>
+                {/* Target Allocation Controls */}
+                <div className="bg-white rounded-lg shadow p-6">
+                  <h2 className="text-lg font-semibold text-dark mb-4">
+                    Target Allocation
+                  </h2>
+
+                  {/* Asset Class Targets */}
+                  <div className="mb-6">
+                    <h3 className="text-sm font-medium text-gray-700 mb-2">
+                      Asset Class Targets
+                    </h3>
+                    <div className="space-y-3">
+                      <div>
+                        <div className="flex justify-between text-xs mb-1">
+                          <span>Equity</span>
+                          <span>{equityTarget}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={equityTarget}
+                          onChange={(e) =>
+                            handleEquityChange(Number(e.target.value))
+                          }
+                          className="w-full"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-xs mb-1">
+                          <span>Fixed Income</span>
+                          <span>{fixedIncomeTarget}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={fixedIncomeTarget}
+                          onChange={(e) =>
+                            handleFixedIncomeChange(Number(e.target.value))
+                          }
+                          className="w-full"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Region Targets */}
+                  <div className="mb-6">
+                    <h3 className="text-sm font-medium text-gray-700 mb-2">
+                      Region Targets
+                    </h3>
+                    <div className="space-y-3">
+                      <div>
+                        <div className="flex justify-between text-xs mb-1">
+                          <span>North America</span>
+                          <span>{northAmericaTarget}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={northAmericaTarget}
+                          onChange={(e) =>
+                            handleNorthAmericaChange(
+                              Number(e.target.value),
+                            )
+                          }
+                          className="w-full"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-xs mb-1">
+                          <span>International</span>
+                          <span>{internationalTarget}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={internationalTarget}
+                          onChange={(e) =>
+                            handleInternationalChange(
+                              Number(e.target.value),
+                            )
+                          }
+                          className="w-full"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleSaveSettings}
+                    className="w-full py-2 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary/90"
+                  >
+                    Save Settings
+                  </button>
                 </div>
               </div>
 
-              {/* User Settings Section */}
-              <div className="bg-white rounded-lg shadow p-6 mb-8">
-                <h2 className="text-xl font-semibold text-dark mb-6">
-                  User Settings
+              {/* User Details + Retirement Target */}
+              <div className="bg-white rounded-lg shadow p-6">
+                <h2 className="text-lg font-semibold text-dark mb-4">
+                  Profile &amp; Retirement Goals
                 </h2>
 
-                {/* Error / success banner (when error state is reused for messaging) */}
-                {loading ? (
-                  <p className="text-gray-500">Loading...</p>
-                ) : error && !error.includes("success") ? (
-                  <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
-                    <p className="text-red-600">{error}</p>
-                  </div>
-                ) : error && error.includes("success") ? (
-                  <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
-                    <p className="text-green-600">✅ {error}</p>
-                  </div>
-                ) : null}
-
-                {/* Settings form grid */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                   {/* Display Name */}
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
                       Display Name
                     </label>
                     <input
                       type="text"
                       value={displayName}
                       onChange={(e) => setDisplayName(e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"
+                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm text-sm"
                     />
                   </div>
 
-                  {/* Target Retirement Income */}
+                  {/* Years until retirement */}
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Target Retirement Income (Annual)
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Years Until Retirement
                     </label>
                     <input
-                      type="text"
-                      value={
-                        targetRetirementIncome
-                          ? targetRetirementIncome.toLocaleString("en-US")
-                          : ""
-                      }
-                      onChange={(e) => {
-                        const value = e.target.value.replace(/,/g, "");
-                        const num = parseInt(value) || 0;
-                        if (!isNaN(num)) {
-                          setTargetRetirementIncome(num);
-                        }
-                      }}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"
-                    />
-                  </div>
-
-                  {/* Years Until Retirement slider */}
-                  <div className="md:col-span-2">
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Years Until Retirement: {yearsUntilRetirement}
-                    </label>
-                    <input
-                      type="range"
-                      min="0"
-                      max="50"
+                      type="number"
                       value={yearsUntilRetirement}
                       onChange={(e) =>
                         setYearsUntilRetirement(Number(e.target.value))
                       }
-                      className="w-full"
+                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm text-sm"
                     />
-                    <div className="flex justify-between text-xs text-gray-500">
-                      <span>0</span>
-                      <span>10</span>
-                      <span>20</span>
-                      <span>30</span>
-                      <span>40</span>
-                      <span>50</span>
-                    </div>
                   </div>
 
-                  {/* Target Asset Class Allocation */}
+                  {/* Target retirement income */}
                   <div>
-                    <h3 className="text-sm font-medium text-gray-700 mb-3">
-                      Target Asset Class Allocation
-                    </h3>
-                    <div className="space-y-3">
-                      <div>
-                        <label className="text-sm text-gray-600">
-                          Equity: {equityTarget}%
-                        </label>
-                        <input
-                          type="range"
-                          min="0"
-                          max="100"
-                          value={equityTarget}
-                          onChange={(e) => {
-                            const val = Number(e.target.value);
-                            setEquityTarget(val);
-                            setFixedIncomeTarget(100 - val);
-                          }}
-                          className="w-full"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-sm text-gray-600">
-                          Fixed Income: {fixedIncomeTarget}%
-                        </label>
-                        <input
-                          type="range"
-                          min="0"
-                          max="100"
-                          value={fixedIncomeTarget}
-                          onChange={(e) => {
-                            const val = Number(e.target.value);
-                            setFixedIncomeTarget(val);
-                            setEquityTarget(100 - val);
-                          }}
-                          className="w-full"
-                        />
-                      </div>
-                    </div>
-
-                    {/* Mini pie chart: asset-class targets */}
-                    <div className="mt-4 h-32">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <PieChart>
-                          <Pie
-                            data={[
-                              { name: "Equity", value: equityTarget },
-                              { name: "Fixed Income", value: fixedIncomeTarget },
-                            ]}
-                            cx="50%"
-                            cy="50%"
-                            outerRadius={40}
-                            dataKey="value"
-                          >
-                            <Cell fill="#209DD7" />
-                            <Cell fill="#753991" />
-                          </Pie>
-                          <Tooltip formatter={(value) => `${value}%`} />
-                          <Legend />
-                        </PieChart>
-                      </ResponsiveContainer>
-                    </div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Target Annual Retirement Income (£)
+                    </label>
+                    <input
+                      type="number"
+                      value={targetRetirementIncome}
+                      onChange={(e) =>
+                        setTargetRetirementIncome(Number(e.target.value))
+                      }
+                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm text-sm"
+                    />
                   </div>
-
-                  {/* Target Regional Allocation */}
-                  <div>
-                    <h3 className="text-sm font-medium text-gray-700 mb-3">
-                      Target Regional Allocation
-                    </h3>
-                    <div className="space-y-3">
-                      <div>
-                        <label className="text-sm text-gray-600">
-                          North America: {northAmericaTarget}%
-                        </label>
-                        <input
-                          type="range"
-                          min="0"
-                          max="100"
-                          value={northAmericaTarget}
-                          onChange={(e) => {
-                            const val = Number(e.target.value);
-                            setNorthAmericaTarget(val);
-                            setInternationalTarget(100 - val);
-                          }}
-                          className="w-full"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-sm text-gray-600">
-                          International: {internationalTarget}%
-                        </label>
-                        <input
-                          type="range"
-                          min="0"
-                          max="100"
-                          value={internationalTarget}
-                          onChange={(e) => {
-                            const val = Number(e.target.value);
-                            setInternationalTarget(val);
-                            setNorthAmericaTarget(100 - val);
-                          }}
-                          className="w-full"
-                        />
-                      </div>
-                    </div>
-
-                    {/* Mini pie chart: regional targets */}
-                    <div className="mt-4 h-32">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <PieChart>
-                          <Pie
-                            data={[
-                              {
-                                name: "North America",
-                                value: northAmericaTarget,
-                              },
-                              {
-                                name: "International",
-                                value: internationalTarget,
-                              },
-                            ]}
-                            cx="50%"
-                            cy="50%"
-                            outerRadius={40}
-                            dataKey="value"
-                          >
-                            <Cell fill="#FFB707" />
-                            <Cell fill="#062147" />
-                          </Pie>
-                          <Tooltip formatter={(value) => `${value}%`} />
-                          <Legend />
-                        </PieChart>
-                      </ResponsiveContainer>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Save button */}
-                <div className="mt-6">
-                  <button
-                    onClick={handleSaveSettings}
-                    disabled={saving || loading}
-                    className={`px-6 py-2 rounded-lg font-medium transition-colors ${
-                      saving || loading
-                        ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                        : "bg-primary text-white hover:bg-blue-600"
-                    }`}
-                  >
-                    {saving ? "Saving..." : "Save Settings"}
-                  </button>
                 </div>
               </div>
-            </>
+            </div>
           )}
         </div>
       </Layout>

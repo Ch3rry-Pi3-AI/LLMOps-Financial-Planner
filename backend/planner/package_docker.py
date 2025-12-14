@@ -36,53 +36,72 @@ LAMBDA_BASE_IMAGE = "public.ecr.aws/lambda/python:3.12"
 
 
 # ============================================================
+# Console helpers (Windows-safe printing)
+# ============================================================
+
+
+def safe_print(text: str) -> None:
+  """
+  Print text safely even on Windows consoles with limited encodings.
+
+  If printing raises a UnicodeEncodeError (e.g. for emoji on cp1252),
+  re-encode using ASCII with replacement so the message is still shown.
+  """
+  try:
+    print(text)
+  except UnicodeEncodeError:
+    fallback = text.encode("ascii", "replace").decode("ascii")
+    print(fallback)
+
+
+# ============================================================
 # Utility Functions
 # ============================================================
 
 
 def run_command(cmd: List[str], cwd: Optional[str | Path] = None) -> str:
-    """Run a shell command and return its stdout, exiting on failure.
+  """Run a shell command and return its stdout, exiting on failure.
 
-    Parameters
-    ----------
-    cmd:
-        Command and arguments as a list, e.g. ``["docker", "--version"]``.
-    cwd:
-        Optional working directory in which to run the command.
+  Parameters
+  ----------
+  cmd:
+      Command and arguments as a list, e.g. ``["docker", "--version"]``.
+  cwd:
+      Optional working directory in which to run the command.
 
-    Returns
-    -------
-    str
-        Standard output from the command as text (decoded with replacement
-        for any invalid characters).
+  Returns
+  -------
+  str
+      Standard output from the command as text (decoded with replacement
+      for any invalid characters).
 
-    Raises
-    ------
-    SystemExit
-        If the command exits with a non-zero status code.
-    """
-    print(f"Running: {' '.join(cmd)}")
+  Raises
+  ------
+  SystemExit
+      If the command exits with a non-zero status code.
+  """
+  safe_print(f"Running: {' '.join(cmd)}")
 
-    result = subprocess.run(
-        cmd,
-        cwd=str(cwd) if cwd is not None else None,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+  result = subprocess.run(
+      cmd,
+      cwd=str(cwd) if cwd is not None else None,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.PIPE,
+  )
 
-    # Decode with replacement to avoid UnicodeDecodeError on Windows cp1252
-    stdout = result.stdout.decode(errors="replace")
-    stderr = result.stderr.decode(errors="replace")
+  # Decode with replacement to avoid UnicodeDecodeError on Windows cp1252
+  stdout = result.stdout.decode(errors="replace")
+  stderr = result.stderr.decode(errors="replace")
 
-    if result.returncode != 0:
-        print("Error while running command:")
-        if stderr:
-            print(stderr)
-        else:
-            print("No stderr output.")
-        sys.exit(1)
+  if result.returncode != 0:
+    safe_print("Error while running command:")
+    if stderr:
+      safe_print(stderr)
+    else:
+      safe_print("No stderr output.")
+    sys.exit(1)
 
-    return stdout
+  return stdout
 
 
 # ============================================================
@@ -90,125 +109,126 @@ def run_command(cmd: List[str], cwd: Optional[str | Path] = None) -> str:
 # ============================================================
 
 PLANNER_SOURCE_FILES: list[str] = [
-    "lambda_handler.py",
-    "agent.py",
-    "market.py",
-    "templates.py",
-    "observability.py",
+  "lambda_handler.py",
+  "agent.py",
+  "market.py",
+  "prices.py",
+  "templates.py",
+  "observability.py",
 ]
 
 
 def package_lambda() -> Path:
-    """Build the Planner Lambda ZIP using Docker and return its path.
+  """Build the Planner Lambda ZIP using Docker and return its path.
 
-    Steps
-    -----
-    1. Export exact dependencies from ``uv.lock`` into a requirements file.
-    2. Filter out packages that are unnecessary or problematic in Lambda
-       (e.g. clipboard utilities).
-    3. Use a Docker container based on the Lambda Python 3.12 image to
-       ``pip install`` dependencies into a ``package/`` directory.
-    4. Vendor the local ``database`` package into the Lambda bundle.
-    5. Copy Planner-related source files into the package.
-    6. Create ``planner_lambda.zip`` in the Planner folder.
-    """
-    # Directory containing this script (backend/planner)
-    planner_dir = Path(__file__).parent.absolute()
-    backend_dir = planner_dir.parent
+  Steps
+  -----
+  1. Export exact dependencies from ``uv.lock`` into a requirements file.
+  2. Filter out packages that are unnecessary or problematic in Lambda
+     (e.g. clipboard utilities).
+  3. Use a Docker container based on the Lambda Python 3.12 image to
+     ``pip install`` dependencies into a ``package/`` directory.
+  4. Vendor the local ``database`` package into the Lambda bundle.
+  5. Copy Planner-related source files into the package.
+  6. Create ``planner_lambda.zip`` in the Planner folder.
+  """
+  # Directory containing this script (backend/planner)
+  planner_dir = Path(__file__).parent.absolute()
+  backend_dir = planner_dir.parent
 
-    # Use a temporary directory for build artefacts
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-        package_dir = temp_path / "package"
-        package_dir.mkdir(parents=True, exist_ok=True)
+  # Use a temporary directory for build artefacts
+  with tempfile.TemporaryDirectory() as temp_dir:
+    temp_path = Path(temp_dir)
+    package_dir = temp_path / "package"
+    package_dir.mkdir(parents=True, exist_ok=True)
 
-        print("🚀 Creating Planner Lambda package using Docker...")
+    safe_print("🚀 Creating Planner Lambda package using Docker...")
 
-        # ------------------------------------------------------
-        # Export requirements from uv.lock
-        # ------------------------------------------------------
-        print("Exporting requirements from uv.lock...")
-        requirements_result = run_command(
-            ["uv", "export", "--no-hashes", "--no-emit-project"],
-            cwd=planner_dir,
+    # ------------------------------------------------------
+    # Export requirements from uv.lock
+    # ------------------------------------------------------
+    safe_print("Exporting requirements from uv.lock...")
+    requirements_result = run_command(
+        ["uv", "export", "--no-hashes", "--no-emit-project"],
+        cwd=planner_dir,
+    )
+
+    # Filter out packages not needed or not suitable in Lambda
+    filtered_requirements: list[str] = []
+    for line in requirements_result.splitlines():
+      # Example: skip clipboard utilities
+      if line.startswith("pyperclip"):
+        safe_print(f"Excluding from Lambda package: {line}")
+        continue
+      filtered_requirements.append(line)
+
+    req_file = temp_path / "requirements.txt"
+    req_file.write_text("\n".join(filtered_requirements), encoding="utf-8")
+
+    # ------------------------------------------------------
+    # Install dependencies into ./package using Docker
+    # ------------------------------------------------------
+    safe_print("Installing dependencies inside Lambda base image...")
+
+    docker_cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "--platform",
+        "linux/amd64",
+        "-v",
+        f"{temp_path}:/build",
+        "-v",
+        f"{backend_dir / 'database'}:/database",
+        "--entrypoint",
+        "/bin/bash",
+        LAMBDA_BASE_IMAGE,
+        "-c",
+        (
+            "cd /build && "
+            "pip install --target ./package -r requirements.txt && "
+            "pip install --target ./package --no-deps /database"
+        ),
+    ]
+
+    run_command(docker_cmd)
+
+    # ------------------------------------------------------
+    # Copy Planner source files into the package
+    # ------------------------------------------------------
+    safe_print("Copying Planner source files into package...")
+
+    for filename in PLANNER_SOURCE_FILES:
+      src = planner_dir / filename
+      dst = package_dir / filename
+
+      if not src.exists():
+        safe_print(f"ERROR: Expected source file not found: {src}")
+        safe_print(
+            "Make sure you are running this from backend/planner and that "
+            f"all of {PLANNER_SOURCE_FILES} exist."
         )
+        sys.exit(1)
 
-        # Filter out packages not needed or not suitable in Lambda
-        filtered_requirements: list[str] = []
-        for line in requirements_result.splitlines():
-            # Example: skip clipboard utilities
-            if line.startswith("pyperclip"):
-                print(f"Excluding from Lambda package: {line}")
-                continue
-            filtered_requirements.append(line)
+      shutil.copy(src, dst)
+      safe_print(f"  Included: {filename}")
 
-        req_file = temp_path / "requirements.txt"
-        req_file.write_text("\n".join(filtered_requirements), encoding="utf-8")
+    # ------------------------------------------------------
+    # Create the ZIP archive
+    # ------------------------------------------------------
+    zip_path = planner_dir / "planner_lambda.zip"
 
-        # ------------------------------------------------------
-        # Install dependencies into ./package using Docker
-        # ------------------------------------------------------
-        print("Installing dependencies inside Lambda base image...")
+    if zip_path.exists():
+      safe_print(f"Removing existing zip: {zip_path}")
+      zip_path.unlink()
 
-        docker_cmd = [
-            "docker",
-            "run",
-            "--rm",
-            "--platform",
-            "linux/amd64",
-            "-v",
-            f"{temp_path}:/build",
-            "-v",
-            f"{backend_dir / 'database'}:/database",
-            "--entrypoint",
-            "/bin/bash",
-            LAMBDA_BASE_IMAGE,
-            "-c",
-            (
-                "cd /build && "
-                "pip install --target ./package -r requirements.txt && "
-                "pip install --target ./package --no-deps /database"
-            ),
-        ]
+    safe_print(f"Creating zip file: {zip_path}")
+    run_command(["zip", "-r", str(zip_path), "."], cwd=package_dir)
 
-        run_command(docker_cmd)
+    size_mb = zip_path.stat().st_size / (1024 * 1024)
+    safe_print(f"✅ Package created: {zip_path} ({size_mb:.1f} MB)")
 
-        # ------------------------------------------------------
-        # Copy Planner source files into the package
-        # ------------------------------------------------------
-        print("Copying Planner source files into package...")
-
-        for filename in PLANNER_SOURCE_FILES:
-            src = planner_dir / filename
-            dst = package_dir / filename
-
-            if not src.exists():
-                print(f"ERROR: Expected source file not found: {src}")
-                print(
-                    "Make sure you are running this from backend/planner and that "
-                    f"all of {PLANNER_SOURCE_FILES} exist."
-                )
-                sys.exit(1)
-
-            shutil.copy(src, dst)
-            print(f"  Included: {filename}")
-
-        # ------------------------------------------------------
-        # Create the ZIP archive
-        # ------------------------------------------------------
-        zip_path = planner_dir / "planner_lambda.zip"
-
-        if zip_path.exists():
-            print(f"Removing existing zip: {zip_path}")
-            zip_path.unlink()
-
-        print(f"Creating zip file: {zip_path}")
-        run_command(["zip", "-r", str(zip_path), "."], cwd=package_dir)
-
-        size_mb = zip_path.stat().st_size / (1024 * 1024)
-        print(f"✅ Package created: {zip_path} ({size_mb:.1f} MB)")
-
-        return zip_path
+    return zip_path
 
 
 # ============================================================
@@ -217,43 +237,43 @@ def package_lambda() -> Path:
 
 
 def deploy_lambda(zip_path: Path) -> None:
-    """Deploy the Planner Lambda ZIP to AWS.
+  """Deploy the Planner Lambda ZIP to AWS.
 
-    Parameters
-    ----------
-    zip_path:
-        Path to the ZIP file produced by :func:`package_lambda`.
+  Parameters
+  ----------
+  zip_path:
+      Path to the ZIP file produced by :func:`package_lambda`.
 
-    Notes
-    -----
-    * Updates code for the existing ``alex-planner`` Lambda function.
-    * If the function does not exist, the script exits with an error and
-      instructs you to deploy via Terraform first.
-    """
-    import boto3
+  Notes
+  -----
+  * Updates code for the existing ``alex-planner`` Lambda function.
+  * If the function does not exist, the script exits with an error and
+    instructs you to deploy via Terraform first.
+  """
+  import boto3
 
-    lambda_client = boto3.client("lambda")
+  lambda_client = boto3.client("lambda")
 
-    print(f"Deploying to Lambda function: {LAMBDA_FUNCTION_NAME}")
+  safe_print(f"Deploying to Lambda function: {LAMBDA_FUNCTION_NAME}")
 
-    try:
-        with zip_path.open("rb") as f:
-            response = lambda_client.update_function_code(
-                FunctionName=LAMBDA_FUNCTION_NAME,
-                ZipFile=f.read(),
-            )
+  try:
+    with zip_path.open("rb") as f:
+      response = lambda_client.update_function_code(
+          FunctionName=LAMBDA_FUNCTION_NAME,
+          ZipFile=f.read(),
+      )
 
-        print("Successfully updated Lambda function")
-        print(f"Function ARN: {response['FunctionArn']}")
-    except lambda_client.exceptions.ResourceNotFoundException:
-        print(
-            f"Lambda function {LAMBDA_FUNCTION_NAME} not found. "
-            "Please deploy via Terraform first."
-        )
-        sys.exit(1)
-    except Exception as exc:  # noqa: BLE001
-        print(f"Error deploying Lambda: {exc}")
-        sys.exit(1)
+    safe_print("Successfully updated Lambda function")
+    safe_print(f"Function ARN: {response['FunctionArn']}")
+  except lambda_client.exceptions.ResourceNotFoundException:
+    safe_print(
+        f"Lambda function {LAMBDA_FUNCTION_NAME} not found. "
+        "Please deploy via Terraform first."
+    )
+    sys.exit(1)
+  except Exception as exc:  # noqa: BLE001
+    safe_print(f"Error deploying Lambda: {exc}")
+    sys.exit(1)
 
 
 # ============================================================
@@ -262,31 +282,31 @@ def deploy_lambda(zip_path: Path) -> None:
 
 
 def main() -> None:
-    """Command-line entrypoint for packaging (and optionally deploying) Lambda."""
-    parser = argparse.ArgumentParser(
-        description="Package Planner Lambda for deployment",
-    )
-    parser.add_argument(
-        "--deploy",
-        action="store_true",
-        help="Deploy to AWS after packaging",
-    )
-    args = parser.parse_args()
+  """Command-line entrypoint for packaging (and optionally deploying) Lambda."""
+  parser = argparse.ArgumentParser(
+      description="Package Planner Lambda for deployment",
+  )
+  parser.add_argument(
+      "--deploy",
+      action="store_true",
+      help="Deploy to AWS after packaging",
+  )
+  args = parser.parse_args()
 
-    # Ensure Docker is available before doing anything else
-    try:
-        run_command(["docker", "--version"])
-    except FileNotFoundError:
-        print("Error: Docker is not installed or not in PATH")
-        sys.exit(1)
+  # Ensure Docker is available before doing anything else
+  try:
+    run_command(["docker", "--version"])
+  except FileNotFoundError:
+    safe_print("Error: Docker is not installed or not in PATH")
+    sys.exit(1)
 
-    # Build the Lambda package
-    zip_path = package_lambda()
+  # Build the Lambda package
+  zip_path = package_lambda()
 
-    # Optionally deploy the created package
-    if args.deploy:
-        deploy_lambda(zip_path)
+  # Optionally deploy the created package
+  if args.deploy:
+    deploy_lambda(zip_path)
 
 
 if __name__ == "__main__":
-    main()
+  main()

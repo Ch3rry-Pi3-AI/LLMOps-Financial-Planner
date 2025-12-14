@@ -71,6 +71,44 @@ from templates import RETIREMENT_INSTRUCTIONS
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+def _normalize_markdown_report(text: str) -> str:
+    """
+    Normalize agent-produced markdown for consistent UI rendering.
+
+    Removes conversational preambles and ensures the report starts at the
+    expected H1 header when present.
+    """
+    if not text:
+        return text
+
+    stripped = text.strip()
+
+    # Unwrap fenced markdown blocks if the model included them.
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            try:
+                end_idx = lines[1:].index("```") + 1
+                stripped = "\n".join(lines[1:end_idx]).strip()
+            except ValueError:
+                stripped = "\n".join(lines[1:]).strip()
+
+    lines = stripped.splitlines()
+    target = "Retirement Readiness Assessment"
+
+    # Prefer starting from the expected title if it exists anywhere.
+    for idx, line in enumerate(lines):
+        candidate = line.lstrip("#").strip()
+        if candidate == target:
+            return "\n".join(lines[idx:]).lstrip()
+
+    # Otherwise, start from the first markdown heading.
+    for idx, line in enumerate(lines):
+        if line.lstrip().startswith("#"):
+            return "\n".join(lines[idx:]).lstrip()
+
+    return stripped
+
 
 # ============================================================
 # Custom Error Types
@@ -268,8 +306,9 @@ async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> D
             # Non-retryable errors propagate up
             raise
 
+        markdown = _normalize_markdown_report(result.final_output)
         retirement_payload = {
-            "analysis": result.final_output,
+            "analysis": markdown,
             "generated_at": datetime.utcnow().isoformat(),
             "agent": "retirement",
         }
@@ -317,7 +356,7 @@ async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> D
                 if success
                 else "Analysis completed but failed to save"
             ),
-            "final_output": result.final_output,
+            "final_output": markdown,
         }
 
 

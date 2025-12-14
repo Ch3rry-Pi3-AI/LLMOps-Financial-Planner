@@ -10,6 +10,8 @@ It orchestrates:
 * Judging the quality of the generated report with the Judge agent
 * Persisting the final report payload back into the database
 * Emitting observability events for end-to-end tracing
+* Enforcing explainability-first recommendation outputs and capturing an audit
+  trail for AI decisions
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from src import Database
 
 from agent import ReporterContext, create_agent
 from observability import observe
-from templates import REPORTER_INSTRUCTIONS
+from templates import ANALYSIS_INSTRUCTIONS_WITH_EXPLANATION, AuditLogger, REPORTER_INSTRUCTIONS
 
 # Use root logger for consistency with other Lambdas / CloudWatch
 logger = logging.getLogger()
@@ -51,6 +53,44 @@ except ImportError:
 # ============================================================
 # Reporter Agent Runner
 # ============================================================
+
+def _normalize_markdown_report(text: str) -> str:
+    """
+    Normalize agent-produced markdown for consistent UI rendering.
+
+    Removes conversational preambles (e.g. "Great! Here's...") and ensures the
+    report starts at the expected H1 header when present.
+    """
+    if not text:
+        return text
+
+    stripped = text.strip()
+
+    # Unwrap fenced markdown blocks if the model included them.
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            try:
+                end_idx = lines[1:].index("```") + 1
+                stripped = "\n".join(lines[1:end_idx]).strip()
+            except ValueError:
+                stripped = "\n".join(lines[1:]).strip()
+
+    lines = stripped.splitlines()
+    target = "Investment Portfolio Analysis Report"
+
+    # Prefer starting from the expected title if it exists anywhere.
+    for idx, line in enumerate(lines):
+        candidate = line.lstrip("#").strip()
+        if candidate == target:
+            return "\n".join(lines[idx:]).lstrip()
+
+    # Otherwise, start from the first markdown heading.
+    for idx, line in enumerate(lines):
+        if line.lstrip().startswith("#"):
+            return "\n".join(lines[idx:]).lstrip()
+
+    return stripped
 
 
 @retry(
@@ -102,6 +142,11 @@ async def run_reporter_agent(
         * ``final_output`` – the raw report text from the Reporter agent
     """
     start_time = datetime.now(timezone.utc)
+    input_payload = {
+        "portfolio_data": portfolio_data,
+        "user_data": user_data,
+        "explainability_format": ANALYSIS_INSTRUCTIONS_WITH_EXPLANATION,
+    }
 
     # Structured "reporter started" event
     logger.info(
@@ -133,6 +178,7 @@ async def run_reporter_agent(
         )
 
         response = result.final_output
+        response = _normalize_markdown_report(response)
 
         # Judge the quality of the generated report, if observability is available
         if observability:
@@ -185,6 +231,31 @@ async def run_reporter_agent(
                         "Please try again later."
                     )
 
+        # Audit logging for compliance and traceability
+        end_time = datetime.now(timezone.utc)
+        duration_ms = int((end_time - start_time).total_seconds() * 1000)
+        model_id = os.getenv(
+            "BEDROCK_MODEL_ID",
+            "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        )
+        audit_entry = AuditLogger.log_ai_decision(
+            agent_name="reporter",
+            job_id=job_id,
+            input_data=input_payload,
+            output_data={"final_output": response},
+            model_used=f"bedrock/{model_id}",
+            duration_ms=duration_ms,
+        )
+
+        if observability:
+            observability.create_event(
+                name="Reporter Audit Log",
+                status_message=(
+                    "Reporter audit trail captured (hash="
+                    f"{audit_entry.get('input_hash', 'n/a')})"
+                ),
+            )
+
         # Persist the (possibly overridden) report to the database
         report_payload = {
             "content": response,
@@ -206,7 +277,8 @@ async def run_reporter_agent(
                 )
             )
 
-        end_time = datetime.now(timezone.utc)
+        logger.info(json.dumps({"event": "REPORTER_AUDIT", **audit_entry}))
+
         logger.info(
             json.dumps(
                 {
@@ -226,7 +298,7 @@ async def run_reporter_agent(
                 if success
                 else "Report generated but failed to save"
             ),
-            "final_output": result.final_output,
+            "final_output": response,
         }
 
 

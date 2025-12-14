@@ -70,6 +70,8 @@ Style and Output Requirements
 * Explain trade-offs and uncertainties in plain language.
 * Where relevant, discuss multiple scenarios (e.g. conservative, base, optimistic)
   to illustrate the range of possible outcomes.
+* Output markdown only. Do not include any preamble line before the report.
+* The very first line of your output MUST be the H1 header: "# Retirement Readiness Assessment".
 """
 
 

@@ -26,6 +26,15 @@ Typical usage (inside a Lambda / backend service):
 
 The agent is intentionally **tool-free** at this stage: it produces a single,
 final markdown analysis based on the computed metrics.
+
+Guardrails
+----------
+This module also includes simple guardrails to improve safety and robustness:
+
+* Input sanitisation via :func:`sanitize_user_input` to reduce prompt-injection
+  risk from user-supplied free-text fields.
+* Response size limiting via :func:`truncate_response` to prevent excessively
+  large prompts from being sent to the LLM.
 """
 
 from __future__ import annotations
@@ -40,6 +49,81 @@ from typing import Any, Dict, List, Tuple
 from agents.extensions.models.litellm_model import LitellmModel
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# Guardrail Helpers – Input & Response Controls
+# ============================================================
+
+
+def sanitize_user_input(text: str) -> str:
+    """
+    Basic prompt-injection guardrail for user-facing text fields.
+
+    This helper looks for common instruction-like patterns in free-text
+    user inputs (e.g. custom goals or notes) and replaces them with a
+    neutral placeholder if detected. It is intentionally conservative and
+    should be used on fields that may be surfaced in prompts.
+
+    Parameters
+    ----------
+    text :
+        Raw text value (for example, user "retirement_goals" narrative).
+
+    Returns
+    -------
+    str
+        Sanitised text. Either the original value or the literal string
+        "[INVALID INPUT DETECTED]" when a suspicious pattern is found.
+    """
+    dangerous_patterns = [
+        "ignore previous instructions",
+        "disregard all prior",
+        "forget everything",
+        "new instructions:",
+        "system:",
+        "assistant:",
+    ]
+
+    lowered = text.lower()
+    for pattern in dangerous_patterns:
+        if pattern in lowered:
+            logger.warning("Retirement: Potential prompt injection detected: %s", pattern)
+            return "[INVALID INPUT DETECTED]"
+
+    return text
+
+
+def truncate_response(text: str, max_length: int = 50_000) -> str:
+    """
+    Ensure large strings do not exceed a reasonable maximum size.
+
+    In this module the primary use is to cap the size of the final markdown
+    `task` prompt passed to the LLM. This avoids runaway token usage if
+    upstream changes accidentally expand the context too much.
+
+    Parameters
+    ----------
+    text :
+        Text string to check and potentially truncate.
+    max_length :
+        Maximum allowed length in characters. Defaults to 50,000.
+
+    Returns
+    -------
+    str
+        Original text if within bounds, otherwise the truncated text with an
+        explanatory note appended.
+    """
+    length = len(text)
+    if length > max_length:
+        logger.warning(
+            "Retirement: Task text truncated from %d to %d characters",
+            length,
+            max_length,
+        )
+        return text[:max_length] + "\n\n[Content truncated due to length]"
+    return text
 
 
 # ============================================================
@@ -393,7 +477,9 @@ def create_agent(
     * Computes portfolio value and asset allocation
     * Runs a Monte Carlo simulation for retirement success
     * Generates milestone projections
+    * Applies guardrails to user-supplied free-text preferences
     * Assembles a rich markdown task to be sent to the LLM
+    * Truncates the final task to a reasonable maximum length
 
     Parameters
     ----------
@@ -407,6 +493,7 @@ def create_agent(
         - ``years_until_retirement``
         - ``target_retirement_income``
         - ``current_age``
+        - Optional narrative fields such as ``retirement_goals``.
     db : Any, optional
         Optional database handle for future extensions. Not used in the
         current implementation.
@@ -417,7 +504,7 @@ def create_agent(
         A tuple containing:
         - The configured LiteLLM model wrapper
         - An empty tools list (no tool-calling required)
-        - The fully formatted markdown task string
+        - The fully formatted markdown task string (post-guardrail)
     """
     # Model configuration (Bedrock via LiteLLM)
     model_id = os.getenv(
@@ -433,6 +520,10 @@ def create_agent(
     years_until_retirement = int(user_preferences.get("years_until_retirement", 30))
     target_income = float(user_preferences.get("target_retirement_income", 80_000))
     current_age = int(user_preferences.get("current_age", 40))
+
+    # Optional narrative goal text (sanitised to avoid prompt injection)
+    raw_goals = str(user_preferences.get("retirement_goals", "") or "")
+    retirement_goals = sanitize_user_input(raw_goals) if raw_goals else ""
 
     # Portfolio metrics
     portfolio_value = calculate_portfolio_value(portfolio_data)
@@ -466,6 +557,10 @@ def create_agent(
         ]
     )
 
+    goals_section = ""
+    if retirement_goals:
+        goals_section = f"\n- Stated Retirement Goals: {retirement_goals}"
+
     task = f"""
 # Portfolio Analysis Context
 
@@ -474,7 +569,7 @@ def create_agent(
 - Asset Allocation: {allocation_summary or "No allocation data available"}
 - Years to Retirement: {years_until_retirement}
 - Target Annual Income: ${target_income:,.0f}
-- Current Age: {current_age}
+- Current Age: {current_age}{goals_section}
 
 ## Monte Carlo Simulation Results (500 scenarios)
 - Success Rate: {monte_carlo["success_rate"]}% (probability of sustaining retirement income for 30 years)
@@ -522,5 +617,8 @@ Your task: Analyse this retirement readiness data and provide a comprehensive re
 
 Provide your analysis in clear markdown format with specific numbers and actionable recommendations.
 """
+
+    # Final guardrail: ensure the task is not excessively long
+    task = truncate_response(task, max_length=50_000)
 
     return model, tools, task

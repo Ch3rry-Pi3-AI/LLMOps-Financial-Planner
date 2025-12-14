@@ -58,46 +58,8 @@ load_dotenv(override=True)
 
 # Configure root logger with INFO level for structured backend logging
 logging.basicConfig(level=logging.INFO)
-
 # Create module-level logger for this file
 logger = logging.getLogger(__name__)
-
-# Ensure the root logger is also set to INFO (important for Lambda / CloudWatch)
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-
-
-class StructuredLogger:
-    """
-    Helper for emitting structured JSON log entries for key application events.
-    """
-
-    @staticmethod
-    def log_event(
-        event_type: str,
-        user_id: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        """
-        Emit a structured log entry to the application logger.
-
-        Parameters
-        ----------
-        event_type : str
-            High-level name describing the event (e.g. 'ANALYSIS_TRIGGERED').
-        user_id : str, optional
-            Identifier of the user associated with the event, if applicable.
-        details : dict, optional
-            Additional contextual metadata to include in the log entry.
-        """
-        log_entry: Dict[str, Any] = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "event_type": event_type,
-            "user_id": user_id,
-            "details": details or {},
-        }
-        logger.info(json.dumps(log_entry))
-
 
 # =========================
 # FastAPI Application Setup
@@ -760,60 +722,32 @@ async def delete_account(
 async def list_positions(
     account_id: str, clerk_user_id: str = Depends(get_current_user_id)
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """
-    List all positions for a specific account owned by the current user.
-
-    Parameters
-    ----------
-    account_id : str
-        Identifier of the account whose positions should be returned.
-    clerk_user_id : str
-        Authenticated Clerk user identifier injected by dependency.
-
-    Returns
-    -------
-    dict
-        Dictionary with a single `positions` key containing enriched positions.
-
-    Raises
-    ------
-    fastapi.HTTPException
-        If the account is not found, ownership does not match,
-        or an internal error occurs.
-    """
     try:
-        # Retrieve the account record to ensure it exists
-        account: Optional[Dict[str, Any]] = db.accounts.find_by_id(account_id)
+        account = db.accounts.find_by_id(account_id)
         if not account:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+            raise HTTPException(404, "Account not found")
 
-        # Ensure the account belongs to the user making the request
         if account.get("clerk_user_id") != clerk_user_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+            raise HTTPException(403, "Not authorized")
 
-        # Fetch all positions associated with this account
-        positions: List[Dict[str, Any]] = db.positions.find_by_account(account_id)
+        positions = db.positions.find_by_account(account_id)
 
-        # Build a list of positions augmented with instrument metadata
-        formatted_positions: List[Dict[str, Any]] = []
+        formatted_positions = []
         for pos in positions:
-            # Look up instrument details to enrich the position for the frontend
-            instrument: Optional[Dict[str, Any]] = db.instruments.find_by_symbol(
-                pos["symbol"]
-            )
-            formatted_positions.append({**pos, "instrument": instrument})
+            # ✔ Use the repository method (it actually works)
+            instrument = db.instruments.find_by_symbol(pos["symbol"])
+
+            formatted_positions.append({
+                **pos,
+                "instrument": instrument,
+            })
 
         return {"positions": formatted_positions}
 
-    except HTTPException:
-        # Forward specific HTTP exceptions as is
-        raise
     except Exception as e:
-        # Log any unexpected error while listing positions
         logger.error("Error listing positions: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
-        ) from e
+        raise HTTPException(500, str(e))
+
 
 
 @app.post("/api/positions")
@@ -1118,16 +1052,6 @@ async def trigger_analysis(
         if not user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-        # Emit a structured log entry for the analysis trigger event
-        StructuredLogger.log_event(
-            "ANALYSIS_TRIGGERED",
-            user_id=clerk_user_id,
-            details={
-                "analysis_type": request.analysis_type,
-                "options": request.options,
-            },
-        )
-
         # Create a job record representing this analysis request
         job_id: str = db.jobs.create_job(
             clerk_user_id=clerk_user_id,
@@ -1414,7 +1338,6 @@ async def populate_test_data(
                         name=info["name"],
                         instrument_type=info["type"],
                         current_price=Decimal(str(info["current_price"])),
-
                         allocation_regions=info["allocation_regions"],
                         allocation_sectors=info["allocation_sectors"],
                         allocation_asset_class=info["allocation_asset_class"],
