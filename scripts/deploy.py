@@ -412,7 +412,7 @@ def upload_frontend(bucket_name: str, cloudfront_id: str) -> None:
             "--include",
             "*.html",
             "--content-type",
-            "text/html",
+            "text/html; charset=utf-8",
             "--cache-control",
             "max-age=0,no-cache,no-store,must-revalidate",
         ]
@@ -426,7 +426,7 @@ def upload_frontend(bucket_name: str, cloudfront_id: str) -> None:
             "--include",
             "*.css",
             "--content-type",
-            "text/css",
+            "text/css; charset=utf-8",
             "--cache-control",
             "max-age=31536000,public",
         ]
@@ -440,7 +440,7 @@ def upload_frontend(bucket_name: str, cloudfront_id: str) -> None:
             "--include",
             "*.js",
             "--content-type",
-            "application/javascript",
+            "application/javascript; charset=utf-8",
             "--cache-control",
             "max-age=31536000,public",
         ]
@@ -454,7 +454,7 @@ def upload_frontend(bucket_name: str, cloudfront_id: str) -> None:
             "--include",
             "*.json",
             "--content-type",
-            "application/json",
+            "application/json; charset=utf-8",
             "--cache-control",
             "max-age=31536000,public",
         ]
@@ -467,7 +467,7 @@ def upload_frontend(bucket_name: str, cloudfront_id: str) -> None:
         ("*.jpg", "image/jpeg"),
         ("*.jpeg", "image/jpeg"),
         ("*.gif", "image/gif"),
-        ("*.svg", "image/svg+xml"),
+        ("*.svg", "image/svg+xml; charset=utf-8"),
         ("*.ico", "image/x-icon"),
     ]:
         run_command(
@@ -491,6 +491,27 @@ def upload_frontend(bucket_name: str, cloudfront_id: str) -> None:
             "sync",
             f"{out_dir}/",
             f"s3://{bucket_name}/",
+            # Avoid overwriting the Content-Type metadata we explicitly set above.
+            "--exclude",
+            "*.html",
+            "--exclude",
+            "*.css",
+            "--exclude",
+            "*.js",
+            "--exclude",
+            "*.json",
+            "--exclude",
+            "*.png",
+            "--exclude",
+            "*.jpg",
+            "--exclude",
+            "*.jpeg",
+            "--exclude",
+            "*.gif",
+            "--exclude",
+            "*.svg",
+            "--exclude",
+            "*.ico",
             "--cache-control",
             "max-age=31536000,public",
         ]

@@ -67,6 +67,37 @@ Cleanly and safely **remove all deployed AWS infrastructure** — ideal for test
 **Primary role:**
 Provide a **zero-friction local development experience**, running backend and frontend together with unified logs.
 
+### `deploy_stacks.py` — **Part 4–8 Stack Orchestrator**
+
+Deploy each “part” with flags (mirrors the guides):
+* `uv run deploy_stacks.py --research` — Part 4 (App Runner researcher)
+* `uv run deploy_stacks.py --db` — Part 5 (Aurora)
+* `uv run deploy_stacks.py --migrate --seed` — migrations + seed instruments (Part 5)
+* `uv run deploy_stacks.py --db-testdata` — Part 5 (test API + reset_db --with-test-data + verify)
+* `uv run deploy_stacks.py --agents` — Part 6 (agents; runs `backend/deploy_all_lambdas.py`)
+* `uv run deploy_stacks.py --frontend` — Part 7 (calls `scripts/deploy.py`)
+* `uv run deploy_stacks.py --enterprise` — Part 8 (CloudWatch dashboards)
+
+Convenience:
+* `uv run deploy_stacks.py --core` — Parts 5–7 (db+migrate+seed+agents+frontend)
+* `uv run deploy_stacks.py --all` — Parts 4–8 (research + core + enterprise)
+
+Options:
+* `--yes` auto-approves Terraform applies where supported
+* `--package-agents` forces rebuilding all agent ZIPs (slower)
+* `--research-scheduler` enables the optional researcher EventBridge scheduler
+
+### `destroy_stacks.py` — **Part 4–8 Stack Teardown**
+
+Selective teardown (cost control) with safe defaults:
+* `uv run destroy_stacks.py --core` — destroys Parts 6–8 (keeps Aurora)
+* `uv run destroy_stacks.py --research` — destroys Part 4 (App Runner researcher)
+* `uv run destroy_stacks.py --db` — destroys Part 5 (Aurora) and deletes all data (explicit confirmation)
+* `uv run destroy_stacks.py --all` — destroys 4–8 (use `--db` if you also want to drop Aurora)
+
+Options:
+* `--yes` auto-approves Terraform destroys and auto-confirms the Part 7 destroy prompt
+
 
 
 ## 🎯 **How These Scripts Fit Into the System**

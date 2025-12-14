@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Dashboard Page
  *
  * This is the main landing page for logged-in users. It:
@@ -287,7 +287,7 @@ export default function Dashboard() {
    *
    * Aggregates across:
    *  - Cash balances in each account
-   *  - Position values (quantity × current price)
+   *  - Position values (quantity Ã— current price)
    *
    * and returns:
    *  - totalValue: total portfolio market value
@@ -773,7 +773,7 @@ export default function Dashboard() {
   return (
     <>
       <Head>
-        <title>Alex – Dashboard</title>
+        <title>Alex AI Financial Advisor - Dashboard</title>
       </Head>
 
       <Layout>
@@ -823,10 +823,7 @@ export default function Dashboard() {
                     Total Portfolio Value
                   </h2>
                   <p className="mt-2 text-2xl font-semibold text-dark">
-                    £{totalPortfolioValue.toLocaleString(undefined, {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}
+                    {formatCurrency(totalPortfolioValue)}
                   </p>
                   <p className="mt-1 text-xs text-gray-400">
                     Includes cash + market value of all positions
@@ -1101,3 +1098,4 @@ export default function Dashboard() {
     </>
   );
 }
+

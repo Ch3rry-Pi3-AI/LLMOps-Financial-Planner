@@ -17,6 +17,13 @@ import type { AppProps } from "next/app";
 import { ClerkProvider } from "@clerk/nextjs";  // Authentication/identity provider for all pages
 import { ToastContainer } from "@/components/Toast"; // Global toast/notification system
 import ErrorBoundary from "@/components/ErrorBoundary"; // Catches unhandled rendering errors
+import { Inter } from "next/font/google";
+
+const inter = Inter({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-inter",
+});
 
 /**
  * App
@@ -33,11 +40,13 @@ export default function App({ Component, pageProps }: AppProps) {
     <ErrorBoundary>
       {/* Provides user authentication/session context to the entire application */}
       <ClerkProvider {...pageProps}>
-        {/* Render the active page */}
-        <Component {...pageProps} />
+        <div className={inter.variable}>
+          {/* Render the active page */}
+          <Component {...pageProps} />
 
-        {/* Global toast notifications (accessible anywhere in the app) */}
-        <ToastContainer />
+          {/* Global toast notifications (accessible anywhere in the app) */}
+          <ToastContainer />
+        </div>
       </ClerkProvider>
     </ErrorBoundary>
   );
