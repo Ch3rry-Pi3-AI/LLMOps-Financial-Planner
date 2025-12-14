@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
+﻿/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * Analysis Page
  *
@@ -17,6 +17,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
 import { useAuth } from "@clerk/nextjs";
 import ReactMarkdown from "react-markdown";
+import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import {
@@ -112,6 +113,17 @@ const formatCurrencyGBP = (value: number): string =>
     maximumFractionDigits: 2,
   }).format(value);
 
+const formatCurrencyGBPCompact = (value: number): string =>
+  new Intl.NumberFormat("en-GB", {
+    style: "currency",
+    currency: "GBP",
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
+
+const truncateLabel = (value: string, max = 14): string =>
+  value.length > max ? `${value.slice(0, Math.max(0, max - 1))}…` : value;
+
 /**
  * Convert keys like "fixed_income" or "cash" into "Fixed Income" / "Cash".
  */
@@ -121,7 +133,105 @@ const formatLabelName = (name: string): string =>
     .split(" ")
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
+  .join(" ");
+
+/**
+ * Shared Markdown renderer styles.
+ *
+ * Keeps Overview + Retirement tabs visually consistent.
+ */
+const MARKDOWN_COMPONENTS: Components = {
+  h1: ({ children, ...props }) => (
+    <h1
+      {...props}
+      className="text-3xl font-bold mb-4 text-gray-900 border-b border-gray-300/40 pb-2"
+    >
+      {children}
+    </h1>
+  ),
+  h2: ({ children, ...props }) => (
+    <h2
+      {...props}
+      className="text-2xl font-semibold mb-3 text-gray-800 mt-6 border-b border-gray-200/40 pb-2"
+    >
+      {children}
+    </h2>
+  ),
+  h3: ({ children, ...props }) => (
+    <h3 {...props} className="text-xl font-medium mb-2 text-gray-700 mt-4">
+      {children}
+    </h3>
+  ),
+  ul: ({ children, ...props }) => (
+    <ul {...props} className="list-disc ml-6 mb-4 space-y-1">
+      {children}
+    </ul>
+  ),
+  ol: ({ children, ...props }) => (
+    <ol {...props} className="list-decimal ml-6 mb-4 space-y-1">
+      {children}
+    </ol>
+  ),
+  li: ({ children, ...props }) => (
+    <li {...props} className="text-gray-700">
+      {children}
+    </li>
+  ),
+  p: ({ children, ...props }) => (
+    <p {...props} className="mb-4 text-gray-700 leading-relaxed">
+      {children}
+    </p>
+  ),
+  table: ({ children, ...props }) => (
+    <div className="overflow-x-auto mb-6">
+      <table {...props} className="w-full border-collapse">
+        {children}
+      </table>
+    </div>
+  ),
+  thead: ({ children, ...props }) => (
+    <thead {...props} className="bg-gray-100">
+      {children}
+    </thead>
+  ),
+  th: ({ children, ...props }) => (
+    <th
+      {...props}
+      className="p-3 text-left font-semibold border border-gray-300"
+    >
+      {children}
+    </th>
+  ),
+  td: ({ children, ...props }) => (
+    <td {...props} className="p-3 border border-gray-300">
+      {children}
+    </td>
+  ),
+  strong: ({ children, ...props }) => (
+    <strong {...props} className="font-semibold text-gray-900">
+      {children}
+    </strong>
+  ),
+  blockquote: ({ children, ...props }) => (
+    <blockquote
+      {...props}
+      className="border-l-4 border-primary pl-4 my-4 italic text-gray-600"
+    >
+      {children}
+    </blockquote>
+  ),
+};
+
+const MarkdownPanel = ({ content }: { content: string }) => (
+  <div className="prose prose-lg max-w-none">
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm, remarkBreaks]}
+      components={MARKDOWN_COMPONENTS}
+    >
+      {content}
+    </ReactMarkdown>
+  </div>
+);
 
 /**
  * Analysis
@@ -228,7 +338,7 @@ export default function Analysis() {
       // Explicit job_id provided in query
       loadJob(job_id as string);
     } else if (router.isReady) {
-      // Router is ready but no job_id – fetch the latest completed analysis
+      // Router is ready but no job_id â€“ fetch the latest completed analysis
       loadLatestJob();
     }
   }, [job_id, router.isReady, getToken, router]);
@@ -390,70 +500,7 @@ export default function Analysis() {
       );
     }
 
-    return (
-      <div className="prose prose-lg max-w-none">
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm, remarkBreaks]}
-          components={{
-            h1: ({ children }) => (
-              <h1 className="text-3xl font-bold mb-4 text-gray-900">
-                {children}
-              </h1>
-            ),
-            h2: ({ children }) => (
-              <h2 className="text-2xl font-semibold mb-3 text-gray-800 mt-6">
-                {children}
-              </h2>
-            ),
-            h3: ({ children }) => (
-              <h3 className="text-xl font-medium mb-2 text-gray-700 mt-4">
-                {children}
-              </h3>
-            ),
-            ul: ({ children }) => (
-              <ul className="list-disc ml-6 mb-4 space-y-1">{children}</ul>
-            ),
-            ol: ({ children }) => (
-              <ol className="list-decimal ml-6 mb-4 space-y-1">{children}</ol>
-            ),
-            li: ({ children }) => (
-              <li className="text-gray-700">{children}</li>
-            ),
-            p: ({ children }) => (
-              <p className="mb-4 text-gray-700 leading-relaxed">{children}</p>
-            ),
-            table: ({ children }) => (
-              <div className="overflow-x-auto mb-6">
-                <table className="w-full border-collapse">{children}</table>
-              </div>
-            ),
-            thead: ({ children }) => (
-              <thead className="bg-gray-100">{children}</thead>
-            ),
-            th: ({ children }) => (
-              <th className="p-3 text-left font-semibold border border-gray-300">
-                {children}
-              </th>
-            ),
-            td: ({ children }) => (
-              <td className="p-3 border border-gray-300">{children}</td>
-            ),
-            strong: ({ children }) => (
-              <strong className="font-semibold text-gray-900">
-                {children}
-              </strong>
-            ),
-            blockquote: ({ children }) => (
-              <blockquote className="border-l-4 border-primary pl-4 my-4 italic text-gray-600">
-                {children}
-              </blockquote>
-            ),
-          }}
-        >
-          {report}
-        </ReactMarkdown>
-      </div>
-    );
+    return <MarkdownPanel content={report} />;
   };
 
   /**
@@ -515,25 +562,48 @@ export default function Analysis() {
       return "bar";
     };
 
-    const chartEntries = Object.entries(chartsPayload);
+    const chartItems = Object.entries(chartsPayload)
+      .map(([key, chartData]) => {
+        if (!chartData?.data || chartData.data.length === 0) return null;
+
+        const chartType = getChartType(chartData);
+        const title = chartData.title || formatTitle(key);
+        const isBar = chartType === "bar" || chartType === "horizontalBar";
+
+        return { key, chartData, chartType, title, isBar };
+      })
+      .filter(Boolean) as Array<{
+      key: string;
+      chartData: any;
+      chartType: "pie" | "donut" | "bar" | "horizontalBar" | "line";
+      title: string;
+      isBar: boolean;
+    }>;
+
+    const barCharts = chartItems.filter((item) => item.isBar);
+    const otherCharts = chartItems.filter((item) => !item.isBar);
+
+    const orderedCharts = [
+      ...barCharts.slice(0, 1),
+      ...otherCharts,
+      ...barCharts.slice(1),
+    ];
 
     return (
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        {chartEntries.map(([key, chartData]: [string, any]) => {
-          if (!chartData?.data || chartData.data.length === 0) return null;
-
-          const chartType = getChartType(chartData);
-          const title = chartData.title || formatTitle(key);
-
+        {orderedCharts.map(({ key, chartData, chartType, title, isBar }) => {
+          const plotHeight = isBar ? 320 : 300;
           return (
             <div
               key={key}
-              className="bg-white rounded-lg p-6 border border-gray-200"
+              className={`bg-white rounded-lg p-6 border border-gray-200 ${
+                isBar ? "lg:col-span-2" : ""
+              }`}
             >
               <h3 className="text-xl font-semibold mb-4 text-gray-800">
                 {title}
               </h3>
-              <ResponsiveContainer width="100%" height={300}>
+              <ResponsiveContainer width="100%" height={plotHeight}>
                 {chartType === "pie" || chartType === "donut" ? (
                   <PieChart>
                     <Pie
@@ -541,12 +611,7 @@ export default function Analysis() {
                       cx="50%"
                       cy="50%"
                       labelLine={false}
-                      label={(props: any) => {
-                        const { name, value, percent } = props;
-                        return `${formatLabelName(String(name))}: ${formatCurrencyGBP(
-                          Number(value),
-                        )} (${(percent * 100).toFixed(1)}%)`;
-                      }}
+                      label={false}
                       outerRadius={100}
                       innerRadius={chartType === "donut" ? 60 : 0}
                       fill="#8884d8"
@@ -573,7 +638,7 @@ export default function Analysis() {
                 ) : chartType === "horizontalBar" ? (
                   <BarChart
                     data={chartData.data}
-                    margin={{ left: 10, right: 30, top: 5, bottom: 60 }}
+                    margin={{ left: 24, right: 16, top: 5, bottom: 60 }}
                   >
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis
@@ -581,12 +646,18 @@ export default function Analysis() {
                       angle={-45}
                       textAnchor="end"
                       interval={0}
-                      height={60}
+                      height={70}
+                      tick={{ fontSize: 12 }}
+                      tickFormatter={(value) =>
+                        truncateLabel(formatLabelName(String(value)), 12)
+                      }
                     />
                     <YAxis
+                      width={72}
                       tickFormatter={(value) =>
-                        formatCurrencyGBP(Number(value))
+                        formatCurrencyGBPCompact(Number(value))
                       }
+                      tick={{ fontSize: 12 }}
                     />
                     <Tooltip
                       formatter={(value: number | string) =>
@@ -608,18 +679,28 @@ export default function Analysis() {
                     </Bar>
                   </BarChart>
                 ) : chartType === "bar" ? (
-                  <BarChart data={chartData.data}>
+                  <BarChart
+                    data={chartData.data}
+                    margin={{ left: 24, right: 16, top: 5, bottom: 70 }}
+                  >
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis
                       dataKey="name"
                       angle={-45}
                       textAnchor="end"
+                      interval={0}
                       height={80}
+                      tick={{ fontSize: 12 }}
+                      tickFormatter={(value) =>
+                        truncateLabel(formatLabelName(String(value)), 12)
+                      }
                     />
                     <YAxis
+                      width={72}
                       tickFormatter={(value) =>
-                        formatCurrencyGBP(Number(value))
+                        formatCurrencyGBPCompact(Number(value))
                       }
+                      tick={{ fontSize: 12 }}
                     />
                     <Tooltip
                       formatter={(value: number | string) =>
@@ -637,13 +718,18 @@ export default function Analysis() {
                     />
                   </BarChart>
                 ) : (
-                  <LineChart data={chartData.data}>
+                  <LineChart
+                    data={chartData.data}
+                    margin={{ left: 24, right: 16, top: 5, bottom: 20 }}
+                  >
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey={chartData.xKey || "year"} />
                     <YAxis
+                      width={72}
                       tickFormatter={(value) =>
-                        formatCurrencyGBP(Number(value))
+                        formatCurrencyGBPCompact(Number(value))
                       }
+                      tick={{ fontSize: 12 }}
                     />
                     <Tooltip
                       formatter={(value: number | string) =>
@@ -665,29 +751,43 @@ export default function Analysis() {
                 )}
               </ResponsiveContainer>
 
-              {/* Simple legend for large pie/donut charts */}
-              {(chartType === "pie" || chartType === "donut") &&
-                chartData.data.length > 6 && (
-                  <div className="mt-4 grid grid-cols-2 gap-2">
-                    {chartData.data.map((entry: any, idx: number) => (
-                      <div
-                        key={entry.name}
-                        className="flex items-center text-sm"
-                      >
+              {/* Legend for pie/donut charts (kept consistent; slice labels are disabled) */}
+              {(chartType === "pie" || chartType === "donut") && (
+                <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {(() => {
+                    const total = chartData.data.reduce(
+                      (sum: number, item: any) => sum + Number(item.value || 0),
+                      0,
+                    );
+                    return chartData.data.map((entry: any, idx: number) => {
+                      const value = Number(entry.value || 0);
+                      const pct = total > 0 ? (value / total) * 100 : 0;
+                      return (
                         <div
-                          className="w-3 h-3 rounded-full mr-2"
-                          style={{
-                            backgroundColor:
-                              entry.color || COLORS[idx % COLORS.length],
-                          }}
-                        />
-                        <span className="text-gray-600">
-                          {formatLabelName(String(entry.name))}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                          key={String(entry.name)}
+                          className="flex items-center justify-between gap-3 text-sm"
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div
+                              className="w-3 h-3 rounded-full flex-none"
+                              style={{
+                                backgroundColor:
+                                  entry.color || COLORS[idx % COLORS.length],
+                              }}
+                            />
+                            <span className="text-gray-700 truncate">
+                              {formatLabelName(String(entry.name))}
+                            </span>
+                          </div>
+                          <span className="text-gray-500 flex-none">
+                            {pct.toFixed(1)}%
+                          </span>
+                        </div>
+                      );
+                    });
+                  })()}
+                </div>
+              )}
             </div>
           );
         })}
@@ -717,43 +817,7 @@ export default function Analysis() {
       <div className="space-y-8">
         {retirementAnalysis && (
           <div className="bg-ai-accent/10 border border-ai-accent/20 rounded-lg p-6">
-            <div className="prose prose-lg max-w-none">
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm, remarkBreaks]}
-                components={{
-                  h2: ({ children }) => (
-                    <h2 className="text-2xl font-semibold mb-3 text-gray-800">
-                      {children}
-                    </h2>
-                  ),
-                  h3: ({ children }) => (
-                    <h3 className="text-xl font-medium mb-2 text-gray-700">
-                      {children}
-                    </h3>
-                  ),
-                  p: ({ children }) => (
-                    <p className="text-gray-700 leading-relaxed mb-4">
-                      {children}
-                    </p>
-                  ),
-                  strong: ({ children }) => (
-                    <strong className="font-semibold text-gray-900">
-                      {children}
-                    </strong>
-                  ),
-                  ul: ({ children }) => (
-                    <ul className="list-disc ml-6 mt-2 space-y-1">
-                      {children}
-                    </ul>
-                  ),
-                  li: ({ children }) => (
-                    <li className="text-gray-700">{children}</li>
-                  ),
-                }}
-              >
-                {retirementAnalysis}
-              </ReactMarkdown>
-            </div>
+            <MarkdownPanel content={retirementAnalysis} />
           </div>
         )}
       </div>
@@ -801,7 +865,7 @@ export default function Analysis() {
                         : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
                     }`}
                   >
-                    📊 Overview
+                    Overview
                   </button>
                   <button
                     onClick={() => setActiveTab("charts")}
@@ -811,7 +875,7 @@ export default function Analysis() {
                         : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
                     }`}
                   >
-                    📈 Charts
+                    Charts
                   </button>
                   <button
                     onClick={() => setActiveTab("retirement")}
@@ -821,7 +885,7 @@ export default function Analysis() {
                         : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
                     }`}
                   >
-                    🎯 Retirement Projection
+                    Retirement Projection
                   </button>
                 </nav>
               </div>

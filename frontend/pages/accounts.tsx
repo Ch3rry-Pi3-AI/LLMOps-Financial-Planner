@@ -21,6 +21,18 @@ import { API_URL } from "../lib/config";
 import { SkeletonTable } from "../components/Skeleton";
 import Head from "next/head";
 
+const formatCurrencyGBP = (
+  value: number,
+  options: Intl.NumberFormatOptions = {},
+): string =>
+  new Intl.NumberFormat("en-GB", {
+    style: "currency",
+    currency: "GBP",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+    ...options,
+  }).format(value);
+
 /**
  * Position
  *
@@ -474,11 +486,7 @@ export default function Accounts() {
                     <div>
                       <p className="text-sm text-gray-600">Total Portfolio Value</p>
                       <p className="text-2xl font-bold text-primary">
-                        $
-                        {calculatePortfolioTotal().toLocaleString("en-US", {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}
+                        {formatCurrencyGBP(calculatePortfolioTotal())}
                       </p>
                     </div>
                     <div>
@@ -561,8 +569,7 @@ export default function Accounts() {
                                 </p>
                                 {positionsValue > 0 && (
                                   <p className="text-xs text-gray-500">
-                                    $
-                                    {positionsValue.toLocaleString("en-US", {
+                                    {formatCurrencyGBP(positionsValue, {
                                       minimumFractionDigits: 0,
                                       maximumFractionDigits: 0,
                                     })}
@@ -573,21 +580,13 @@ export default function Accounts() {
 
                             {/* Cash balance */}
                             <td className="py-4 px-4 text-right">
-                              $
-                              {Number(account.cash_balance).toLocaleString("en-US", {
-                                minimumFractionDigits: 2,
-                                maximumFractionDigits: 2,
-                              })}
+                              {formatCurrencyGBP(Number(account.cash_balance))}
                             </td>
 
                             {/* Total account value */}
                             <td className="py-4 px-4 text-right">
                               <p className="font-semibold text-primary">
-                                $
-                                {calculateAccountTotal(account).toLocaleString("en-US", {
-                                  minimumFractionDigits: 2,
-                                  maximumFractionDigits: 2,
-                                })}
+                                {formatCurrencyGBP(calculateAccountTotal(account))}
                               </p>
                             </td>
 
@@ -701,7 +700,7 @@ export default function Accounts() {
                     </label>
                     <div className="relative">
                       <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">
-                        $
+                        £
                       </span>
                       <input
                         type="text"

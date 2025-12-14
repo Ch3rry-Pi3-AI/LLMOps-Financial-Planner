@@ -16,8 +16,29 @@
    - Keep these neutral so they work across all pages.
    -------------------------------------------------------------------------- */
 :root {
+  /* Dark theme by default (NeetCode-inspired) */
+  color-scheme: dark;
+  --background: #202225;
+  --foreground: #e1e1e1;
+  --surface: #2f3136;
+  --surface-2: #13181c;
+  --border: #3a3a3a;
+  --muted: #c3c3c3;
+  --muted-2: #888888;
+  --focus-ring: #627eff;
+}
+
+/* Optional: light mode hook for future toggles (set `class="light-theme"` on <html>) */
+.light-theme {
+  color-scheme: light;
   --background: #ffffff;
   --foreground: #171717;
+  --surface: #ffffff;
+  --surface-2: #f3f4f6;
+  --border: #e5e7eb;
+  --muted: #4b5563;
+  --muted-2: #6b7280;
+  --focus-ring: #209dd7;
 }
 
 /* --------------------------------------------------------------------------
@@ -27,29 +48,104 @@
    -------------------------------------------------------------------------- */
 @theme inline {
   /* Brand colour palette for Alex AI Financial Advisor */
-  --color-primary: #209DD7;        /* Main primary blue for key actions / highlights */
-  --color-ai-accent: #753991;      /* Purple accent used for AI / agent-related elements */
-  --color-accent: #FFB707;         /* Yellow / gold accent for callouts and KPIs */
-  --color-dark: #062147;           /* Dark navy for headings, navbars, and footers */
+  --color-primary: #627eff;        /* NeetCode-like blue-violet */
+  --color-ai-accent: #7c5cff;      /* Purple accent used for AI / agent-related elements */
+  --color-accent: #fbbf24;         /* Gold accent for callouts and KPIs */
+  --color-dark: #e5e7eb;           /* High-contrast heading text on dark */
   --color-success: #10b981;        /* Green for success states and positive metrics */
-  --color-error: #ef4444;          /* Red for error states and destructive actions */
-  
-  /* Preserve / forward base tokens into the Tailwind theme */
+  --color-error: #ff5b5b;          /* Error red tuned for dark */
+
+  /* Semantic surfaces */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);   /* Main UI font */
-  --font-mono: var(--font-geist-mono);   /* Code / numeric font */
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-muted: var(--muted);
+  --color-muted-2: var(--muted-2);
+  --color-focus-ring: var(--focus-ring);
+  
+  /* Fonts (set by `next/font` in `_app.tsx`) */
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji",
+    "Segoe UI Emoji", "Segoe UI Symbol";
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
 }
 
 /* --------------------------------------------------------------------------
    Global Body Styles
-   - Light mode only, by design, for a clean enterprise dashboard feel.
-   - No dark mode toggling or colour scheme switching here.
+   - Dark-first styling for a modern "fintech" dashboard look.
    -------------------------------------------------------------------------- */
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
+}
+
+/* Compatibility mappings so existing light-mode Tailwind utilities render well in dark mode. */
+html:not(.light-theme) .bg-white {
+  background-color: var(--surface) !important;
+}
+
+html:not(.light-theme) .bg-gray-50 {
+  background-color: var(--background) !important;
+}
+
+html:not(.light-theme) .bg-gray-900 {
+  background-color: var(--surface-2) !important;
+}
+
+html:not(.light-theme) .border-gray-200,
+html:not(.light-theme) .border-gray-300 {
+  border-color: var(--border) !important;
+}
+
+html:not(.light-theme) .text-gray-900,
+html:not(.light-theme) .text-gray-800,
+html:not(.light-theme) .text-gray-700 {
+  color: var(--foreground) !important;
+}
+
+html:not(.light-theme) .text-gray-600,
+html:not(.light-theme) .text-gray-500 {
+  color: var(--muted) !important;
+}
+
+html:not(.light-theme) .text-gray-400,
+html:not(.light-theme) .text-gray-300 {
+  color: var(--muted-2) !important;
+}
+
+html:not(.light-theme) .bg-yellow-50 {
+  background-color: rgba(251, 191, 36, 0.08) !important;
+}
+
+/* Hover background utilities used in tables/cards */
+html:not(.light-theme) .hover\:bg-gray-50:hover {
+  background-color: rgba(255, 255, 255, 0.06) !important;
+}
+
+html:not(.light-theme) .hover\:bg-gray-100:hover {
+  background-color: rgba(255, 255, 255, 0.09) !important;
+}
+
+/* Form defaults so inputs don't render white in dark mode */
+input,
+textarea,
+select {
+  background-color: var(--surface);
+  color: var(--foreground);
+  border-color: var(--border);
+}
+
+::placeholder {
+  color: var(--muted-2);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 /* ==========================================================================

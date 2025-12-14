@@ -20,6 +20,18 @@ import Layout from "../../components/Layout";
 import ConfirmModal from "../../components/ConfirmModal";
 import { API_URL } from "../../lib/config";
 
+const formatCurrencyGBP = (
+  value: number,
+  options: Intl.NumberFormatOptions = {},
+): string =>
+  new Intl.NumberFormat("en-GB", {
+    style: "currency",
+    currency: "GBP",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+    ...options,
+  }).format(value);
+
 interface Instrument {
   symbol: string;
   name: string;
@@ -120,7 +132,7 @@ export default function AccountDetail() {
             setEditedAccount({
               name: foundAccount.account_name,
               purpose: foundAccount.account_purpose,
-              cash_balance: Number(foundAccount.cash_balance).toLocaleString("en-US"),
+              cash_balance: Number(foundAccount.cash_balance).toLocaleString("en-GB"),
             });
           } else {
             setMessage({ type: "error", text: "Account not found" });
@@ -479,7 +491,7 @@ export default function AccountDetail() {
                     </label>
                     <div className="relative">
                       <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">
-                        $
+                        £
                       </span>
                       <input
                         type="text"
@@ -511,7 +523,7 @@ export default function AccountDetail() {
                           purpose: account.account_purpose,
                           cash_balance: Number(
                             account.cash_balance
-                          ).toLocaleString("en-US"),
+                          ).toLocaleString("en-GB"),
                         });
                       }}
                       className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-4 py-2 rounded-lg transition-colors"
@@ -572,31 +584,19 @@ export default function AccountDetail() {
             <div>
               <p className="text-sm text-gray-600">Cash Balance</p>
               <p className="text-lg font-semibold">
-                $
-                {Number(account.cash_balance).toLocaleString("en-US", {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
-                })}
+                {formatCurrencyGBP(Number(account.cash_balance))}
               </p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Positions Value</p>
               <p className="text-lg font-semibold">
-                $
-                {calculatePositionsValue().toLocaleString("en-US", {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
-                })}
+                {formatCurrencyGBP(calculatePositionsValue())}
               </p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Total Value</p>
               <p className="text-lg font-semibold text-primary">
-                $
-                {calculateTotalValue().toLocaleString("en-US", {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
-                })}
+                {formatCurrencyGBP(calculateTotalValue())}
               </p>
             </div>
             <div>
@@ -692,23 +692,17 @@ export default function AccountDetail() {
 
                       {/* Latest price */}
                       <td className="py-4 px-4 text-right">
-                        $
-                        {position.current_price?.toLocaleString("en-US", {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        }) || "N/A"}
+                        {position.current_price !== undefined
+                          ? formatCurrencyGBP(position.current_price)
+                          : "N/A"}
                       </td>
 
                       {/* Position market value */}
                       <td className="py-4 px-4 text-right font-semibold">
-                        $
-                        {(
+                        {formatCurrencyGBP(
                           (position.current_price || 0) *
-                          Number(position.quantity)
-                        ).toLocaleString("en-US", {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}
+                            Number(position.quantity),
+                        )}
                       </td>
 
                       {/* Action buttons: edit / delete or save / cancel */}

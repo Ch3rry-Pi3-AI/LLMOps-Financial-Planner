@@ -39,67 +39,64 @@ export default function Layout({ children }: LayoutProps) {
   return (
     <Protect
       fallback={
-        <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="min-h-screen flex items-center justify-center bg-background">
           <div className="text-center">
-            <p className="text-gray-600">Redirecting to sign in...</p>
+            <p className="text-muted">Redirecting to sign in...</p>
           </div>
         </div>
       }
     >
-      <div className="min-h-screen bg-gray-50 flex flex-col">
+      <div className="min-h-screen bg-background flex flex-col">
         {/* Top navigation bar */}
-        <nav className="bg-white shadow-sm border-b">
+        <nav className="bg-surface border-b border-border">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="flex justify-between items-center h-16">
               {/* Logo / brand and primary navigation */}
               <div className="flex items-center gap-8">
                 <Link href="/dashboard" className="flex items-center">
-                  <h1 className="text-xl font-bold text-dark">
-                    Alex{" "}
-                    <span className="text-primary">
-                      AI Financial Advisor
-                    </span>
+                  <h1 className="text-xl font-bold text-foreground tracking-tight">
+                    Alex <span className="text-primary">AI Financial Advisor</span>
                   </h1>
                 </Link>
 
                 {/* Desktop navigation links */}
-                <div className="hidden md:flex items-center gap-6">
+                <div className="hidden md:flex items-center gap-2 rounded-full bg-surface-2 p-1 border border-border">
                   <Link
                     href="/dashboard"
-                    className={`text-sm font-medium transition-colors ${
+                    className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
                       isActive("/dashboard")
-                        ? "text-primary"
-                        : "text-gray-600 hover:text-primary"
+                        ? "bg-surface text-foreground shadow-sm"
+                        : "text-muted hover:text-foreground hover:bg-surface/60"
                     }`}
                   >
                     Dashboard
                   </Link>
                   <Link
                     href="/accounts"
-                    className={`text-sm font-medium transition-colors ${
+                    className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
                       isActive("/accounts")
-                        ? "text-primary"
-                        : "text-gray-600 hover:text-primary"
+                        ? "bg-surface text-foreground shadow-sm"
+                        : "text-muted hover:text-foreground hover:bg-surface/60"
                     }`}
                   >
                     Accounts
                   </Link>
                   <Link
                     href="/advisor-team"
-                    className={`text-sm font-medium transition-colors ${
+                    className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
                       isActive("/advisor-team")
-                        ? "text-primary"
-                        : "text-gray-600 hover:text-primary"
+                        ? "bg-surface text-foreground shadow-sm"
+                        : "text-muted hover:text-foreground hover:bg-surface/60"
                     }`}
                   >
                     Advisor Team
                   </Link>
                   <Link
                     href="/analysis"
-                    className={`text-sm font-medium transition-colors ${
+                    className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
                       isActive("/analysis")
-                        ? "text-primary"
-                        : "text-gray-600 hover:text-primary"
+                        ? "bg-surface text-foreground shadow-sm"
+                        : "text-muted hover:text-foreground hover:bg-surface/60"
                     }`}
                   >
                     Analysis
@@ -109,7 +106,7 @@ export default function Layout({ children }: LayoutProps) {
 
               {/* User identity and account dropdown (Clerk) */}
               <div className="flex items-center gap-4">
-                <span className="hidden sm:inline text-sm text-gray-600">
+                <span className="hidden sm:inline text-sm text-muted">
                   {user?.firstName || user?.emailAddresses[0]?.emailAddress}
                 </span>
                 <UserButton afterSignOutUrl="/" />
@@ -117,43 +114,43 @@ export default function Layout({ children }: LayoutProps) {
             </div>
 
             {/* Mobile navigation links (stacked under the main nav bar) */}
-            <div className="md:hidden flex items-center gap-4 pb-3">
+            <div className="md:hidden flex items-center gap-2 pb-3 rounded-full bg-surface-2 p-1 border border-border w-fit">
               <Link
                 href="/dashboard"
-                className={`text-sm font-medium transition-colors ${
+                className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
                   isActive("/dashboard")
-                    ? "text-primary"
-                    : "text-gray-600 hover:text-primary"
+                    ? "bg-surface text-foreground shadow-sm"
+                    : "text-muted hover:text-foreground hover:bg-surface/60"
                 }`}
               >
                 Dashboard
               </Link>
               <Link
                 href="/accounts"
-                className={`text-sm font-medium transition-colors ${
+                className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
                   isActive("/accounts")
-                    ? "text-primary"
-                    : "text-gray-600 hover:text-primary"
+                    ? "bg-surface text-foreground shadow-sm"
+                    : "text-muted hover:text-foreground hover:bg-surface/60"
                 }`}
               >
                 Accounts
               </Link>
               <Link
                 href="/advisor-team"
-                className={`text-sm font-medium transition-colors ${
+                className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
                   isActive("/advisor-team")
-                    ? "text-primary"
-                    : "text-gray-600 hover:text-primary"
+                    ? "bg-surface text-foreground shadow-sm"
+                    : "text-muted hover:text-foreground hover:bg-surface/60"
                 }`}
               >
                 Advisor Team
               </Link>
               <Link
                 href="/analysis"
-                className={`text-sm font-medium transition-colors ${
+                className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
                   isActive("/analysis")
-                    ? "text-primary"
-                    : "text-gray-600 hover:text-primary"
+                    ? "bg-surface text-foreground shadow-sm"
+                    : "text-muted hover:text-foreground hover:bg-surface/60"
                 }`}
               >
                 Analysis
@@ -168,21 +165,21 @@ export default function Layout({ children }: LayoutProps) {
         </main>
 
         {/* Persistent disclaimer footer */}
-        <footer className="bg-white border-t mt-auto">
+        <footer className="bg-surface border-t border-border mt-auto">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-              <p className="text-sm text-gray-700 font-medium mb-2">
+            <div className="bg-surface-2 border border-border rounded-lg p-4">
+              <p className="text-sm text-foreground font-medium mb-2">
                 Important Disclaimer
               </p>
-              <p className="text-xs text-gray-600">
+              <p className="text-xs text-muted">
                 This AI-generated advice has not been vetted by a qualified
                 financial advisor and should not be used for trading decisions.
                 For informational purposes only. Always consult with a licensed
                 financial professional before making investment decisions.
               </p>
             </div>
-            <div className="mt-4 pt-4 border-t border-gray-200">
-              <p className="text-xs text-gray-500 text-center">
+            <div className="mt-4 pt-4 border-t border-border">
+              <p className="text-xs text-muted-2 text-center">
                 © 2025 Alex AI Financial Advisor. Powered by AI agents and built
                 with care.
               </p>

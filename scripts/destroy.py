@@ -25,9 +25,11 @@ uv run destroy.py
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Sequence, Union
 
@@ -205,20 +207,84 @@ def empty_s3_bucket(bucket_name: str | None) -> None:
     # Note: This relies on the original shell-based pattern and may be a no-op
     # in some environments; errors are ignored.
     print("  🔨 Deleting all object versions (if versioning is enabled)...")
-    run_command(
-        [
+    # Note: version deletion requires enumerating object versions and delete
+    # markers. Avoid shell-specific patterns (e.g. bash $() substitution) so this
+    # works in PowerShell and CI environments.
+    key_marker: str | None = None
+    version_id_marker: str | None = None
+
+    while True:
+        list_cmd: list[str] = [
             "aws",
             "s3api",
-            "delete-objects",
+            "list-object-versions",
             "--bucket",
             bucket_name,
-            "--delete",
-            "$(aws s3api list-object-versions --bucket "
-            + bucket_name
-            + " --output json --query='{Objects: Versions[].{Key:Key,VersionId:VersionId}}')",
-        ],
-        check=False,
-    )
+            "--output",
+            "json",
+        ]
+        if key_marker:
+            list_cmd.extend(["--key-marker", key_marker])
+        if version_id_marker:
+            list_cmd.extend(["--version-id-marker", version_id_marker])
+
+        raw = run_command(list_cmd, capture_output=True, check=False)
+        if not raw:
+            break
+
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            break
+
+        objects: list[dict] = []
+        for item in payload.get("Versions", []) or []:
+            key = item.get("Key")
+            version_id = item.get("VersionId")
+            if key and version_id:
+                objects.append({"Key": key, "VersionId": version_id})
+
+        for item in payload.get("DeleteMarkers", []) or []:
+            key = item.get("Key")
+            version_id = item.get("VersionId")
+            if key and version_id:
+                objects.append({"Key": key, "VersionId": version_id})
+
+        if objects:
+            delete_payload = {"Objects": objects, "Quiet": True}
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".json",
+                delete=False,
+                encoding="utf-8",
+            ) as tmp:
+                json.dump(delete_payload, tmp)
+                tmp_path = tmp.name
+
+            try:
+                run_command(
+                    [
+                        "aws",
+                        "s3api",
+                        "delete-objects",
+                        "--bucket",
+                        bucket_name,
+                        "--delete",
+                        f"file://{tmp_path}",
+                    ],
+                    check=False,
+                )
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+        if not payload.get("IsTruncated"):
+            break
+
+        key_marker = payload.get("NextKeyMarker")
+        version_id_marker = payload.get("NextVersionIdMarker")
 
     print(f"  ✅ Bucket {bucket_name} emptied (or already clean)")
 
