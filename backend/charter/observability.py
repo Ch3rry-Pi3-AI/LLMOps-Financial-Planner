@@ -14,10 +14,12 @@ The context manager is intentionally minimal and safe to import in Lambda
 environments where LangFuse may be optional or disabled.
 """
 
+from __future__ import annotations
+
 import os
 import logging
 from contextlib import contextmanager
-from typing import Optional
+from typing import Any, Optional
 
 # =========================
 # Logging Setup
