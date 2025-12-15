@@ -51,8 +51,15 @@ from agents.extensions.models.litellm_model import LitellmModel
 
 logger = logging.getLogger(__name__)
 
-# Shared Lambda client for all downstream invocations
-lambda_client = boto3.client("lambda")
+# Shared Lambda client for all downstream invocations.
+# In CI/offline contexts, boto3 can raise `NoRegionError` if no default region is set.
+_lambda_region = (
+    os.getenv("AWS_REGION")
+    or os.getenv("AWS_DEFAULT_REGION")
+    or os.getenv("DEFAULT_AWS_REGION")
+    or "us-east-1"
+)
+lambda_client = boto3.client("lambda", region_name=_lambda_region)
 
 # Lambda function names from environment
 TAGGER_FUNCTION = os.getenv("TAGGER_FUNCTION", "alex-tagger")
