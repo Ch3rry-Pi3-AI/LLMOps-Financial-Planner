@@ -6,6 +6,7 @@
  */
 
 import { showToast } from "../components/Toast";
+import { API_URL } from "./config";
 
 /**
  * Base URL for all API requests.
@@ -14,8 +15,7 @@ import { showToast } from "../components/Toast";
  * via the `NEXT_PUBLIC_API_URL` environment variable.
  * Falls back to a local development server if not set.
  */
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE_URL = API_URL;
 
 /**
  * Representation of a user in the Alex AI system.

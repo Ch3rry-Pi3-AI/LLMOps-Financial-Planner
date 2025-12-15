@@ -1,0 +1,37 @@
+{
+  "id": "portfolio_simple",
+  "description": "Single account, two ETFs, cash balance.",
+  "portfolio": {
+    "accounts": [
+      {
+        "name": "ISA",
+        "type": "isa",
+        "cash_balance": 2500,
+        "positions": [
+          {
+            "symbol": "VWRL",
+            "quantity": 10,
+            "instrument": {
+              "name": "Vanguard FTSE All-World UCITS ETF",
+              "current_price": 100,
+              "allocation_asset_class": { "equity": 100, "fixed_income": 0, "real_estate": 0, "commodities": 0 }
+            }
+          },
+          {
+            "symbol": "AGGH",
+            "quantity": 20,
+            "instrument": {
+              "name": "iShares Core Global Aggregate Bond UCITS ETF",
+              "current_price": 50,
+              "allocation_asset_class": { "equity": 0, "fixed_income": 100, "real_estate": 0, "commodities": 0 }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "total_value": 4500.0
+  }
+}
+

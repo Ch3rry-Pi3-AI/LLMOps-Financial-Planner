@@ -17,7 +17,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/router";
 import Layout from "../components/Layout";
 import ConfirmModal from "../components/ConfirmModal";
-import { API_URL } from "../lib/config";
+import { apiRequest } from "../lib/api";
 import { SkeletonTable } from "../components/Skeleton";
 import Head from "next/head";
 
@@ -112,56 +112,49 @@ export default function Accounts() {
   const loadAccounts = useCallback(async () => {
     try {
       const token = await getToken();
-
-      const response = await fetch(`${API_URL}/api/accounts`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        console.log("Accounts received from API:", data);
-
-        // For each account, load its positions from the positions endpoint
-        const accountsWithPositions = await Promise.all(
-          data.map(async (account: Account) => {
-            console.log("Processing account:", account.id, account.account_name);
-
-            // Basic guard in case the API returns a malformed account
-            if (!account.id) {
-              console.warn("Account missing ID:", account);
-              return { ...account, positions: [] };
-            }
-
-            try {
-              const positionsResponse = await fetch(
-                `${API_URL}/api/accounts/${account.id}/positions`,
-                {
-                  headers: {
-                    Authorization: `Bearer ${token}`,
-                  },
-                }
-              );
-
-              if (positionsResponse.ok) {
-                const data = await positionsResponse.json();
-                const positions = data.positions || [];
-                console.log(`Loaded ${positions.length} positions for account ${account.id}`);
-                return { ...account, positions };
-              }
-            } catch (err) {
-              console.error(`Error loading positions for account ${account.id}:`, err);
-            }
-
-            // Fallback if positions call fails
-            return { ...account, positions: [] };
-          })
-        );
-
-        console.log("Final accounts with positions:", accountsWithPositions);
-        setAccounts(accountsWithPositions);
+      if (!token) {
+        setMessage({ type: "error", text: "Missing auth token" });
+        return;
       }
+
+      const data = await apiRequest<Account[]>("/api/accounts", token);
+      console.log("Accounts received from API:", data);
+
+      // For each account, load its positions from the positions endpoint
+      const accountsWithPositions = await Promise.all(
+        data.map(async (account: Account) => {
+          console.log("Processing account:", account.id, account.account_name);
+
+          // Basic guard in case the API returns a malformed account
+          if (!account.id) {
+            console.warn("Account missing ID:", account);
+            return { ...account, positions: [] };
+          }
+
+          try {
+            const positionsPayload = await apiRequest<{ positions?: Position[] }>(
+              `/api/accounts/${account.id}/positions`,
+              token,
+            );
+            const positions = positionsPayload.positions || [];
+            console.log(
+              `Loaded ${positions.length} positions for account ${account.id}`,
+            );
+            return { ...account, positions };
+          } catch (err) {
+            console.error(
+              `Error loading positions for account ${account.id}:`,
+              err,
+            );
+          }
+
+          // Fallback if positions call fails
+          return { ...account, positions: [] };
+        }),
+      );
+
+      console.log("Final accounts with positions:", accountsWithPositions);
+      setAccounts(accountsWithPositions);
     } catch (error) {
       console.error("Error loading accounts:", error);
       setMessage({ type: "error", text: "Failed to load accounts" });
@@ -206,21 +199,17 @@ export default function Accounts() {
 
     try {
       const token = await getToken();
-      const response = await fetch(`${API_URL}/api/populate-test-data`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setMessage({ type: "success", text: data.message });
-        await loadAccounts();
-      } else {
-        setMessage({ type: "error", text: "Failed to populate test data" });
+      if (!token) {
+        setMessage({ type: "error", text: "Missing auth token" });
+        return;
       }
+      const data = await apiRequest<{ message: string }>(
+        "/api/populate-test-data",
+        token,
+        { method: "POST" },
+      );
+      setMessage({ type: "success", text: data.message });
+      await loadAccounts();
     } catch (error) {
       console.error("Error populating test data:", error);
       setMessage({ type: "error", text: "Error populating test data" });
@@ -241,25 +230,22 @@ export default function Accounts() {
 
     try {
       const token = await getToken();
-      const response = await fetch(`${API_URL}/api/reset-accounts`, {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setMessage({ type: "success", text: data.message });
-
-        // Clear local state first for immediate feedback
-        setAccounts([]);
-
-        // Reload to confirm backend state is consistent
-        await loadAccounts();
-      } else {
-        setMessage({ type: "error", text: "Failed to reset accounts" });
+      if (!token) {
+        setMessage({ type: "error", text: "Missing auth token" });
+        return;
       }
+      const data = await apiRequest<{ message: string }>(
+        "/api/reset-accounts",
+        token,
+        { method: "DELETE" },
+      );
+      setMessage({ type: "success", text: data.message });
+
+      // Clear local state first for immediate feedback
+      setAccounts([]);
+
+      // Reload to confirm backend state is consistent
+      await loadAccounts();
     } catch (error) {
       console.error("Error resetting accounts:", error);
       setMessage({ type: "error", text: "Error resetting accounts" });
@@ -311,31 +297,27 @@ export default function Accounts() {
 
     try {
       const token = await getToken();
-      const response = await fetch(`${API_URL}/api/accounts`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          account_name: newAccount.name,
-          account_purpose: newAccount.purpose || "Investment Account",
-          cash_balance: parseFloat(newAccount.cash_balance.replace(/,/g, "")) || 0,
-        }),
-      });
-
-      if (response.ok) {
-        setMessage({ type: "success", text: "Account created successfully" });
-        setShowAddModal(false);
-        setNewAccount({ name: "", purpose: "", cash_balance: "" });
-        await loadAccounts();
-      } else {
-        const error = await response.json();
-        setMessage({
-          type: "error",
-          text: error.detail || "Failed to create account",
-        });
+      if (!token) {
+        setMessage({ type: "error", text: "Missing auth token" });
+        return;
       }
+      await apiRequest(
+        "/api/accounts",
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            account_name: newAccount.name,
+            account_purpose: newAccount.purpose || "Investment Account",
+            cash_balance:
+              parseFloat(newAccount.cash_balance.replace(/,/g, "")) || 0,
+          }),
+        },
+      );
+      setMessage({ type: "success", text: "Account created successfully" });
+      setShowAddModal(false);
+      setNewAccount({ name: "", purpose: "", cash_balance: "" });
+      await loadAccounts();
     } catch (error) {
       console.error("Error creating account:", error);
       setMessage({ type: "error", text: "Error creating account" });
@@ -355,19 +337,13 @@ export default function Accounts() {
 
     try {
       const token = await getToken();
-      const response = await fetch(`${API_URL}/api/accounts/${accountId}`, {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (response.ok) {
-        setMessage({ type: "success", text: "Account deleted successfully" });
-        await loadAccounts();
-      } else {
-        setMessage({ type: "error", text: "Failed to delete account" });
+      if (!token) {
+        setMessage({ type: "error", text: "Missing auth token" });
+        return;
       }
+      await apiRequest(`/api/accounts/${accountId}`, token, { method: "DELETE" });
+      setMessage({ type: "success", text: "Account deleted successfully" });
+      await loadAccounts();
     } catch (error) {
       console.error("Error deleting account:", error);
       setMessage({ type: "error", text: "Error deleting account" });

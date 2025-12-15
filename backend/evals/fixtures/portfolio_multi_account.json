@@ -1,0 +1,53 @@
+{
+  "id": "portfolio_multi_account",
+  "description": "Two accounts, mixed holdings, tests aggregation and allocation normalization.",
+  "portfolio": {
+    "accounts": [
+      {
+        "name": "Brokerage",
+        "type": "taxable",
+        "cash_balance": 1000,
+        "positions": [
+          {
+            "symbol": "SPY",
+            "quantity": 5,
+            "instrument": {
+              "name": "SPDR S&P 500 ETF Trust",
+              "current_price": 400,
+              "allocation_asset_class": { "equity": 100, "fixed_income": 0, "real_estate": 0, "commodities": 0 }
+            }
+          }
+        ]
+      },
+      {
+        "name": "401k",
+        "type": "pension",
+        "cash_balance": 0,
+        "positions": [
+          {
+            "symbol": "BND",
+            "quantity": 30,
+            "instrument": {
+              "name": "Vanguard Total Bond Market ETF",
+              "current_price": 70,
+              "allocation_asset_class": { "equity": 0, "fixed_income": 100, "real_estate": 0, "commodities": 0 }
+            }
+          },
+          {
+            "symbol": "VNQ",
+            "quantity": 10,
+            "instrument": {
+              "name": "Vanguard Real Estate ETF",
+              "current_price": 80,
+              "allocation_asset_class": { "equity": 0, "fixed_income": 0, "real_estate": 100, "commodities": 0 }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "total_value": 5900.0
+  }
+}
+
