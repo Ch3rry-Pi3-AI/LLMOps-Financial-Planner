@@ -13,7 +13,11 @@ import { useUser, useAuth } from "@clerk/nextjs";
 import { useEffect, useState, useCallback } from "react";
 import Head from "next/head";
 import Layout from "../components/Layout";
-import { API_URL } from "../lib/config";
+import { apiRequest } from "../lib/api";
+import {
+  normaliseInstrumentFromBackend,
+  type NormalizedInstrument,
+} from "../lib/normalizers";
 import { Skeleton, SkeletonCard } from "../components/Skeleton";
 import { showToast } from "../components/Toast";
 import {
@@ -75,42 +79,7 @@ interface Position {
   instrument?: Instrument | null;
 }
 
-/**
- * Instrument
- *
- * Metadata for a tradable instrument:
- *  - Symbol, name, type
- *  - Current price
- *  - Asset class / region / sector allocation breakdowns (in %)
- */
-interface Instrument {
-  symbol: string;
-  name: string;
-  instrument_type: string;
-  current_price?: number;
-  asset_class_allocation?: Record<string, number>;
-  region_allocation?: Record<string, number>;
-  sector_allocation?: Record<string, number>;
-}
-
-/**
- * RawInstrument
- *
- * Helper type representing the shape returned by the backend, which may use
- * `allocation_*` fields and/or JSON strings for allocation columns.
- */
-interface RawInstrument {
-  symbol?: string;
-  name?: string;
-  instrument_type?: string;
-  current_price?: number | string | null;
-  asset_class_allocation?: Record<string, number> | string | null;
-  region_allocation?: Record<string, number> | string | null;
-  sector_allocation?: Record<string, number> | string | null;
-  allocation_asset_class?: Record<string, number> | string | null;
-  allocation_regions?: Record<string, number> | string | null;
-  allocation_sectors?: Record<string, number> | string | null;
-}
+type Instrument = NormalizedInstrument;
 
 /**
  * Job
@@ -121,76 +90,6 @@ interface Job {
   status?: string;
   completed_at?: string;
 }
-
-/**
- * normaliseAllocation
- *
- * Convert a value that may be:
- *  - undefined
- *  - a plain Record<string, number>
- *  - a JSON string
- * into a clean Record<string, number>.
- */
-const normaliseAllocation = (
-  value: Record<string, number> | string | null | undefined,
-): Record<string, number> => {
-  if (!value) return {};
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value) as unknown;
-      if (parsed && typeof parsed === "object") {
-        return parsed as Record<string, number>;
-      }
-      return {};
-    } catch {
-      return {};
-    }
-  }
-  return value;
-};
-
-/**
- * normaliseInstrumentFromBackend
- *
- * The backend instruments table uses `allocation_*` column names, while the
- * frontend expects `*_allocation`. This helper maps and normalises those
- * fields (including JSON-string payloads) into a consistent `Instrument` shape.
- */
-const normaliseInstrumentFromBackend = (rawInput: unknown): Instrument => {
-  const raw = rawInput as RawInstrument | null | undefined;
-
-  if (!raw) {
-    return {
-      symbol: "",
-      name: "",
-      instrument_type: "",
-      current_price: 0,
-      asset_class_allocation: {},
-      region_allocation: {},
-      sector_allocation: {},
-    };
-  }
-
-  const assetClassSource =
-    raw.asset_class_allocation ?? raw.allocation_asset_class;
-  const regionSource = raw.region_allocation ?? raw.allocation_regions;
-  const sectorSource = raw.sector_allocation ?? raw.allocation_sectors;
-
-  const currentPrice =
-    raw.current_price !== undefined && raw.current_price !== null
-      ? Number(raw.current_price)
-      : undefined;
-
-  return {
-    symbol: raw.symbol ?? "",
-    name: raw.name ?? "",
-    instrument_type: raw.instrument_type ?? "",
-    current_price: Number.isNaN(currentPrice) ? undefined : currentPrice,
-    asset_class_allocation: normaliseAllocation(assetClassSource),
-    region_allocation: normaliseAllocation(regionSource),
-    sector_allocation: normaliseAllocation(sectorSource),
-  };
-};
 
 /**
  * Colour palette used for pie charts.
@@ -388,19 +287,10 @@ export default function Dashboard() {
         }
 
         // Sync / create user in backend and get profile data
-        const userResponse = await fetch(`${API_URL}/api/user`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
-
-        if (!userResponse.ok) {
-          throw new Error(`Failed to sync user: ${userResponse.status}`);
-        }
-
-        const responseJson = (await userResponse.json()) as {
-          user: UserData;
-        };
+        const responseJson = await apiRequest<{ user: UserData }>(
+          "/api/user",
+          token,
+        );
         const backendUser = responseJson.user;
 
         // Initialise editable fields from user profile
@@ -425,44 +315,24 @@ export default function Dashboard() {
 
         // Fetch most recent completed job to populate the "Last analysis" badge
         try {
-          const jobsResponse = await fetch(`${API_URL}/api/jobs`, {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          });
-
-          if (jobsResponse.ok) {
-            const jobsPayload = (await jobsResponse.json()) as {
-              jobs?: Job[];
-            };
-            const jobsList = jobsPayload.jobs ?? [];
-            const completedJob = jobsList.find(
-              (job) => job.status === "completed",
-            );
-            if (completedJob?.completed_at) {
-              setLastAnalysisDate(new Date(completedJob.completed_at));
-            }
+          const jobsPayload = await apiRequest<{ jobs?: Job[] }>(
+            "/api/jobs",
+            token,
+          );
+          const jobsList = jobsPayload.jobs ?? [];
+          const completedJob = jobsList.find((job) => job.status === "completed");
+          if (completedJob?.completed_at) {
+            setLastAnalysisDate(new Date(completedJob.completed_at));
           }
         } catch (jobsErr) {
           console.error("Error loading jobs for last analysis date:", jobsErr);
         }
 
         // Fetch accounts
-        const accountsResponse = await fetch(`${API_URL}/api/accounts`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
-
-        if (!accountsResponse.ok) {
-          throw new Error(
-            `Failed to fetch accounts: ${accountsResponse.status}`,
-          );
-        }
-
-        const accountsData = (await accountsResponse.json()) as
-          | Account[]
-          | { accounts: Account[] };
+        const accountsData = await apiRequest<Account[] | { accounts: Account[] }>(
+          "/api/accounts",
+          token,
+        );
         const accountsList: Account[] = Array.isArray(accountsData)
           ? accountsData
           : accountsData.accounts;
@@ -480,30 +350,18 @@ export default function Dashboard() {
             continue;
           }
 
-          const positionsResponse = await fetch(
-            `${API_URL}/api/accounts/${accountId}/positions`,
-            {
-              headers: {
-                Authorization: `Bearer ${token}`,
-              },
-            },
+          const positionsPayload = await apiRequest<{ positions?: Position[] }>(
+            `/api/accounts/${accountId}/positions`,
+            token,
           );
+          const accountPositions = positionsPayload.positions ?? [];
+          positionsMap[accountId] = accountPositions;
 
-          if (positionsResponse.ok) {
-            const positionsPayload = (await positionsResponse.json()) as {
-              positions?: Position[];
-            };
-            const accountPositions = positionsPayload.positions ?? [];
-            positionsMap[accountId] = accountPositions;
-
-            // Extract instrument metadata for each position and normalise it
-            for (const position of accountPositions) {
-              if (position.instrument) {
-                const normalised = normaliseInstrumentFromBackend(
-                  position.instrument,
-                );
-                instrumentsMap[position.symbol] = normalised;
-              }
+          for (const position of accountPositions) {
+            if (position.instrument) {
+              instrumentsMap[position.symbol] = normaliseInstrumentFromBackend(
+                position.instrument,
+              );
             }
           }
         }
@@ -543,17 +401,10 @@ export default function Dashboard() {
 
         console.log("Analysis completed - refreshing dashboard data...");
 
-        const accountsResponse = await fetch(`${API_URL}/api/accounts`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
-
-        if (!accountsResponse.ok) return;
-
-        const accountsData = (await accountsResponse.json()) as
+        const accountsData = await apiRequest<
           | Account[]
-          | { accounts: Account[] };
+          | { accounts: Account[] }
+        >("/api/accounts", token);
         const accountsList: Account[] = Array.isArray(accountsData)
           ? accountsData
           : accountsData.accounts;
@@ -567,29 +418,18 @@ export default function Dashboard() {
           const accountId = account.id;
           if (!accountId) continue;
 
-          const positionsResponse = await fetch(
-            `${API_URL}/api/accounts/${accountId}/positions`,
-            {
-              headers: {
-                Authorization: `Bearer ${token}`,
-              },
-            },
+          const payload = await apiRequest<{ positions?: Position[] }>(
+            `/api/accounts/${accountId}/positions`,
+            token,
           );
-
-          if (!positionsResponse.ok) continue;
-
-          const payload = (await positionsResponse.json()) as {
-            positions?: Position[];
-          };
           const accountPositions = payload.positions ?? [];
           positionsData[accountId] = accountPositions;
 
           for (const position of accountPositions) {
             if (position.instrument) {
-              const normalised = normaliseInstrumentFromBackend(
+              instrumentsData[position.symbol] = normaliseInstrumentFromBackend(
                 position.instrument,
               );
-              instrumentsData[position.symbol] = normalised;
             }
           }
         }
@@ -599,23 +439,11 @@ export default function Dashboard() {
 
         // Refresh "last analysis" timestamp from jobs API so the badge updates
         try {
-          const jobsResponse = await fetch(`${API_URL}/api/jobs`, {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          });
-
-          if (jobsResponse.ok) {
-            const jobsPayload = (await jobsResponse.json()) as {
-              jobs?: Job[];
-            };
-            const jobsList = jobsPayload.jobs ?? [];
-            const completedJob = jobsList.find(
-              (job) => job.status === "completed",
-            );
-            if (completedJob?.completed_at) {
-              setLastAnalysisDate(new Date(completedJob.completed_at));
-            }
+          const jobsPayload = await apiRequest<{ jobs?: Job[] }>("/api/jobs", token);
+          const jobsList = jobsPayload.jobs ?? [];
+          const completedJob = jobsList.find((job) => job.status === "completed");
+          if (completedJob?.completed_at) {
+            setLastAnalysisDate(new Date(completedJob.completed_at));
           }
         } catch (jobsErr) {
           console.error("Error refreshing last analysis date:", jobsErr);
@@ -700,20 +528,10 @@ export default function Dashboard() {
         },
       };
 
-      const response = await fetch(`${API_URL}/api/user`, {
+      await apiRequest("/api/user", token, {
         method: "PUT",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
         body: JSON.stringify(payload),
       });
-
-      if (!response.ok) {
-        throw new Error(
-          `Failed to update user settings: ${response.status}`,
-        );
-      }
 
       showToast("success", "Settings updated successfully");
     } catch (err) {
@@ -1098,4 +916,3 @@ export default function Dashboard() {
     </>
   );
 }
-

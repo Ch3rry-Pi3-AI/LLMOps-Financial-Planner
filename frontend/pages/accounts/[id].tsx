@@ -18,7 +18,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/router";
 import Layout from "../../components/Layout";
 import ConfirmModal from "../../components/ConfirmModal";
-import { API_URL } from "../../lib/config";
+import { apiRequest } from "../../lib/api";
 
 const formatCurrencyGBP = (
   value: number,
@@ -115,58 +115,41 @@ export default function AccountDetail() {
 
       try {
         const token = await getToken();
+        if (!token) {
+          setMessage({ type: "error", text: "Missing auth token" });
+          return;
+        }
 
         // Load account details (then select the one matching `id`)
-        const accountResponse = await fetch(`${API_URL}/api/accounts`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
+        const accounts = await apiRequest<Account[]>("/api/accounts", token);
+        const foundAccount = accounts.find((acc: Account) => acc.id === id);
 
-        if (accountResponse.ok) {
-          const accounts = await accountResponse.json();
-          const foundAccount = accounts.find((acc: Account) => acc.id === id);
-
-          if (foundAccount) {
-            setAccount(foundAccount);
-            setEditedAccount({
-              name: foundAccount.account_name,
-              purpose: foundAccount.account_purpose,
-              cash_balance: Number(foundAccount.cash_balance).toLocaleString("en-GB"),
-            });
-          } else {
-            setMessage({ type: "error", text: "Account not found" });
-            setTimeout(() => router.push("/accounts"), 2000);
-            return;
-          }
+        if (foundAccount) {
+          setAccount(foundAccount);
+          setEditedAccount({
+            name: foundAccount.account_name,
+            purpose: foundAccount.account_purpose,
+            cash_balance: Number(foundAccount.cash_balance).toLocaleString("en-GB"),
+          });
+        } else {
+          setMessage({ type: "error", text: "Account not found" });
+          setTimeout(() => router.push("/accounts"), 2000);
+          return;
         }
 
         // Load positions for this account
-        const positionsResponse = await fetch(
-          `${API_URL}/api/accounts/${id}/positions`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          }
+        const positionsPayload = await apiRequest<{ positions?: Position[] }>(
+          `/api/accounts/${id}/positions`,
+          token,
         );
-
-        if (positionsResponse.ok) {
-          const data = await positionsResponse.json();
-          setPositions(data.positions || []);
-        }
+        setPositions(positionsPayload.positions || []);
 
         // Load instruments catalogue for autocomplete
-        const instrumentsResponse = await fetch(`${API_URL}/api/instruments`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
-
-        if (instrumentsResponse.ok) {
-          const instrumentsData = await instrumentsResponse.json();
-          setInstruments(instrumentsData);
-        }
+        const instrumentsData = await apiRequest<Instrument[]>(
+          "/api/instruments",
+          token,
+        );
+        setInstruments(instrumentsData);
       } catch (error) {
         console.error("Error loading account:", error);
         setMessage({ type: "error", text: "Failed to load account details" });
@@ -192,27 +175,25 @@ export default function AccountDetail() {
 
     try {
       const token = await getToken();
-      const response = await fetch(`${API_URL}/api/accounts/${id}`, {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          account_name: editedAccount.name,
-          account_purpose: editedAccount.purpose,
-          cash_balance: parseFloat(editedAccount.cash_balance.replace(/,/g, "")),
-        }),
-      });
-
-      if (response.ok) {
-        const updatedAccount = await response.json();
-        setAccount(updatedAccount);
-        setEditingAccount(false);
-        setMessage({ type: "success", text: "Account updated successfully" });
-      } else {
-        setMessage({ type: "error", text: "Failed to update account" });
+      if (!token) {
+        setMessage({ type: "error", text: "Missing auth token" });
+        return;
       }
+      const updatedAccount = await apiRequest<Account>(
+        `/api/accounts/${id}`,
+        token,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            account_name: editedAccount.name,
+            account_purpose: editedAccount.purpose,
+            cash_balance: parseFloat(editedAccount.cash_balance.replace(/,/g, "")),
+          }),
+        },
+      );
+      setAccount(updatedAccount);
+      setEditingAccount(false);
+      setMessage({ type: "success", text: "Account updated successfully" });
     } catch (error) {
       console.error("Error updating account:", error);
       setMessage({ type: "error", text: "Error updating account" });
@@ -237,24 +218,17 @@ export default function AccountDetail() {
 
     try {
       const token = await getToken();
-      const response = await fetch(`${API_URL}/api/positions/${positionId}`, {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          quantity: quantity,
-        }),
-      });
-
-      if (response.ok) {
-        setMessage({ type: "success", text: "Position updated successfully" });
-        setEditingPosition(null);
-        await loadAccount();
-      } else {
-        setMessage({ type: "error", text: "Failed to update position" });
+      if (!token) {
+        setMessage({ type: "error", text: "Missing auth token" });
+        return;
       }
+      await apiRequest(`/api/positions/${positionId}`, token, {
+        method: "PUT",
+        body: JSON.stringify({ quantity }),
+      });
+      setMessage({ type: "success", text: "Position updated successfully" });
+      setEditingPosition(null);
+      await loadAccount();
     } catch (error) {
       console.error("Error updating position:", error);
       setMessage({ type: "error", text: "Error updating position" });
@@ -272,19 +246,15 @@ export default function AccountDetail() {
 
     try {
       const token = await getToken();
-      const response = await fetch(`${API_URL}/api/positions/${positionId}`, {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (response.ok) {
-        setMessage({ type: "success", text: "Position deleted successfully" });
-        await loadAccount();
-      } else {
-        setMessage({ type: "error", text: "Failed to delete position" });
+      if (!token) {
+        setMessage({ type: "error", text: "Missing auth token" });
+        return;
       }
+      await apiRequest(`/api/positions/${positionId}`, token, {
+        method: "DELETE",
+      });
+      setMessage({ type: "success", text: "Position deleted successfully" });
+      await loadAccount();
     } catch (error) {
       console.error("Error deleting position:", error);
       setMessage({ type: "error", text: "Error deleting position" });
@@ -314,32 +284,23 @@ export default function AccountDetail() {
 
     try {
       const token = await getToken();
-      const response = await fetch(`${API_URL}/api/positions`, {
+      if (!token) {
+        setMessage({ type: "error", text: "Missing auth token" });
+        return;
+      }
+      await apiRequest("/api/positions", token, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
         body: JSON.stringify({
           account_id: id,
           symbol: newPosition.symbol.toUpperCase(),
-          quantity: quantity,
+          quantity,
         }),
       });
-
-      if (response.ok) {
-        setMessage({ type: "success", text: "Position added successfully" });
-        setShowAddPosition(false);
-        setNewPosition({ symbol: "", quantity: "" });
-        setSearchTerm("");
-        await loadAccount();
-      } else {
-        const error = await response.json();
-        setMessage({
-          type: "error",
-          text: error.detail || "Failed to add position",
-        });
-      }
+      setMessage({ type: "success", text: "Position added successfully" });
+      setShowAddPosition(false);
+      setNewPosition({ symbol: "", quantity: "" });
+      setSearchTerm("");
+      await loadAccount();
     } catch (error) {
       console.error("Error adding position:", error);
       setMessage({ type: "error", text: "Error adding position" });

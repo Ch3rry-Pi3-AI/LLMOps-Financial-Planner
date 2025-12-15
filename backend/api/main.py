@@ -77,16 +77,23 @@ app = FastAPI(
 # CORS Configuration
 # =========================
 
-# Read allowed CORS origins from environment or default to localhost
-cors_origins: List[str] = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+# Read allowed CORS origins from environment or default to localhost.
+# Strip whitespace so values like "http://a, https://b" work as expected.
+cors_origins: List[str] = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
 
 # Attach CORS middleware to allow browser-based frontends to call the API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # This frontend authenticates via `Authorization: Bearer <token>` (not cookies),
+    # so CORS credentials are not required and keeping them off avoids misconfigs.
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 # =========================

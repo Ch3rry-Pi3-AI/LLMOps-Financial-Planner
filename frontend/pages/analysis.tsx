@@ -35,7 +35,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import Layout from "../components/Layout";
-import { API_URL } from "../lib/config";
+import { apiRequest } from "../lib/api";
 import Head from "next/head";
 
 /**
@@ -260,18 +260,12 @@ export default function Analysis() {
     const loadJob = async (jobId: string) => {
       try {
         const token = await getToken();
-        const response = await fetch(`${API_URL}/api/jobs/${jobId}`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
-
-        if (response.ok) {
-          const jobData = await response.json();
-          setJob(jobData);
-        } else {
-          console.error("Failed to fetch job");
+        if (!token) {
+          setLoading(false);
+          return;
         }
+        const jobData = await apiRequest<Job>(`/api/jobs/${jobId}`, token);
+        setJob(jobData);
       } catch (error) {
         console.error("Error fetching job:", error);
       } finally {
@@ -292,37 +286,28 @@ export default function Analysis() {
       setFetchingLatest(true);
       try {
         const token = await getToken();
+        if (!token) {
+          setLoading(false);
+          return;
+        }
+        const data = await apiRequest<{ jobs?: JobListItem[] }>("/api/jobs", token);
+        const jobs: JobListItem[] = data.jobs || [];
 
-        const response = await fetch(`${API_URL}/api/jobs`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
+        const latestCompletedJob = jobs
+          .filter((j) => j.status === "completed")
+          .sort(
+            (a, b) =>
+              new Date(b.created_at).getTime() -
+              new Date(a.created_at).getTime(),
+          )[0];
 
-        if (response.ok) {
-          const data = await response.json();
-          const jobs: JobListItem[] = data.jobs || [];
+        if (latestCompletedJob) {
+          await loadJob(latestCompletedJob.id);
 
-          const latestCompletedJob = jobs
-            .filter((j) => j.status === "completed")
-            .sort(
-              (a, b) =>
-                new Date(b.created_at).getTime() -
-                new Date(a.created_at).getTime(),
-            )[0];
-
-          if (latestCompletedJob) {
-            await loadJob(latestCompletedJob.id);
-
-            // Update URL without full page reload
-            router.replace(
-              `/analysis?job_id=${latestCompletedJob.id}`,
-              undefined,
-              { shallow: true },
-            );
-          } else {
-            setLoading(false);
-          }
+          // Update URL without full page reload
+          router.replace(`/analysis?job_id=${latestCompletedJob.id}`, undefined, {
+            shallow: true,
+          });
         } else {
           setLoading(false);
         }

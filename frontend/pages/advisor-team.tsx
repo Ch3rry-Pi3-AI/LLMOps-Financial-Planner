@@ -9,7 +9,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
 import { useAuth } from "@clerk/nextjs";
 import Layout from "../components/Layout";
-import { API_URL } from "../lib/config";
+import { apiRequest } from "../lib/api";
 import {
   emitAnalysisCompleted,
   emitAnalysisFailed,
@@ -32,6 +32,16 @@ interface Job {
   status: string;
   job_type: string;
 }
+
+type JobStatusResponse = {
+  status?: string;
+  error?: string;
+};
+
+type AnalyzeResponse = {
+  job_id?: string;
+  id?: string;
+};
 
 interface AnalysisProgress {
   stage:
@@ -105,12 +115,8 @@ export default function AdvisorTeam() {
     const checkJobStatusLocal = async (jobId: string) => {
       try {
         const token = await getToken();
-        const response = await fetch(`${API_URL}/api/jobs/${jobId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-
-        if (!response.ok) return;
-        const job = await response.json();
+        if (!token) return;
+        const job = await apiRequest<JobStatusResponse>(`/api/jobs/${jobId}`, token);
 
         if (job.status === "completed") {
           setProgress({
@@ -171,11 +177,8 @@ export default function AdvisorTeam() {
   const fetchJobs = async () => {
     try {
       const token = await getToken();
-      const response = await fetch(`${API_URL}/api/jobs`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!response.ok) return;
-      const data = await response.json();
+      if (!token) return;
+      const data = await apiRequest<{ jobs?: Job[] }>("/api/jobs", token);
       setJobs(data.jobs || []);
     } catch (error) {
       console.error("Error fetching jobs:", error);
@@ -188,17 +191,11 @@ export default function AdvisorTeam() {
       setProgress({ stage: "starting", message: "Starting analysis...", activeAgents: [] });
 
       const token = await getToken();
-      const response = await fetch(`${API_URL}/api/analyze`, {
+      if (!token) throw new Error("Missing auth token");
+      const data = await apiRequest<AnalyzeResponse>("/api/analyze", token, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
         body: JSON.stringify({ analysis_type: "portfolio" }),
       });
-
-      if (!response.ok) throw new Error("Failed to start analysis");
-      const data = await response.json();
 
       const jobId = data.job_id || data.id;
       if (!jobId) throw new Error("Backend did not return a job id");
