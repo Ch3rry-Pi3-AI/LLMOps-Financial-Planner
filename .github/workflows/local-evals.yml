@@ -1,0 +1,27 @@
+name: local-evals
+
+on:
+  pull_request:
+  push:
+    branches: ["main", "master"]
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Run local evals
+        run: |
+          cd backend
+          uv run evals/run_local.py
