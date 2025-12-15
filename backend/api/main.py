@@ -26,6 +26,7 @@ import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from decimal import Decimal
+from typing import cast
 
 import uuid  # noqa: F401  # Reserved for potential future usage
 
@@ -190,8 +191,29 @@ async def general_exception_handler(
 # Infrastructure & Services
 # =========================
 
-# Instantiate the main database abstraction used by all route handlers
-db: Database = Database()
+_db_instance: Database | None = None
+
+
+def _get_db() -> Database:
+    """
+    Lazily instantiate the Database.
+
+    This avoids failing module import (and breaking `/health`) when required DB
+    environment variables are not set yet.
+    """
+    global _db_instance
+    if _db_instance is None:
+        _db_instance = Database()
+    return _db_instance
+
+
+class _LazyDatabase:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(_get_db(), name)
+
+
+# Lazy proxy so route handlers can continue using `db.<model>...` unchanged.
+db: Database = cast(Database, _LazyDatabase())
 
 # Create an SQS client for sending analysis jobs to a background worker queue
 sqs_client = boto3.client(

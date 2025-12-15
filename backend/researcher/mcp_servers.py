@@ -19,12 +19,55 @@ from __future__ import annotations
 
 import glob
 import os
+from pathlib import Path
 from agents.mcp import MCPServerStdio
 
 
 # ============================================================
 # MCP Server Factory
 # ============================================================
+
+def _candidate_playwright_cache_dirs() -> list[str]:
+    """
+    Return candidate Playwright browser cache roots.
+
+    App Runner may run containers with a non-root user, so the browser cache is
+    not guaranteed to live under `/root/.cache`.
+    """
+    candidates: list[str] = []
+
+    browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if browsers_path:
+        candidates.append(browsers_path)
+
+    # Default Playwright cache location for the current user.
+    candidates.append(str(Path.home() / ".cache" / "ms-playwright"))
+
+    # Common container default when running as root.
+    candidates.append("/root/.cache/ms-playwright")
+
+    # Common fixed location when images set PLAYWRIGHT_BROWSERS_PATH.
+    candidates.append("/ms-playwright")
+
+    # Deduplicate while preserving order.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for c in candidates:
+        if c and c not in seen:
+            seen.add(c)
+            ordered.append(c)
+    return ordered
+
+
+def _find_chromium_executable() -> str | None:
+    for cache_root in _candidate_playwright_cache_dirs():
+        matches = glob.glob(
+            os.path.join(cache_root, "chromium-*", "chrome-linux", "chrome")
+        )
+        if matches:
+            return matches[0]
+    return None
+
 
 def create_playwright_mcp_server(timeout_seconds: int = 60) -> MCPServerStdio:
     """
@@ -66,19 +109,15 @@ def create_playwright_mcp_server(timeout_seconds: int = 60) -> MCPServerStdio:
     # Detect container environments and fetch Chromium path
     # --------------------------------------------------------
     if os.path.exists("/.dockerenv") or os.environ.get("AWS_EXECUTION_ENV"):
-        chrome_paths = glob.glob(
-            "/root/.cache/ms-playwright/chromium-*/chrome-linux/chrome"
-        )
-
-        if chrome_paths:
-            chrome_path = chrome_paths[0]
+        chrome_path = _find_chromium_executable()
+        if chrome_path:
             print(f"DEBUG: Found Chromium executable at: {chrome_path}")
             args.extend(["--executable-path", chrome_path])
         else:
-            # Fallback for unusual Playwright build layouts
-            fallback = "/root/.cache/ms-playwright/chromium-1187/chrome-linux/chrome"
-            print("DEBUG: Chromium not found via glob; using fallback path")
-            args.extend(["--executable-path", fallback])
+            print(
+                "DEBUG: Chromium not found in Playwright cache roots: "
+                f"{', '.join(_candidate_playwright_cache_dirs())}"
+            )
 
     # Final process configuration
     params = {

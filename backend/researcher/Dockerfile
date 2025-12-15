@@ -17,6 +17,11 @@ FROM --platform=linux/amd64 python:3.12-slim
 # Make /app the working directory
 WORKDIR /app
 
+# Install Playwright browsers into a fixed, non-root-specific location.
+# App Runner may execute the container with a non-root user, so relying on
+# `/root/.cache/ms-playwright` can break browser discovery at runtime.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 
 # ============================================================
 # Install Node.js (required for Playwright tooling)
@@ -32,6 +37,7 @@ RUN apt-get update && apt-get install -y \
 # Install Chromium + system dependencies using Playwright
 # ============================================================
 # Playwright handles all required packages via --with-deps
+RUN mkdir -p /ms-playwright
 RUN npx -y playwright install --with-deps chromium
 
 
