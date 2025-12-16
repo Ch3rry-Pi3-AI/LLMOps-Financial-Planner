@@ -240,6 +240,11 @@ def run_monte_carlo_simulation(
     target_annual_income: float,
     asset_allocation: Dict[str, float],
     num_simulations: int = 500,
+    *,
+    annual_contribution: float = 10_000.0,
+    shock: Dict[str, Any] | None = None,
+    return_shift: float = 0.0,
+    volatility_mult: float = 1.0,
 ) -> Dict[str, Any]:
     """
     Run a simplified Monte Carlo simulation for retirement planning.
@@ -279,12 +284,22 @@ def run_monte_carlo_simulation(
         value at retirement.
     """
     # Historical return assumptions (annualised)
-    equity_return_mean = 0.07
-    equity_return_std = 0.18
-    bond_return_mean = 0.04
-    bond_return_std = 0.05
-    real_estate_return_mean = 0.06
-    real_estate_return_std = 0.12
+    equity_return_mean = 0.07 + return_shift
+    equity_return_std = 0.18 * max(0.0, volatility_mult)
+    bond_return_mean = 0.04 + (return_shift * 0.35)
+    bond_return_std = 0.05 * max(0.0, volatility_mult)
+    real_estate_return_mean = 0.06 + (return_shift * 0.5)
+    real_estate_return_std = 0.12 * max(0.0, volatility_mult)
+
+    shock_year = None
+    shock_pct = None
+    if isinstance(shock, dict):
+        shock_year = int(shock.get("year")) if shock.get("year") is not None else None
+        shock_pct = float(shock.get("pct")) if shock.get("pct") is not None else None
+        if shock_year is not None and shock_year < 0:
+            shock_year = None
+        if shock_pct is not None and not (0.0 < shock_pct < 1.0):
+            shock_pct = None
 
     successful_scenarios = 0
     final_values: List[float] = []
@@ -294,7 +309,7 @@ def run_monte_carlo_simulation(
         portfolio_value = current_value
 
         # Accumulation phase
-        for _ in range(years_until_retirement):
+        for year_idx in range(years_until_retirement):
             equity_return = random.gauss(equity_return_mean, equity_return_std)
             bond_return = random.gauss(bond_return_mean, bond_return_std)
             real_estate_return = random.gauss(real_estate_return_mean, real_estate_return_std)
@@ -307,7 +322,9 @@ def run_monte_carlo_simulation(
             )
 
             portfolio_value = portfolio_value * (1 + portfolio_return)
-            portfolio_value += 10_000  # Annual contribution
+            portfolio_value += max(0.0, annual_contribution)  # Annual contribution
+            if shock_year is not None and shock_pct is not None and year_idx == shock_year:
+                portfolio_value *= 1.0 - shock_pct
 
         # Retirement phase
         retirement_years = 30
@@ -356,9 +373,11 @@ def run_monte_carlo_simulation(
     )
 
     expected_value_at_retirement = current_value
-    for _ in range(years_until_retirement):
+    for year_idx in range(years_until_retirement):
         expected_value_at_retirement *= 1 + expected_return
-        expected_value_at_retirement += 10_000
+        expected_value_at_retirement += max(0.0, annual_contribution)
+        if shock_year is not None and shock_pct is not None and year_idx == shock_year:
+            expected_value_at_retirement *= 1.0 - shock_pct
 
     return {
         "success_rate": round(success_rate, 1),
@@ -386,6 +405,8 @@ def generate_projections(
     years_until_retirement: int,
     asset_allocation: Dict[str, float],
     current_age: int,
+    *,
+    annual_contribution: float = 10_000.0,
 ) -> List[Dict[str, Any]]:
     """
     Generate simplified milestone projections for the retirement journey.
@@ -431,7 +452,7 @@ def generate_projections(
             # Accumulation phase – approximate 5-year blocks
             for _ in range(min(5, year)):
                 portfolio_value *= 1 + expected_return
-                portfolio_value += 10_000
+                portfolio_value += max(0.0, annual_contribution)
             phase = "accumulation"
             annual_income = 0.0
         else:
@@ -467,6 +488,8 @@ def create_agent(
     portfolio_data: Dict[str, Any],
     user_preferences: Dict[str, Any],
     db: Any = None,
+    *,
+    analysis_options: Dict[str, Any] | None = None,
 ) -> Tuple[LitellmModel, List[Any], str]:
     """
     Construct the Retirement Specialist Agent model and task prompt.
@@ -520,6 +543,11 @@ def create_agent(
     years_until_retirement = int(user_preferences.get("years_until_retirement", 30))
     target_income = float(user_preferences.get("target_retirement_income", 80_000))
     current_age = int(user_preferences.get("current_age", 40))
+    annual_contribution = float(
+        (analysis_options or {}).get("annual_contribution")
+        or user_preferences.get("annual_contribution")
+        or 10_000
+    )
 
     # Optional narrative goal text (sanitised to avoid prompt injection)
     raw_goals = str(user_preferences.get("retirement_goals", "") or "")
@@ -529,14 +557,128 @@ def create_agent(
     portfolio_value = calculate_portfolio_value(portfolio_data)
     allocation = calculate_asset_allocation(portfolio_data)
 
-    # Monte Carlo simulation
+    def _parse_scenarios() -> List[Dict[str, Any]]:
+        raw = (analysis_options or {}).get("retirement_scenarios") or (analysis_options or {}).get(
+            "scenarios"
+        )
+        if not isinstance(raw, list):
+            return []
+        scenarios: List[Dict[str, Any]] = []
+        for item in raw:
+            if isinstance(item, dict):
+                scenarios.append(item)
+        return scenarios[:4]
+
+    scenarios = _parse_scenarios()
+
+    def _scenario_years(base_years: int, *, scenario: Dict[str, Any]) -> int:
+        if scenario.get("retirement_age") is not None:
+            try:
+                retirement_age = int(scenario["retirement_age"])
+                return max(0, retirement_age - current_age)
+            except Exception:  # noqa: BLE001
+                pass
+        if scenario.get("retirement_age_delta") is not None:
+            try:
+                delta = int(scenario["retirement_age_delta"])
+                return max(0, base_years + delta)
+            except Exception:  # noqa: BLE001
+                pass
+        if scenario.get("years_until_retirement") is not None:
+            try:
+                return max(0, int(scenario["years_until_retirement"]))
+            except Exception:  # noqa: BLE001
+                pass
+        return base_years
+
+    def _scenario_contrib(base: float, *, scenario: Dict[str, Any]) -> float:
+        val = scenario.get("annual_contribution")
+        if val is None:
+            return base
+        try:
+            return max(0.0, float(val))
+        except Exception:  # noqa: BLE001
+            return base
+
+    def _scenario_shock(*, scenario: Dict[str, Any]) -> Dict[str, Any] | None:
+        shock = scenario.get("shock")
+        if isinstance(shock, dict):
+            return shock
+        pct = scenario.get("shock_pct")
+        year = scenario.get("shock_year")
+        if pct is None and year is None:
+            return None
+        try:
+            return {"pct": float(pct), "year": int(year)}
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _scenario_shift(*, scenario: Dict[str, Any]) -> float:
+        try:
+            return float(scenario.get("return_shift") or 0.0)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def _scenario_vol(*, scenario: Dict[str, Any]) -> float:
+        try:
+            return float(scenario.get("volatility_mult") or 1.0)
+        except Exception:  # noqa: BLE001
+            return 1.0
+
+    # Base Monte Carlo simulation (always)
     monte_carlo = run_monte_carlo_simulation(
         current_value=portfolio_value,
         years_until_retirement=years_until_retirement,
         target_annual_income=target_income,
         asset_allocation=allocation,
         num_simulations=500,
+        annual_contribution=annual_contribution,
     )
+
+    scenario_results: List[Dict[str, Any]] = []
+    if scenarios:
+        scenario_results.append(
+            {
+                "name": "Base",
+                "years_until_retirement": years_until_retirement,
+                "annual_contribution": annual_contribution,
+                "shock": None,
+                "return_shift": 0.0,
+                "volatility_mult": 1.0,
+                "monte_carlo": monte_carlo,
+            }
+        )
+
+        for idx, scenario in enumerate(scenarios):
+            label = str(scenario.get("name") or scenario.get("label") or f"Scenario {idx + 1}")
+            years_s = _scenario_years(years_until_retirement, scenario=scenario)
+            contrib_s = _scenario_contrib(annual_contribution, scenario=scenario)
+            shock_s = _scenario_shock(scenario=scenario)
+            shift_s = _scenario_shift(scenario=scenario)
+            vol_s = _scenario_vol(scenario=scenario)
+
+            sim = run_monte_carlo_simulation(
+                current_value=portfolio_value,
+                years_until_retirement=years_s,
+                target_annual_income=target_income,
+                asset_allocation=allocation,
+                num_simulations=500,
+                annual_contribution=contrib_s,
+                shock=shock_s,
+                return_shift=shift_s,
+                volatility_mult=vol_s,
+            )
+            scenario_results.append(
+                {
+                    "name": label,
+                    "years_until_retirement": years_s,
+                    "annual_contribution": contrib_s,
+                    "shock": shock_s,
+                    "return_shift": shift_s,
+                    "volatility_mult": vol_s,
+                    "monte_carlo": sim,
+                }
+            )
 
     # Long-term projections
     projections = generate_projections(
@@ -544,6 +686,7 @@ def create_agent(
         years_until_retirement=years_until_retirement,
         asset_allocation=allocation,
         current_age=current_age,
+        annual_contribution=annual_contribution,
     )
 
     tools: List[Any] = []  # No tools – final-answer-only agent
@@ -570,6 +713,7 @@ def create_agent(
 - Years to Retirement: {years_until_retirement}
 - Target Annual Income: ${target_income:,.0f}
 - Current Age: {current_age}{goals_section}
+- Annual Contribution Assumption: ${annual_contribution:,.0f}
 
 ## Monte Carlo Simulation Results (500 scenarios)
 - Success Rate: {monte_carlo["success_rate"]}% (probability of sustaining retirement income for 30 years)
@@ -579,8 +723,28 @@ def create_agent(
 - 90th Percentile Outcome: ${monte_carlo["percentile_90"]:,.0f} (best case)
 - Average Years Portfolio Lasts: {monte_carlo["average_years_lasted"]} years
 
-## Key Projections (Milestones)
 """
+
+    if scenario_results:
+        task += "## Scenario Modeling\n\n"
+        task += "| Scenario | Years to retire | Contribution/yr | Shock | Success rate | Value at retirement | Median final |\n"
+        task += "|---|---:|---:|---|---:|---:|---:|\n"
+        for row in scenario_results:
+            sim = row["monte_carlo"]
+            shock_str = ""
+            if isinstance(row.get("shock"), dict):
+                try:
+                    shock_str = f"{int(row['shock'].get('year'))}y: -{float(row['shock'].get('pct'))*100:.0f}%"
+                except Exception:  # noqa: BLE001
+                    shock_str = "custom"
+            task += (
+                f"| {row['name']} | {int(row['years_until_retirement'])} | "
+                f"${float(row['annual_contribution']):,.0f} | {shock_str or '—'} | "
+                f"{sim['success_rate']}% | ${sim['expected_value_at_retirement']:,.0f} | "
+                f"${sim['median_final_value']:,.0f} |\n"
+            )
+
+    task += "\n## Key Projections (Milestones)\n"
 
     for proj in projections[:6]:
         if proj["phase"] == "accumulation":

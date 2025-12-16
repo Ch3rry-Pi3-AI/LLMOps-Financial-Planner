@@ -159,6 +159,25 @@ class PlannerContext:
         The ID of the analysis job in the backend database.
     """
     job_id: str
+    clerk_user_id: str | None = None
+    request_id: str | None = None
+
+
+def _build_payload(
+    job_id: str,
+    *,
+    clerk_user_id: str | None = None,
+    request_id: str | None = None,
+    extra: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"job_id": job_id}
+    if clerk_user_id:
+        payload["clerk_user_id"] = clerk_user_id
+    if request_id:
+        payload["request_id"] = request_id
+    if extra:
+        payload.update(extra)
+    return payload
 
 
 # ============================================================
@@ -275,7 +294,13 @@ async def invoke_agent_with_retry(
 # Instrument Allocation Pre-check
 # ============================================================
 
-def handle_missing_instruments(job_id: str, db: Any) -> None:
+def handle_missing_instruments(
+    job_id: str,
+    db: Any,
+    *,
+    clerk_user_id: str | None = None,
+    request_id: str | None = None,
+) -> None:
     """
     Detect and tag instruments that are missing allocation metadata.
 
@@ -298,7 +323,7 @@ def handle_missing_instruments(job_id: str, db: Any) -> None:
         logger.error("Job %s not found", job_id)
         return
 
-    user_id = job["clerk_user_id"]
+    user_id = clerk_user_id or job["clerk_user_id"]
     accounts = db.accounts.find_by_user(user_id)
 
     missing: List[Dict[str, str]] = []
@@ -377,7 +402,14 @@ def handle_missing_instruments(job_id: str, db: Any) -> None:
         response = lambda_client.invoke(
             FunctionName=TAGGER_FUNCTION,
             InvocationType="RequestResponse",
-            Payload=json.dumps({"instruments": missing}),
+            Payload=json.dumps(
+                _build_payload(
+                    job_id,
+                    clerk_user_id=user_id,
+                    request_id=request_id,
+                    extra={"instruments": missing},
+                )
+            ),
         )
 
         raw = response["Payload"].read()
@@ -464,6 +496,9 @@ def load_portfolio_summary(job_id: str, db: Any) -> Dict[str, Any]:
                     total_value += price * quantity
 
         total_value += total_cash
+        request_payload = job.get("request_payload") or {}
+        options = request_payload.get("options") if isinstance(request_payload, dict) else None
+        options = options if isinstance(options, dict) else {}
 
         return {
             "total_value": total_value,
@@ -473,6 +508,7 @@ def load_portfolio_summary(job_id: str, db: Any) -> Dict[str, Any]:
             "target_retirement_income": float(
                 user.get("target_retirement_income", 80_000)
             ),
+            "analysis_options": options,
         }
 
     except Exception as exc:  # noqa: BLE001
@@ -484,7 +520,12 @@ def load_portfolio_summary(job_id: str, db: Any) -> Dict[str, Any]:
 # Internal Agent Invocation Helpers
 # ============================================================
 
-async def invoke_reporter_internal(job_id: str) -> str:
+async def invoke_reporter_internal(
+    job_id: str,
+    *,
+    clerk_user_id: str | None = None,
+    request_id: str | None = None,
+) -> str:
     """
     Invoke the Report Writer Lambda to generate a portfolio narrative.
 
@@ -501,7 +542,7 @@ async def invoke_reporter_internal(job_id: str) -> str:
     result = await invoke_agent_with_retry(
         "Reporter",
         REPORTER_FUNCTION,
-        {"job_id": job_id},
+        _build_payload(job_id, clerk_user_id=clerk_user_id, request_id=request_id),
     )
 
     if isinstance(result, dict) and "error" in result:
@@ -513,7 +554,12 @@ async def invoke_reporter_internal(job_id: str) -> str:
     )
 
 
-async def invoke_charter_internal(job_id: str) -> str:
+async def invoke_charter_internal(
+    job_id: str,
+    *,
+    clerk_user_id: str | None = None,
+    request_id: str | None = None,
+) -> str:
     """
     Invoke the Chart Maker Lambda to create portfolio visualisations.
 
@@ -530,7 +576,7 @@ async def invoke_charter_internal(job_id: str) -> str:
     result = await invoke_agent_with_retry(
         "Charter",
         CHARTER_FUNCTION,
-        {"job_id": job_id},
+        _build_payload(job_id, clerk_user_id=clerk_user_id, request_id=request_id),
     )
 
     if isinstance(result, dict) and "error" in result:
@@ -542,7 +588,12 @@ async def invoke_charter_internal(job_id: str) -> str:
     )
 
 
-async def invoke_retirement_internal(job_id: str) -> str:
+async def invoke_retirement_internal(
+    job_id: str,
+    *,
+    clerk_user_id: str | None = None,
+    request_id: str | None = None,
+) -> str:
     """
     Invoke the Retirement Specialist Lambda for retirement projections.
 
@@ -559,7 +610,7 @@ async def invoke_retirement_internal(job_id: str) -> str:
     result = await invoke_agent_with_retry(
         "Retirement",
         RETIREMENT_FUNCTION,
-        {"job_id": job_id},
+        _build_payload(job_id, clerk_user_id=clerk_user_id, request_id=request_id),
     )
 
     if isinstance(result, dict) and "error" in result:
@@ -583,7 +634,11 @@ async def invoke_reporter(wrapper: RunContextWrapper[PlannerContext]) -> str:
     This tool triggers the narrative generation Lambda, using the
     current planner context (specifically the `job_id`).
     """
-    return await invoke_reporter_internal(wrapper.context.job_id)
+    return await invoke_reporter_internal(
+        wrapper.context.job_id,
+        clerk_user_id=wrapper.context.clerk_user_id,
+        request_id=wrapper.context.request_id,
+    )
 
 
 @function_tool
@@ -594,7 +649,11 @@ async def invoke_charter(wrapper: RunContextWrapper[PlannerContext]) -> str:
     This tool triggers the chart-generation Lambda for the portfolio
     associated with the current `job_id`.
     """
-    return await invoke_charter_internal(wrapper.context.job_id)
+    return await invoke_charter_internal(
+        wrapper.context.job_id,
+        clerk_user_id=wrapper.context.clerk_user_id,
+        request_id=wrapper.context.request_id,
+    )
 
 
 @function_tool
@@ -605,7 +664,11 @@ async def invoke_retirement(wrapper: RunContextWrapper[PlannerContext]) -> str:
     This tool triggers the Lambda responsible for retirement projections
     for the current `job_id`.
     """
-    return await invoke_retirement_internal(wrapper.context.job_id)
+    return await invoke_retirement_internal(
+        wrapper.context.job_id,
+        clerk_user_id=wrapper.context.clerk_user_id,
+        request_id=wrapper.context.request_id,
+    )
 
 
 # ============================================================
@@ -616,6 +679,9 @@ def create_agent(
     job_id: str,
     portfolio_summary: Dict[str, Any],
     db: Any,  # noqa: ARG001  (reserved for future use if needed)
+    *,
+    clerk_user_id: str | None = None,
+    request_id: str | None = None,
 ) -> Tuple[LitellmModel, List[Any], str, PlannerContext]:
     """
     Construct the planner agent model, available tools, and task prompt.
@@ -639,7 +705,11 @@ def create_agent(
         * ``context`` – :class:`PlannerContext` with the active ``job_id``
     """
     # Create context for tool invocations
-    context = PlannerContext(job_id=job_id)
+    context = PlannerContext(
+        job_id=job_id,
+        clerk_user_id=clerk_user_id,
+        request_id=request_id,
+    )
 
     # Get Bedrock model configuration
     model_id = os.getenv(
@@ -667,7 +737,8 @@ def create_agent(
         f"{portfolio_summary['total_value']:.2f}.\n"
         f"The user has approximately {portfolio_summary['years_until_retirement']} "
         f"years until retirement with a target annual retirement income of "
-        f"{portfolio_summary['target_retirement_income']:.2f}.\n\n"
+        f"{portfolio_summary['target_retirement_income']:.2f}.\n"
+        f"Analysis options (if any): {json.dumps(portfolio_summary.get('analysis_options') or {})}\n\n"
         "Decide which specialised agents to call (Reporter, Charter, Retirement) "
         "and in which order to best serve the user. Call the appropriate tools."
     )

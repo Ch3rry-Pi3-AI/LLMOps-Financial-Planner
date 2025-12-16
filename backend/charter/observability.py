@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import logging
 from contextlib import contextmanager
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 # =========================
 # Logging Setup
@@ -35,7 +35,7 @@ logger.setLevel(logging.INFO)
 # =========================
 
 @contextmanager
-def observe():
+def observe() -> Iterator[Optional[Any]]:
     """
     Observability context manager for LangFuse + OpenAI Agents instrumentation.
 
@@ -79,7 +79,7 @@ def observe():
     # If LangFuse isn't configured, skip instrumentation entirely
     if not has_langfuse:
         logger.info("🔍 Observability: LangFuse not configured — skipping setup.")
-        yield
+        yield None
         return
 
     # Warn if OpenAI key missing — SDK instrumentation may fail
@@ -132,7 +132,7 @@ def observe():
 
     try:
         # Yield control back to application code
-        yield
+        yield langfuse_client
     finally:
         # Ensure traces are flushed if LangFuse client exists
         if langfuse_client:

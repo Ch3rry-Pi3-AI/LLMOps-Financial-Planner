@@ -56,6 +56,18 @@ Report Guidelines:
 - Focus on actionable insights, not just observations.
 - Prioritize recommendations by impact.
 - Keep sections concise but comprehensive.
+
+Portfolio Composition Analysis requirements:
+- For each account, include a markdown table of holdings.
+- The table MUST have columns in this order: Company | Ticker | Shares | Price | Value | Sector.
+- For each row:
+  - Company = security name (company/fund name).
+  - Ticker = the symbol.
+  - Shares = shares held.
+  - Price = current price per share (if provided).
+  - Value = shares × price (if price is provided).
+  - Sector = primary sector (best-guess from the provided allocations).
+- If any field is missing, write "Unknown" (or "N/A" for Price/Value) rather than omitting it.
 """
 
 

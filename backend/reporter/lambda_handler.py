@@ -108,6 +108,9 @@ async def run_reporter_agent(
     user_data: Dict[str, Any],
     db: Database | None = None,
     observability: Any | None = None,
+    *,
+    clerk_user_id: str | None = None,
+    request_id: str | None = None,
 ) -> Dict[str, Any]:
     """Run the Reporter agent, judge the output, and persist the final report.
 
@@ -154,6 +157,8 @@ async def run_reporter_agent(
             {
                 "event": "REPORTER_STARTED",
                 "job_id": job_id,
+                "clerk_user_id": clerk_user_id,
+                "request_id": request_id,
                 "timestamp": start_time.isoformat(),
             }
         )
@@ -284,6 +289,8 @@ async def run_reporter_agent(
                 {
                     "event": "REPORTER_COMPLETED",
                     "job_id": job_id,
+                    "clerk_user_id": clerk_user_id,
+                    "request_id": request_id,
                     "success": success,
                     "duration_seconds": (end_time - start_time).total_seconds(),
                     "timestamp": end_time.isoformat(),
@@ -351,6 +358,31 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
             # Normalise event into a dictionary
             if isinstance(event, str):
                 event = json.loads(event)
+            request_id = event.get("request_id") or getattr(context, "aws_request_id", None)
+            clerk_user_id = event.get("clerk_user_id") or event.get("user_id")
+            if observability:
+                correlation = {
+                    "job_id": event.get("job_id") if isinstance(event, dict) else None,
+                    "clerk_user_id": clerk_user_id,
+                    "request_id": request_id,
+                    "aws_request_id": getattr(context, "aws_request_id", None),
+                }
+                try:
+                    observability.create_event(
+                        name="Correlation IDs",
+                        status_message=json.dumps(correlation),
+                        metadata=correlation,
+                    )
+                except TypeError:
+                    try:
+                        observability.create_event(
+                            name="Correlation IDs",
+                            status_message=json.dumps(correlation),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                except Exception:  # noqa: BLE001
+                    pass
 
             # ------------------------------------------------------------------
             # Job id validation
@@ -517,13 +549,14 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
                     logger.warning(
                         json.dumps(
                             {
-                                "event": "REPORTER_USER_DATA_FALLBACK",
-                                "job_id": job_id,
-                                "error": str(exc),
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                            }
-                        )
+                            "event": "REPORTER_USER_DATA_FALLBACK",
+                            "job_id": job_id,
+                            "request_id": request_id,
+                            "error": str(exc),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
                     )
+                )
                     user_data = {
                         "years_until_retirement": 30,
                         "target_retirement_income": 80000,
@@ -539,6 +572,8 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
                     user_data=user_data,
                     db=db,
                     observability=observability,
+                    clerk_user_id=clerk_user_id,
+                    request_id=request_id,
                 )
             )
 

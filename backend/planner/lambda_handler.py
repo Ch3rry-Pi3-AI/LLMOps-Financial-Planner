@@ -41,8 +41,9 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import boto3  # ✅ added
 
@@ -70,6 +71,12 @@ from agent import create_agent, handle_missing_instruments, load_portfolio_summa
 from market import update_instrument_prices
 from observability import observe
 from templates import ORCHESTRATOR_INSTRUCTIONS
+try:
+    from rebalancer import compute_rebalance_recommendation
+except Exception:  # noqa: BLE001
+    # In some local execution contexts `backend/` isn't on sys.path.
+    # The Lambda build step vendors `rebalancer/` into the ZIP root.
+    compute_rebalance_recommendation = None  # type: ignore[assignment]
 
 # ============================================================
 # Logging & Global Resources
@@ -81,8 +88,62 @@ logger.setLevel(logging.INFO)
 # Single shared database instance for this Lambda runtime
 db = Database()
 
-# Lambda client for Tagger
-lambda_client = boto3.client("lambda")  # ✅ added
+# Lambda client for Tagger.
+# In CI/offline contexts, boto3 can raise `NoRegionError` if no default region is set.
+_lambda_region = (
+    os.getenv("AWS_REGION")
+    or os.getenv("AWS_DEFAULT_REGION")
+    or os.getenv("DEFAULT_AWS_REGION")
+    or "us-east-1"
+)
+lambda_client = boto3.client("lambda", region_name=_lambda_region)
+
+
+def _extract_correlation(event: Any, context: Any) -> tuple[str | None, str | None, str]:
+    """
+    Extract (job_id, clerk_user_id, request_id) from SQS/direct Lambda events.
+
+    - SQS messages typically carry a JSON body with these fields.
+    - Direct invokes may include top-level fields.
+    - request_id falls back to the Lambda aws_request_id (or a UUID).
+    """
+    job_id: str | None = None
+    clerk_user_id: str | None = None
+    request_id: str | None = None
+
+    parsed_event: Any = event
+    if isinstance(parsed_event, str):
+        try:
+            parsed_event = json.loads(parsed_event)
+        except json.JSONDecodeError:
+            parsed_event = {"job_id": parsed_event}
+
+    if isinstance(parsed_event, dict) and parsed_event.get("Records"):
+        record = parsed_event["Records"][0] or {}
+        body = record.get("body")
+
+        if isinstance(body, str) and body.startswith("{"):
+            try:
+                body_obj = json.loads(body)
+            except json.JSONDecodeError:
+                body_obj = {"job_id": body}
+        elif isinstance(body, dict):
+            body_obj = body
+        else:
+            body_obj = {"job_id": body}
+
+        if isinstance(body_obj, dict):
+            job_id = body_obj.get("job_id") or (body if isinstance(body, str) else None)
+            clerk_user_id = body_obj.get("clerk_user_id") or body_obj.get("user_id")
+            request_id = body_obj.get("request_id")
+
+    if isinstance(parsed_event, dict) and not job_id:
+        job_id = parsed_event.get("job_id")
+        clerk_user_id = parsed_event.get("clerk_user_id") or parsed_event.get("user_id")
+        request_id = request_id or parsed_event.get("request_id")
+
+    request_id = request_id or getattr(context, "aws_request_id", None) or str(uuid.uuid4())
+    return job_id, clerk_user_id, request_id
 
 
 # ============================================================
@@ -103,7 +164,12 @@ lambda_client = boto3.client("lambda")  # ✅ added
         )
     ),
 )
-async def run_orchestrator(job_id: str) -> None:
+async def run_orchestrator(
+    job_id: str,
+    *,
+    clerk_user_id: str | None = None,
+    request_id: str | None = None,
+) -> None:
     """
     Run the planner orchestrator for a single analysis job.
 
@@ -140,7 +206,8 @@ async def run_orchestrator(job_id: str) -> None:
             )
             return
 
-        user_id = job.get("clerk_user_id")
+        clerk_user_id = clerk_user_id or job.get("clerk_user_id")
+        request_id = request_id or str(uuid.uuid4())
 
         # Structured "planner started" event for CloudWatch dashboards
         logger.info(
@@ -148,7 +215,8 @@ async def run_orchestrator(job_id: str) -> None:
                 {
                     "event": "PLANNER_STARTED",
                     "job_id": job_id,
-                    "user_id": user_id,
+                    "clerk_user_id": clerk_user_id,
+                    "request_id": request_id,
                     "timestamp": start_time.isoformat(),
                 }
             )
@@ -158,7 +226,13 @@ async def run_orchestrator(job_id: str) -> None:
         db.jobs.update_status(job_id, "running")
 
         # Step 1: Non-agent pre-processing – tag missing instruments
-        await asyncio.to_thread(handle_missing_instruments, job_id, db)
+        await asyncio.to_thread(
+            handle_missing_instruments,
+            job_id,
+            db,
+            clerk_user_id=clerk_user_id,
+            request_id=request_id,
+        )
 
 
         # Step 2: Refresh instrument prices
@@ -168,6 +242,7 @@ async def run_orchestrator(job_id: str) -> None:
                 {
                     "event": "PLANNER_MARKET_REFRESH",
                     "job_id": job_id,
+                    "request_id": request_id,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             )
@@ -181,8 +256,67 @@ async def run_orchestrator(job_id: str) -> None:
             db,
         )
 
+        # Optional: deterministic rebalancing (saved into jobs.summary_payload)
+        analysis_options = portfolio_summary.get("analysis_options") or {}
+        rebalance_options: Dict[str, Any] = {}
+        if isinstance(analysis_options, dict):
+            maybe_rebalance = analysis_options.get("rebalance")
+            if isinstance(maybe_rebalance, dict):
+                rebalance_options = maybe_rebalance
+
+        if rebalance_options.get("enabled") and compute_rebalance_recommendation is not None:
+            try:
+                job_latest = db.jobs.find_by_id(job_id) or {}
+                user_id = job_latest.get("clerk_user_id") or clerk_user_id
+                user = db.users.find_by_clerk_id(user_id) if user_id else None
+
+                accounts_raw = db.accounts.find_by_user(user_id) if user_id else []
+                snapshot_accounts: List[Dict[str, Any]] = []
+                for account in accounts_raw:
+                    account_data: Dict[str, Any] = {
+                        "id": account.get("id"),
+                        "name": account.get("account_name"),
+                        "type": account.get("account_purpose"),
+                        "cash_balance": float(account.get("cash_balance", 0) or 0),
+                        "positions": [],
+                    }
+                    positions = db.positions.find_by_account(account["id"])
+                    for position in positions:
+                        instrument = db.instruments.find_by_symbol(position["symbol"]) or {}
+                        account_data["positions"].append(
+                            {
+                                "symbol": position.get("symbol"),
+                                "quantity": float(position.get("quantity", 0) or 0),
+                                "current_price": float(instrument.get("current_price", 0) or 0),
+                                "instrument": instrument,
+                            }
+                        )
+                    snapshot_accounts.append(account_data)
+
+                jurisdiction = (
+                    str(analysis_options.get("jurisdiction") or "").strip().upper() or "US"
+                )
+                rebalance_payload = compute_rebalance_recommendation(
+                    accounts=snapshot_accounts,
+                    asset_class_targets=(user or {}).get("asset_class_targets") or {},
+                    options={**rebalance_options, "jurisdiction": jurisdiction},
+                )
+
+                existing_summary = job_latest.get("summary_payload") or {}
+                if not isinstance(existing_summary, dict):
+                    existing_summary = {}
+                db.jobs.update_summary(job_id, {**existing_summary, "rebalance": rebalance_payload})
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Planner: Failed to compute rebalance recommendation: %s", exc)
+
         # Step 4: Build the planner agent, its tools, and context
-        model, tools, task, context = create_agent(job_id, portfolio_summary, db)
+        model, tools, task, context = create_agent(
+            job_id,
+            portfolio_summary,
+            db,
+            clerk_user_id=clerk_user_id,
+            request_id=request_id,
+        )
 
         # Log downstream agent invocations that the planner will orchestrate
         for agent_name in ["reporter", "charter", "retirement"]:
@@ -192,6 +326,7 @@ async def run_orchestrator(job_id: str) -> None:
                         "event": "AGENT_INVOKED",
                         "agent": agent_name,
                         "job_id": job_id,
+                        "request_id": request_id,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                 )
@@ -225,7 +360,8 @@ async def run_orchestrator(job_id: str) -> None:
                 {
                     "event": "PLANNER_COMPLETED",
                     "job_id": job_id,
-                    "user_id": user_id,
+                    "clerk_user_id": clerk_user_id,
+                    "request_id": request_id,
                     "duration_seconds": (end_time - start_time).total_seconds(),
                     "status": "success",
                     "timestamp": end_time.isoformat(),
@@ -241,6 +377,7 @@ async def run_orchestrator(job_id: str) -> None:
                 {
                     "event": "PLANNER_FAILED",
                     "job_id": job_id,
+                    "request_id": request_id,
                     "error": str(exc),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
@@ -274,41 +411,48 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         HTTP-style response with `statusCode` and JSON `body` string.
     """
     # Wrap the whole handler in observability/tracing context
-    with observe():
+    with observe() as observability:
         try:
             logger.info(
                 "Planner Lambda invoked with event: %s",
                 json.dumps(event)[:500],
             )
+            job_id, clerk_user_id, request_id = _extract_correlation(event, context)
+            if observability:
+                correlation = {
+                    "job_id": job_id,
+                    "clerk_user_id": clerk_user_id,
+                    "request_id": request_id,
+                    "aws_request_id": getattr(context, "aws_request_id", None),
+                }
+                try:
+                    observability.create_event(
+                        name="Correlation IDs",
+                        status_message=json.dumps(correlation),
+                        metadata=correlation,
+                    )
+                except TypeError:
+                    try:
+                        observability.create_event(
+                            name="Correlation IDs",
+                            status_message=json.dumps(correlation),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                except Exception:  # noqa: BLE001
+                    pass
             logger.info(
                 json.dumps(
                     {
                         "event": "PLANNER_LAMBDA_INVOKED",
                         "has_records": "Records" in event,
+                        "job_id": job_id,
+                        "clerk_user_id": clerk_user_id,
+                        "request_id": request_id,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                 )
             )
-
-            job_id: str | None = None
-
-            # SQS invocation path
-            if "Records" in event and len(event["Records"]) > 0:
-                body = event["Records"][0]["body"]
-
-                # Sometimes the body is a raw job_id, sometimes JSON
-                if isinstance(body, str) and body.startswith("{"):
-                    try:
-                        parsed = json.loads(body)
-                        job_id = parsed.get("job_id", body)
-                    except json.JSONDecodeError:
-                        job_id = body
-                else:
-                    job_id = body
-
-            # Direct invocation path
-            elif "job_id" in event:
-                job_id = event["job_id"]
 
             if not job_id:
                 logger.error("No job_id found in event")
@@ -316,6 +460,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     json.dumps(
                         {
                             "event": "PLANNER_MISSING_JOB_ID",
+                            "request_id": request_id,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                         }
                     )
@@ -331,19 +476,24 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     {
                         "event": "PLANNER_LAMBDA_START",
                         "job_id": job_id,
+                        "clerk_user_id": clerk_user_id,
+                        "request_id": request_id,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                 )
             )
 
             # Run the orchestration pipeline
-            asyncio.run(run_orchestrator(job_id))
+            asyncio.run(
+                run_orchestrator(job_id, clerk_user_id=clerk_user_id, request_id=request_id)
+            )
 
             logger.info(
                 json.dumps(
                     {
                         "event": "PLANNER_LAMBDA_COMPLETED",
                         "job_id": job_id,
+                        "request_id": request_id,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                 )

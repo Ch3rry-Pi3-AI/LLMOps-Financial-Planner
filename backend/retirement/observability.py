@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import contextmanager
+from typing import Any, Iterator, Optional
 
 # Lambda-compatible logger
 logger = logging.getLogger()
@@ -41,7 +42,7 @@ logger.setLevel(logging.INFO)
 
 
 @contextmanager
-def observe():
+def observe() -> Iterator[Optional[Any]]:
     """
     Context manager enabling observability (LangFuse + Logfire).
 
@@ -78,7 +79,7 @@ def observe():
     # If LangFuse is not configured, observability becomes a no-op
     if not has_langfuse:
         logger.info("🔍 Observability: LangFuse not configured. Skipping setup.")
-        yield
+        yield None
         return
 
     if not has_openai:
@@ -134,7 +135,7 @@ def observe():
 
     # Yield control to wrapped code
     try:
-        yield
+        yield langfuse_client
     finally:
         # Perform flush only if a client was successfully created
         if langfuse_client:

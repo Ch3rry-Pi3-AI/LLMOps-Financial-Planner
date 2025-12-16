@@ -63,7 +63,13 @@ db = Database()
 # ============================================================
 
 
-async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, Any]:
+async def process_instruments(
+    instruments: List[Dict[str, str]],
+    *,
+    job_id: str | None = None,
+    clerk_user_id: str | None = None,
+    request_id: str | None = None,
+) -> Dict[str, Any]:
     """
     Asynchronously classify and upsert a list of instruments.
 
@@ -91,6 +97,9 @@ async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, An
         json.dumps(
             {
                 "event": "TAGGER_STARTED",
+                "job_id": job_id,
+                "clerk_user_id": clerk_user_id,
+                "request_id": request_id,
                 "instrument_count": len(instruments),
                 "symbols": symbols,
                 "timestamp": start_time.isoformat(),
@@ -147,6 +156,8 @@ async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, An
                         "event": "INSTRUMENT_TAGGED",
                         "symbol": classification.symbol,
                         "operation": operation,
+                        "job_id": job_id,
+                        "request_id": request_id,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                 )
@@ -167,6 +178,8 @@ async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, An
                         "event": "INSTRUMENT_TAG_ERROR",
                         "symbol": classification.symbol,
                         "error": str(exc),
+                        "job_id": job_id,
+                        "request_id": request_id,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                 )
@@ -191,6 +204,9 @@ async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, An
         json.dumps(
             {
                 "event": "TAGGER_COMPLETED",
+                "job_id": job_id,
+                "clerk_user_id": clerk_user_id,
+                "request_id": request_id,
                 "instrument_count": len(instruments),
                 "tagged": len(classifications),
                 "errors": len(errors),
@@ -238,14 +254,43 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     Dict[str, Any]
         HTTP-style response with ``statusCode`` and JSON ``body``.
     """
-    with observe():
+    with observe() as observability:
         try:
             logger.info(
                 "Tagger Lambda invoked with event: %s",
-                json.dumps(event)[:500],
+                json.dumps(event)[:500] if not isinstance(event, str) else event[:500],
             )
 
+            if isinstance(event, str):
+                event = json.loads(event)
+
             instruments = event.get("instruments", [])
+            job_id = event.get("job_id")
+            request_id = event.get("request_id") or getattr(context, "aws_request_id", None)
+            clerk_user_id = event.get("clerk_user_id") or event.get("user_id")
+            if observability:
+                correlation = {
+                    "job_id": job_id,
+                    "clerk_user_id": clerk_user_id,
+                    "request_id": request_id,
+                    "aws_request_id": getattr(context, "aws_request_id", None),
+                }
+                try:
+                    observability.create_event(
+                        name="Correlation IDs",
+                        status_message=json.dumps(correlation),
+                        metadata=correlation,
+                    )
+                except TypeError:
+                    try:
+                        observability.create_event(
+                            name="Correlation IDs",
+                            status_message=json.dumps(correlation),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                except Exception:  # noqa: BLE001
+                    pass
 
             if not instruments:
                 logger.warning("No instruments provided in event payload")
@@ -255,7 +300,14 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 }
 
             # Run async processing in a single event loop
-            result = asyncio.run(process_instruments(instruments))
+            result = asyncio.run(
+                process_instruments(
+                    instruments,
+                    job_id=job_id,
+                    clerk_user_id=clerk_user_id,
+                    request_id=request_id,
+                )
+            )
 
             return {
                 "statusCode": 200,

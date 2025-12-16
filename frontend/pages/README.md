@@ -76,7 +76,7 @@ This folder is the main **presentation and navigation layer** of the app, sittin
 * Visual cards show each agent’s icon, role, and description, with **active state highlights** during analysis.
 * “Start New Analysis” button:
 
-  * Calls `POST /api/analyze` with `analysis_type: "portfolio"`.
+  * Calls `POST /api/analyze` with `analysis_type: "portfolio"` and optional `options` (jurisdiction, scenarios, rebalancing).
   * Emits custom events (`analysis:started`, `analysis:completed`, `analysis:failed`) for other components (e.g. dashboard) to react.
   * Updates local **progress state** (`starting → planner → parallel → completing → complete/error`).
   * Polls `GET /api/jobs/{job_id}` every few seconds until the job completes or fails.
@@ -95,7 +95,7 @@ This folder is the main **presentation and navigation layer** of the app, sittin
 
   * `running` / `pending` → shows in-progress messaging and refresh button.
   * `failed` → shows error details and CTA to retry via the Advisor Team.
-* Renders a three-tab layout:
+* Renders a four-tab layout:
 
   1. **Overview**
 
@@ -108,7 +108,10 @@ This folder is the main **presentation and navigation layer** of the app, sittin
      * Uses **Recharts** (`PieChart`, `BarChart`, `LineChart`) to render interactive visualisations.
   3. **Retirement Projection**
 
-     * Renders `retirement_payload.analysis` as Markdown inside a highlighted card.
+      * Renders `retirement_payload.analysis` as Markdown inside a highlighted card.
+  4. **Rebalancing**
+
+     * Reads `summary_payload.rebalance` and renders suggested trades + drift vs target allocations.
 * Includes a “New Analysis” button to jump back to `/advisor-team`.
 
 **Primary role:** Present a rich, interactive result page combining narrative report, charts, and retirement insights from a single analysis run.

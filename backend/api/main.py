@@ -27,8 +27,9 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 from decimal import Decimal
 from typing import cast
+from contextvars import ContextVar
 
-import uuid  # noqa: F401  # Reserved for potential future usage
+import uuid
 
 from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,6 +64,34 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # =========================
+# Correlation Context
+# =========================
+
+request_id_ctx: ContextVar[str | None] = ContextVar("request_id", default=None)
+clerk_user_id_ctx: ContextVar[str | None] = ContextVar("clerk_user_id", default=None)
+
+
+def _get_request_id(request: Request) -> str:
+    rid = getattr(request.state, "request_id", None)
+    if isinstance(rid, str) and rid:
+        return rid
+    # Fallback to contextvar (should normally be set by middleware)
+    rid2 = request_id_ctx.get()
+    return rid2 or "unknown"
+
+
+def _log_event(event: str, *, request: Request | None = None, **fields: Any) -> None:
+    payload: Dict[str, Any] = {
+        "event": event,
+        "timestamp": datetime.now().isoformat(),
+        "request_id": request_id_ctx.get() or (request and _get_request_id(request)),
+        "clerk_user_id": clerk_user_id_ctx.get(),
+        **fields,
+    }
+    logger.info(json.dumps(payload, default=str))
+
+
+# =========================
 # FastAPI Application Setup
 # =========================
 
@@ -72,6 +101,29 @@ app = FastAPI(
     description="Backend API for AI-powered financial planning",
     version="1.0.0",
 )
+
+# =========================
+# Request Middleware (Request-ID)
+# =========================
+
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    # Prefer an upstream request id if provided; otherwise generate one.
+    incoming = request.headers.get("x-request-id") or request.headers.get(
+        "x-amzn-trace-id"
+    )
+    request_id = incoming.strip() if incoming else str(uuid.uuid4())
+
+    request.state.request_id = request_id
+    token = request_id_ctx.set(request_id)
+    try:
+        response = await call_next(request)
+    finally:
+        request_id_ctx.reset(token)
+        clerk_user_id_ctx.set(None)
+
+    response.headers["x-request-id"] = request_id
+    return response
 
 # =========================
 # CORS Configuration
@@ -260,6 +312,7 @@ async def get_current_user_id(
     # Read the subject (user id) from the decoded Clerk JWT payload
     user_id: str = creds.decoded["sub"]
     # Log the authenticated user for observability and debugging
+    clerk_user_id_ctx.set(user_id)
     logger.info("Authenticated user: %s", user_id)
     return user_id
 
@@ -1052,7 +1105,9 @@ async def list_instruments(
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
 async def trigger_analysis(
-    request: AnalyzeRequest, clerk_user_id: str = Depends(get_current_user_id)
+    analyze_request: AnalyzeRequest,
+    http_request: Request,
+    clerk_user_id: str = Depends(get_current_user_id),
 ) -> AnalyzeResponse:
     """
     Trigger an asynchronous portfolio analysis job via SQS.
@@ -1081,29 +1136,44 @@ async def trigger_analysis(
         if not user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
+        request_id = _get_request_id(http_request) if http_request else request_id_ctx.get()
+
         # Create a job record representing this analysis request
         job_id: str = db.jobs.create_job(
             clerk_user_id=clerk_user_id,
             job_type="portfolio_analysis",
-            request_payload=request.model_dump(),
+            request_payload={
+                **analyze_request.model_dump(),
+                "request_id": request_id,
+            },
         )
 
         # Retrieve the created job (not strictly required but useful for debugging)
         job: Optional[Dict[str, Any]] = db.jobs.find_by_id(job_id)
-        logger.info("Created analysis job: %s", job)
+        _log_event(
+            "API_JOB_CREATED",
+            request=http_request,
+            job_id=str(job_id),
+        )
 
         # If an SQS queue is configured, enqueue a message for background processing
         if SQS_QUEUE_URL:
             message: Dict[str, Any] = {
                 "job_id": str(job_id),
                 "clerk_user_id": clerk_user_id,
-                "analysis_type": request.analysis_type,
-                "options": request.options,
+                "request_id": request_id,
+                "analysis_type": analyze_request.analysis_type,
+                "options": analyze_request.options,
             }
 
             # Send the job message to the SQS queue
             sqs_client.send_message(QueueUrl=SQS_QUEUE_URL, MessageBody=json.dumps(message))
-            logger.info("Sent analysis job to SQS: %s", job_id)
+            _log_event(
+                "API_SQS_ENQUEUED",
+                request=http_request,
+                job_id=str(job_id),
+                sqs_queue_url=SQS_QUEUE_URL,
+            )
         else:
             # Log a warning if no SQS queue is configured to handle jobs
             logger.warning(

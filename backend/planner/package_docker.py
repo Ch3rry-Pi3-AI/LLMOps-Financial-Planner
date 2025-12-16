@@ -117,6 +117,12 @@ PLANNER_SOURCE_FILES: list[str] = [
   "observability.py",
 ]
 
+# Additional local packages needed by the planner at runtime.
+# These are vendored into the ZIP so Lambda can import them.
+VENDORED_PACKAGE_DIRS: list[str] = [
+  "rebalancer",
+]
+
 
 def package_lambda() -> Path:
   """Build the Planner Lambda ZIP using Docker and return its path.
@@ -212,6 +218,20 @@ def package_lambda() -> Path:
 
       shutil.copy(src, dst)
       safe_print(f"  Included: {filename}")
+
+    # ------------------------------------------------------
+    # Vendor local helper packages into the bundle (repo-local code)
+    # ------------------------------------------------------
+    for pkg in VENDORED_PACKAGE_DIRS:
+      src_dir = backend_dir / pkg
+      dst_dir = package_dir / pkg
+
+      if not src_dir.exists() or not src_dir.is_dir():
+        safe_print(f"ERROR: Expected package directory not found: {src_dir}")
+        sys.exit(1)
+
+      shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+      safe_print(f"  Included package: {pkg}/")
 
     # ------------------------------------------------------
     # Create the ZIP archive

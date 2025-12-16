@@ -115,6 +115,161 @@ def truncate_response(text: str, max_length: int = 50_000) -> str:
 # Portfolio Analysis Logic
 # =========================
 
+def _safe_float(value: Any, default: float | None = None) -> float | None:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _top_n_with_other(buckets: Dict[str, float], n: int) -> list[dict[str, Any]]:
+    items = [(k, float(v)) for k, v in buckets.items() if v and float(v) > 0]
+    items.sort(key=lambda kv: kv[1], reverse=True)
+
+    top = items[:n]
+    rest = items[n:]
+    data: list[dict[str, Any]] = [{"name": k, "value": v} for k, v in top]
+
+    if rest:
+        other_value = sum(v for _, v in rest)
+        if other_value > 0:
+            data.append({"name": "other", "value": other_value})
+    return data
+
+
+def generate_deterministic_charts(portfolio_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Deterministically generate the 6 charts used by the Analysis page.
+
+    Layout target (matches the UI grid ordering logic):
+      1) Bar (top, full-width)
+      2) Pie + Pie
+      3) Pie + Donut
+      4) Bar (bottom, full-width)
+    """
+    # Aggregates
+    position_values: Dict[str, float] = {}
+    account_values: Dict[str, float] = {}
+    account_type_values: Dict[str, float] = {}
+    asset_classes: Dict[str, float] = {}
+    regions: Dict[str, float] = {}
+    sectors: Dict[str, float] = {}
+
+    total_cash = 0.0
+    total_portfolio_value = 0.0
+
+    for account in portfolio_data.get("accounts", []):
+        account_name = sanitize_user_input(str(account.get("name", "Unknown")))
+        account_type = str(account.get("type", "unknown") or "unknown")
+
+        cash = _safe_float(account.get("cash_balance"), 0.0) or 0.0
+        total_cash += cash
+        total_portfolio_value += cash
+        account_values[account_name] = account_values.get(account_name, 0.0) + cash
+        account_type_values[account_type] = account_type_values.get(account_type, 0.0) + cash
+
+        for position in account.get("positions", []):
+            symbol = str(position.get("symbol", "Unknown") or "Unknown")
+            quantity = _safe_float(position.get("quantity"), 0.0) or 0.0
+            instrument: Dict[str, Any] = position.get("instrument", {}) or {}
+
+            price = _safe_float(instrument.get("current_price"), 1.0) or 1.0
+            value = quantity * price
+            total_portfolio_value += value
+
+            position_values[symbol] = position_values.get(symbol, 0.0) + value
+            account_values[account_name] = account_values.get(account_name, 0.0) + value
+            account_type_values[account_type] = account_type_values.get(account_type, 0.0) + value
+
+            # Allocation buckets (values in pct)
+            asset_alloc = instrument.get("allocation_asset_class", {}) or {}
+            if asset_alloc:
+                for k, pct in asset_alloc.items():
+                    pct_f = _safe_float(pct, 0.0) or 0.0
+                    asset_classes[str(k)] = asset_classes.get(str(k), 0.0) + value * (
+                        pct_f / 100.0
+                    )
+            else:
+                asset_classes["unknown"] = asset_classes.get("unknown", 0.0) + value
+
+            region_alloc = instrument.get("allocation_regions", {}) or {}
+            if region_alloc:
+                for k, pct in region_alloc.items():
+                    pct_f = _safe_float(pct, 0.0) or 0.0
+                    regions[str(k)] = regions.get(str(k), 0.0) + value * (pct_f / 100.0)
+            else:
+                regions["unknown"] = regions.get("unknown", 0.0) + value
+
+            sector_alloc = instrument.get("allocation_sectors", {}) or {}
+            if sector_alloc:
+                for k, pct in sector_alloc.items():
+                    pct_f = _safe_float(pct, 0.0) or 0.0
+                    sectors[str(k)] = sectors.get(str(k), 0.0) + value * (pct_f / 100.0)
+            else:
+                sectors["unknown"] = sectors.get("unknown", 0.0) + value
+
+    # Treat cash as an explicit asset class bucket.
+    if total_cash > 0:
+        asset_classes["cash"] = asset_classes.get("cash", 0.0) + total_cash
+
+    # If the portfolio is entirely cash, still provide sensible buckets.
+    if total_portfolio_value > 0 and not regions:
+        regions["unknown"] = total_portfolio_value
+    if total_portfolio_value > 0 and not sectors:
+        sectors["unknown"] = total_portfolio_value
+
+    # Build the 6 chart payloads in the desired order.
+    top_holdings = sorted(position_values.items(), key=lambda kv: kv[1], reverse=True)[:10]
+    if not top_holdings and total_cash > 0:
+        top_holdings = [("cash", total_cash)]
+    top_holdings_data = [{"name": sym, "value": val} for sym, val in top_holdings]
+
+    charts: Dict[str, Any] = {}
+    charts["top_holdings"] = {
+        "title": "Top Holdings (Market Value)",
+        "type": "horizontalBar",
+        "description": "Largest positions by market value",
+        "data": top_holdings_data,
+    }
+    charts["asset_class_allocation"] = {
+        "title": "Asset Class Allocation",
+        "type": "pie",
+        "description": "Allocation across major asset classes (incl. cash)",
+        "data": _top_n_with_other(asset_classes, 8),
+    }
+    charts["geographic_allocation"] = {
+        "title": "Geographic Allocation",
+        "type": "pie",
+        "description": "Allocation by geographic region",
+        "data": _top_n_with_other(regions, 8),
+    }
+    charts["account_type_allocation"] = {
+        "title": "Account Type Allocation",
+        "type": "pie",
+        "description": "Allocation across account types",
+        "data": _top_n_with_other(account_type_values, 8),
+    }
+    charts["sector_allocation"] = {
+        "title": "Sector Allocation",
+        "type": "donut",
+        "description": "Allocation across industry sectors",
+        "data": _top_n_with_other(sectors, 10),
+    }
+    charts["account_values"] = {
+        "title": "Account Values",
+        "type": "bar",
+        "description": "Total value by account (cash + positions)",
+        "data": [
+            {"name": name, "value": val}
+            for name, val in sorted(account_values.items(), key=lambda kv: kv[1], reverse=True)
+        ],
+    }
+
+    return charts
+
+
 def analyze_portfolio(portfolio_data: Dict[str, Any]) -> str:
     """
     Analyse portfolio composition and compute allocation metrics.
