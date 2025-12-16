@@ -49,7 +49,7 @@ except ImportError:
 from src import Database
 
 from templates import CHARTER_INSTRUCTIONS
-from agent import create_agent
+from agent import create_agent, generate_deterministic_charts
 from observability import observe
 
 # =========================
@@ -83,6 +83,9 @@ async def run_charter_agent(
     job_id: str,
     portfolio_data: Dict[str, Any],
     db: Optional[Database] = None,
+    *,
+    clerk_user_id: str | None = None,
+    request_id: str | None = None,
 ) -> Dict[str, Any]:
     """
     Execute the Chart Maker Agent to generate portfolio visualisation data.
@@ -118,6 +121,7 @@ async def run_charter_agent(
         * ``chart_keys`` (list of str): keys of charts in the payload.
     """
     start_time = datetime.now(timezone.utc)
+    charter_mode = os.getenv("CHARTER_MODE", "deterministic").lower().strip()
 
     # Structured "charter started" event
     logger.info(
@@ -125,11 +129,50 @@ async def run_charter_agent(
             {
                 "event": "CHARTER_STARTED",
                 "job_id": job_id,
+                "clerk_user_id": clerk_user_id,
+                "request_id": request_id,
                 "account_count": len(portfolio_data.get("accounts", [])),
                 "timestamp": start_time.isoformat(),
             }
         )
     )
+
+    # Deterministic mode: generate charts without calling an LLM.
+    if charter_mode != "llm":
+        charts_data = generate_deterministic_charts(portfolio_data)
+        charts_saved = False
+        if db:
+            try:
+                charts_saved = bool(db.jobs.update_charts(job_id, charts_data))
+            except Exception as e:  # noqa: BLE001
+                logger.error("Charter: Database error saving deterministic charts: %s", e)
+
+        charts_count: int = len(charts_data)
+        chart_keys: List[str] = list(charts_data.keys())
+        end_time = datetime.now(timezone.utc)
+
+        logger.info(
+            json.dumps(
+                {
+                    "event": "CHARTER_COMPLETED",
+                    "job_id": job_id,
+                    "clerk_user_id": clerk_user_id,
+                    "request_id": request_id,
+                    "success": charts_saved if db else True,
+                    "charts_generated": charts_count,
+                    "duration_seconds": (end_time - start_time).total_seconds(),
+                    "timestamp": end_time.isoformat(),
+                    "mode": "deterministic",
+                }
+            )
+        )
+
+        return {
+            "success": charts_saved if db else True,
+            "message": f"Generated {charts_count} deterministic charts",
+            "charts_generated": charts_count,
+            "chart_keys": chart_keys,
+        }
 
     # Create the charter agent configuration (LLM model + task prompt)
     model, task = create_agent(job_id, portfolio_data, db)
@@ -328,6 +371,8 @@ async def run_charter_agent(
                 {
                     "event": "CHARTER_COMPLETED",
                     "job_id": job_id,
+                    "clerk_user_id": clerk_user_id,
+                    "request_id": request_id,
                     "success": charts_saved,
                     "charts_generated": charts_count,
                     "duration_seconds": (end_time - start_time).total_seconds(),
@@ -399,7 +444,7 @@ def lambda_handler(
         * ``body`` (str): JSON-serialised string with success/error details.
     """
     # Wrap the entire handler in an observability context (tracing / metrics)
-    with observe():
+    with observe() as observability:
         try:
             # Log the incoming event structure at a high level
             logger.info(
@@ -410,6 +455,31 @@ def lambda_handler(
             # Decode the event if it is passed as a JSON string
             if isinstance(event, str):
                 event = json.loads(event)
+            request_id = event.get("request_id") or getattr(context, "aws_request_id", None)
+            clerk_user_id = event.get("clerk_user_id") or event.get("user_id")
+            if observability:
+                correlation = {
+                    "job_id": event.get("job_id") if isinstance(event, dict) else None,
+                    "clerk_user_id": clerk_user_id,
+                    "request_id": request_id,
+                    "aws_request_id": getattr(context, "aws_request_id", None),
+                }
+                try:
+                    observability.create_event(
+                        name="Correlation IDs",
+                        status_message=json.dumps(correlation),
+                        metadata=correlation,
+                    )
+                except TypeError:
+                    try:
+                        observability.create_event(
+                            name="Correlation IDs",
+                            status_message=json.dumps(correlation),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                except Exception:  # noqa: BLE001
+                    pass
 
             # Extract the job identifier from the event
             job_id: Optional[str] = event.get("job_id") if isinstance(event, dict) else None
@@ -434,6 +504,8 @@ def lambda_handler(
                     {
                         "event": "CHARTER_LAMBDA_STARTED",
                         "job_id": job_id,
+                        "clerk_user_id": clerk_user_id,
+                        "request_id": request_id,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                 )
@@ -557,7 +629,15 @@ def lambda_handler(
             logger.info("Charter: Processing job %s", job_id)
 
             # Run the charter agent (async) synchronously via asyncio.run
-            result = asyncio.run(run_charter_agent(job_id, portfolio_data, db))
+            result = asyncio.run(
+                run_charter_agent(
+                    job_id,
+                    portfolio_data,
+                    db,
+                    clerk_user_id=clerk_user_id,
+                    request_id=request_id,
+                )
+            )
 
             # Log the result for debugging and audit
             logger.info("Charter completed for job %s: %s", job_id, result)

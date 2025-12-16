@@ -22,6 +22,7 @@ import logging
 import os
 import time
 from contextlib import contextmanager
+from typing import Any, Iterator, Optional
 
 # Use root logger for AWS Lambda compatibility
 logger = logging.getLogger()
@@ -33,7 +34,7 @@ logger.setLevel(logging.INFO)
 # ============================================================
 
 @contextmanager
-def observe():
+def observe() -> Iterator[Optional[Any]]:
     """
     Observability context manager for LangFuse + Logfire instrumentation.
 
@@ -61,7 +62,7 @@ def observe():
     # If LangFuse is not configured, observability is a no-op
     if not has_langfuse:
         logger.info("🔍 Observability: LangFuse not configured, skipping setup")
-        yield
+        yield None
         return
 
     if not has_openai:
@@ -120,7 +121,7 @@ def observe():
     # Yield control back to callers (execute orchestrator logic)
     # ========================================================
     try:
-        yield
+        yield langfuse_client
     finally:
         # ====================================================
         # Flush / shutdown traces before Lambda termination

@@ -210,7 +210,13 @@ def get_user_preferences(job_id: str) -> Dict[str, Any]:
         )
     ),
 )
-async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> Dict[str, Any]:
+async def run_retirement_agent(
+    job_id: str,
+    portfolio_data: Dict[str, Any],
+    *,
+    clerk_user_id: str | None = None,
+    request_id: str | None = None,
+) -> Dict[str, Any]:
     """
     Run the Retirement Specialist Agent end-to-end.
 
@@ -239,8 +245,23 @@ async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> D
     """
     start_time = datetime.now(timezone.utc)
 
+    # Initialise database access
+    db = Database()
+
     # Load user preferences for this job
     user_preferences = get_user_preferences(job_id)
+
+    # Load any analysis options stored on the job (e.g. scenarios)
+    analysis_options: Dict[str, Any] = {}
+    try:
+        job = db.jobs.find_by_id(job_id) or {}
+        request_payload = job.get("request_payload") or {}
+        if isinstance(request_payload, dict):
+            options = request_payload.get("options")
+            if isinstance(options, dict):
+                analysis_options = options
+    except Exception:  # noqa: BLE001
+        analysis_options = {}
 
     # Structured "retirement started" event
     logger.info(
@@ -248,17 +269,22 @@ async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> D
             {
                 "event": "RETIREMENT_STARTED",
                 "job_id": job_id,
+                "clerk_user_id": clerk_user_id,
+                "request_id": request_id,
                 "account_count": len(portfolio_data.get("accounts", [])),
                 "timestamp": start_time.isoformat(),
             }
         )
     )
 
-    # Initialise database access
-    db = Database()
-
     # Create configured agent (model, tools, and task prompt)
-    model, tools, task = create_agent(job_id, portfolio_data, user_preferences, db)
+    model, tools, task = create_agent(
+        job_id,
+        portfolio_data,
+        user_preferences,
+        db,
+        analysis_options=analysis_options,
+    )
 
     # Execute the agent
     with trace("Retirement Agent"):
@@ -342,6 +368,8 @@ async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> D
                 {
                     "event": "RETIREMENT_COMPLETED",
                     "job_id": job_id,
+                    "clerk_user_id": clerk_user_id,
+                    "request_id": request_id,
                     "success": success,
                     "duration_seconds": (end_time - start_time).total_seconds(),
                     "timestamp": end_time.isoformat(),
@@ -408,6 +436,31 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
             # Normalise event to dict
             if isinstance(event, str):
                 event = json.loads(event)
+            request_id = event.get("request_id") or getattr(context, "aws_request_id", None)
+            clerk_user_id = event.get("clerk_user_id") or event.get("user_id")
+            if observability:
+                correlation = {
+                    "job_id": event.get("job_id") if isinstance(event, dict) else None,
+                    "clerk_user_id": clerk_user_id,
+                    "request_id": request_id,
+                    "aws_request_id": getattr(context, "aws_request_id", None),
+                }
+                try:
+                    observability.create_event(
+                        name="Correlation IDs",
+                        status_message=json.dumps(correlation),
+                        metadata=correlation,
+                    )
+                except TypeError:
+                    try:
+                        observability.create_event(
+                            name="Correlation IDs",
+                            status_message=json.dumps(correlation),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                except Exception:  # noqa: BLE001
+                    pass
 
             job_id = event.get("job_id")
             if not job_id:
@@ -429,6 +482,8 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
                     {
                         "event": "RETIREMENT_LAMBDA_STARTED",
                         "job_id": job_id,
+                        "clerk_user_id": clerk_user_id,
+                        "request_id": request_id,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                 )
@@ -548,7 +603,14 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
             logger.info("Retirement: Processing job %s", job_id)
 
             # Run the async retirement agent
-            result = asyncio.run(run_retirement_agent(job_id, portfolio_data))
+            result = asyncio.run(
+                run_retirement_agent(
+                    job_id,
+                    portfolio_data,
+                    clerk_user_id=clerk_user_id,
+                    request_id=request_id,
+                )
+            )
 
             logger.info("Retirement completed for job %s", job_id)
 

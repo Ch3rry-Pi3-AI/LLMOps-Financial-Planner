@@ -34,7 +34,7 @@ import logging
 import os
 import time
 from contextlib import contextmanager
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 # ============================================================
 # Logger Configuration
@@ -51,7 +51,7 @@ logger.setLevel(logging.INFO)
 
 
 @contextmanager
-def observe() -> Iterator[None]:
+def observe() -> Iterator[Optional[Any]]:
     """
     Context manager for observability with LangFuse (and Logfire).
 
@@ -86,7 +86,7 @@ def observe() -> Iterator[None]:
     # If LangFuse is not configured, do nothing but still yield control
     if not has_langfuse:
         logger.info("🔍 Observability: LangFuse not configured, skipping setup")
-        yield
+        yield None
         return
 
     if not has_openai:
@@ -144,7 +144,7 @@ def observe() -> Iterator[None]:
     # Execution phase – yield to caller
     # --------------------------------------------------------
     try:
-        yield
+        yield langfuse_client
     finally:
         # ----------------------------------------------------
         # Teardown phase – flush and shutdown LangFuse client

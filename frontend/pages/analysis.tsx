@@ -61,6 +61,7 @@ interface Job {
     analysis: string;
     generated_at: string;
   };
+  summary_payload?: Record<string, any> | null;
   error_message?: string;
 }
 
@@ -82,7 +83,9 @@ interface JobListItem {
  *
  * Controls which main section of the analysis page is visible.
  */
-type TabType = "overview" | "charts" | "retirement";
+type TabType = "overview" | "charts" | "retirement" | "rebalance";
+
+type CurrencyCode = "GBP" | "USD";
 
 /**
  * COLORS
@@ -109,6 +112,14 @@ const formatCurrencyGBP = (value: number): string =>
   new Intl.NumberFormat("en-GB", {
     style: "currency",
     currency: "GBP",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
+
+const formatCurrency = (value: number, currency: CurrencyCode): string =>
+  new Intl.NumberFormat(currency === "USD" ? "en-US" : "en-GB", {
+    style: "currency",
+    currency,
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value);
@@ -190,20 +201,20 @@ const MARKDOWN_COMPONENTS: Components = {
     </div>
   ),
   thead: ({ children, ...props }) => (
-    <thead {...props} className="bg-gray-100">
+    <thead {...props} className="!bg-gray-800 !text-gray-100">
       {children}
     </thead>
   ),
   th: ({ children, ...props }) => (
     <th
       {...props}
-      className="p-3 text-left font-semibold border border-gray-300"
+      className="p-3 text-left font-semibold border border-gray-700 !text-gray-100"
     >
       {children}
     </th>
   ),
   td: ({ children, ...props }) => (
-    <td {...props} className="p-3 border border-gray-300">
+    <td {...props} className="p-3 border border-gray-700">
       {children}
     </td>
   ),
@@ -809,6 +820,146 @@ export default function Analysis() {
     );
   };
 
+  const renderRebalance = () => {
+    const rebalance = job?.summary_payload?.rebalance;
+    if (!rebalance || rebalance.enabled === false) {
+      return (
+        <div className="text-center py-12 text-gray-500">
+          No rebalancing recommendation available.
+        </div>
+      );
+    }
+
+    const currency: CurrencyCode =
+      String(rebalance.jurisdiction || "").toUpperCase() === "US" ? "USD" : "GBP";
+
+    const allocation = rebalance.asset_class_allocation || {};
+    const currentPct = allocation.current_pct || {};
+    const targetPct = allocation.target_pct || {};
+
+    const trades: any[] = Array.isArray(rebalance.trades) ? rebalance.trades : [];
+    const notes: string[] = Array.isArray(rebalance.notes) ? rebalance.notes : [];
+
+    return (
+      <div className="space-y-8">
+        <div className="bg-white rounded-lg border border-gray-200 p-6">
+          <h3 className="text-xl font-semibold mb-3 text-gray-800">
+            Allocation (Asset Class)
+          </h3>
+
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-gray-200">
+                  <th className="text-left py-3 px-4 font-semibold text-gray-700">
+                    Asset Class
+                  </th>
+                  <th className="text-right py-3 px-4 font-semibold text-gray-700">
+                    Current
+                  </th>
+                  <th className="text-right py-3 px-4 font-semibold text-gray-700">
+                    Target
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {Array.from(
+                  new Set([
+                    ...Object.keys(currentPct),
+                    ...Object.keys(targetPct),
+                  ])
+                ).map((key) => (
+                  <tr
+                    key={key}
+                    className="border-b border-gray-100 hover:bg-gray-50 transition-colors"
+                  >
+                    <td className="py-3 px-4 font-medium">{formatLabelName(key)}</td>
+                    <td className="py-3 px-4 text-right">
+                      {Number(currentPct[key] || 0).toFixed(2)}%
+                    </td>
+                    <td className="py-3 px-4 text-right">
+                      {Number(targetPct[key] || 0).toFixed(2)}%
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg border border-gray-200 p-6">
+          <h3 className="text-xl font-semibold mb-3 text-gray-800">
+            Suggested Trades (Heuristic)
+          </h3>
+
+          {trades.length === 0 ? (
+            <p className="text-gray-600">No trades suggested within drift bands.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-gray-200">
+                    <th className="text-left py-3 px-4 font-semibold text-gray-700">
+                      Symbol
+                    </th>
+                    <th className="text-left py-3 px-4 font-semibold text-gray-700">
+                      Action
+                    </th>
+                    <th className="text-right py-3 px-4 font-semibold text-gray-700">
+                      Est. Value
+                    </th>
+                    <th className="text-right py-3 px-4 font-semibold text-gray-700">
+                      Est. Qty
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trades.map((t, idx) => (
+                    <tr
+                      key={`${t.symbol}-${idx}`}
+                      className="border-b border-gray-100 hover:bg-gray-50 transition-colors"
+                    >
+                      <td className="py-3 px-4 font-medium">{t.symbol}</td>
+                      <td className="py-3 px-4">
+                        <span
+                          className={`inline-flex px-2 py-1 rounded text-xs font-semibold ${
+                            t.action === "sell"
+                              ? "bg-red-50 text-red-700"
+                              : "bg-green-50 text-green-700"
+                          }`}
+                        >
+                          {String(t.action || "").toUpperCase()}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        {formatCurrency(Number(t.estimated_value || 0), currency)}
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        {t.estimated_quantity != null
+                          ? Number(t.estimated_quantity).toLocaleString("en-US", {
+                              maximumFractionDigits: 6,
+                            })
+                          : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {notes.length > 0 && (
+            <div className="mt-4 text-sm text-gray-600 space-y-1">
+              {notes.map((n, i) => (
+                <p key={i}>{n}</p>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <>
       <Head>
@@ -872,6 +1023,16 @@ export default function Analysis() {
                   >
                     Retirement Projection
                   </button>
+                  <button
+                    onClick={() => setActiveTab("rebalance")}
+                    className={`py-3 px-8 border-b-2 font-medium text-sm transition-colors ${
+                      activeTab === "rebalance"
+                        ? "border-primary text-primary"
+                        : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+                    }`}
+                  >
+                    Rebalancing
+                  </button>
                 </nav>
               </div>
             </div>
@@ -881,6 +1042,7 @@ export default function Analysis() {
               {activeTab === "overview" && renderOverview()}
               {activeTab === "charts" && renderCharts()}
               {activeTab === "retirement" && renderRetirement()}
+              {activeTab === "rebalance" && renderRebalance()}
             </div>
           </div>
         </div>

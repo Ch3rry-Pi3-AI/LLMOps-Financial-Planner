@@ -47,14 +47,22 @@ output "setup_instructions" {
     aws rds-data execute-statement \
       --resource-arn ${aws_rds_cluster.aurora.arn} \
       --secret-arn ${aws_secretsmanager_secret.db_credentials.arn} \
-      --database alex \
+      --database ${aws_rds_cluster.aurora.database_name} \
       --sql "SELECT version()"
     
-    To set up the database schema:
+    Recommended next steps (via deploy_stacks orchestrator):
+    - Run migrations + seed instruments:
+      cd scripts
+      uv run deploy_stacks.py --migrate --seed
+
+    - Load test portfolio data + verify DB (runs: test_data_api + reset_db --with-test-data + verify_database):
+      cd scripts
+      uv run deploy_stacks.py --db-testdata
+
+    Manual equivalents (if you prefer running scripts directly):
     cd backend/database
-    uv run migrate.py
-    
-    To load sample data:
+    uv run run_migrations.py
+    uv run seed_data.py
     uv run reset_db.py --with-test-data
     
     💰 Cost Management:

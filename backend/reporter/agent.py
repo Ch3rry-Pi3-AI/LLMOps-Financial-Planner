@@ -218,16 +218,30 @@ def format_portfolio_for_analysis(
     """
     metrics = calculate_portfolio_metrics(portfolio_data)
 
+    def _fmt_gbp(value: float) -> str:
+        return f"£{value:,.2f}"
+
+    def _primary_bucket(allocation: Any) -> str:
+        if not isinstance(allocation, dict) or not allocation:
+            return "Unknown"
+        try:
+            # allocation values may be strings or numbers
+            best = max(allocation.items(), key=lambda kv: float(kv[1] or 0))
+            name = str(best[0]).strip()
+            return name if name else "Unknown"
+        except Exception:  # noqa: BLE001
+            return "Unknown"
+
     lines: List[str] = [
         "Portfolio Overview:",
         f"- {metrics['num_accounts']} accounts",
         f"- {metrics['num_positions']} total positions",
         f"- {metrics['unique_symbols']} unique holdings",
-        f"- ${metrics['cash_balance']:,.2f} in cash",
+        f"- {_fmt_gbp(metrics['cash_balance'])} in cash",
     ]
 
     if metrics["total_value"] > 0:
-        lines.append(f"- ${metrics['total_value']:,.2f} total value")
+        lines.append(f"- {_fmt_gbp(metrics['total_value'])} total value")
 
     lines.append("")
     lines.append("Account Details:")
@@ -238,7 +252,12 @@ def format_portfolio_for_analysis(
         account_name = sanitize_user_input(str(account_name_raw))
 
         cash = float(account.get("cash_balance", 0.0))
-        lines.append(f"\n{account_name} (${cash:,.2f} cash):")
+        lines.append(f"\n{account_name} ({_fmt_gbp(cash)} cash):")
+
+        # Provide a structured, copy-paste-friendly markdown table for holdings.
+        lines.append("")
+        lines.append("| Company | Ticker | Shares | Price | Value | Sector |")
+        lines.append("|---|---|---:|---:|---:|---|")
 
         for position in account.get("positions", []):
             symbol = position.get("symbol")
@@ -247,6 +266,28 @@ def format_portfolio_for_analysis(
             instrument = position.get("instrument", {}) or {}
             # Guard against prompt injection in instrument names
             instrument_name = sanitize_user_input(str(instrument.get("name", "") or ""))
+            safe_name = instrument_name.strip() if instrument_name.strip() else "Unknown"
+
+            price_raw = instrument.get("current_price")
+            price_value: float | None
+            try:
+                price_value = float(price_raw) if price_raw is not None and price_raw != "" else None
+            except (TypeError, ValueError):
+                price_value = None
+
+            value_value: float | None = (
+                (price_value * quantity) if price_value is not None else None
+            )
+
+            sector = _primary_bucket(instrument.get("allocation_sectors", {}))
+            sector_safe = sanitize_user_input(sector)
+
+            price_str = _fmt_gbp(price_value) if price_value is not None else "N/A"
+            value_str = _fmt_gbp(value_value) if value_value is not None else "N/A"
+
+            lines.append(
+                f"| {safe_name} | {symbol or 'Unknown'} | {quantity:,.2f} | {price_str} | {value_str} | {sector_safe} |",
+            )
 
             allocations: List[str] = []
 
@@ -269,10 +310,9 @@ def format_portfolio_for_analysis(
                     allocations.append(f"Regions: {top_regions}")
 
             alloc_str = f" ({', '.join(allocations)})" if allocations else ""
-            display_name = f"{instrument_name} " if instrument_name else ""
-            lines.append(
-                f"  - {symbol}: {quantity:,.2f} shares in {display_name.strip()}{alloc_str}",
-            )
+            # Keep the existing bullet representation too (useful as extra context
+            # for the reporter agent, but the table above is the primary format).
+            lines.append(f"  - {symbol} — {safe_name} — {quantity:,.2f} shares{alloc_str}")
 
     # User profile context – these are numeric in the current schema, so they
     # are safe from prompt injection by construction.

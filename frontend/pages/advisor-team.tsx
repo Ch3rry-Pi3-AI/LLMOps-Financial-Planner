@@ -96,6 +96,11 @@ export default function AdvisorTeam() {
   const router = useRouter();
   const { getToken } = useAuth();
 
+  const [jurisdiction, setJurisdiction] = useState<"US" | "UK">("US");
+  const [annualContribution, setAnnualContribution] = useState<number>(10000);
+  const [includeScenarios, setIncludeScenarios] = useState<boolean>(true);
+  const [includeRebalance, setIncludeRebalance] = useState<boolean>(true);
+
   const [jobs, setJobs] = useState<Job[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
@@ -192,9 +197,37 @@ export default function AdvisorTeam() {
 
       const token = await getToken();
       if (!token) throw new Error("Missing auth token");
+
+      const retirementScenarios = includeScenarios
+        ? [
+            { name: "Optimistic", return_shift: 0.01, volatility_mult: 0.9 },
+            {
+              name: "Stress (early crash)",
+              shock_year: 1,
+              shock_pct: 0.25,
+              return_shift: -0.01,
+              volatility_mult: 1.2,
+            },
+            { name: "Retire 5y later", retirement_age_delta: 5 },
+          ]
+        : [];
       const data = await apiRequest<AnalyzeResponse>("/api/analyze", token, {
         method: "POST",
-        body: JSON.stringify({ analysis_type: "portfolio" }),
+        body: JSON.stringify({
+          analysis_type: "portfolio",
+          options: {
+            jurisdiction,
+            annual_contribution: annualContribution,
+            retirement_scenarios: retirementScenarios,
+            rebalance: {
+              enabled: includeRebalance,
+              drift_band_pct: 5,
+              max_turnover_pct: 20,
+              transaction_cost_bps: 10,
+              cash_only: true,
+            },
+          },
+        }),
       });
 
       const jobId = data.job_id || data.id;
@@ -331,6 +364,71 @@ export default function AdvisorTeam() {
                 >
                   {isAnalyzing ? "Analysis in Progress..." : "Start New Analysis"}
                 </button>
+              </div>
+
+              <div className="mb-6 grid grid-cols-1 lg:grid-cols-3 gap-4">
+                <div className="bg-surface-2 border border-border rounded-xl p-4">
+                  <label className="block text-sm font-semibold text-foreground mb-2">
+                    Jurisdiction
+                  </label>
+                  <select
+                    value={jurisdiction}
+                    onChange={(e) => setJurisdiction(e.target.value as "US" | "UK")}
+                    className="w-full px-3 py-2 rounded-lg border border-border bg-surface text-foreground"
+                    disabled={isAnalyzing}
+                  >
+                    <option value="US">US</option>
+                    <option value="UK">UK</option>
+                  </select>
+                  <p className="text-xs text-muted mt-2">
+                    Used for high-level tax-aware guidance (not tax advice).
+                  </p>
+                </div>
+
+                <div className="bg-surface-2 border border-border rounded-xl p-4">
+                  <label className="block text-sm font-semibold text-foreground mb-2">
+                    Annual Contribution Assumption
+                  </label>
+                  <input
+                    type="number"
+                    value={annualContribution}
+                    onChange={(e) => setAnnualContribution(Number(e.target.value || 0))}
+                    className="w-full px-3 py-2 rounded-lg border border-border bg-surface text-foreground"
+                    min={0}
+                    step={100}
+                    disabled={isAnalyzing}
+                  />
+                  <p className="text-xs text-muted mt-2">
+                    Feeds retirement projections and scenario modeling.
+                  </p>
+                </div>
+
+                <div className="bg-surface-2 border border-border rounded-xl p-4 space-y-3">
+                  <label className="flex items-center justify-between gap-3 text-sm font-semibold text-foreground">
+                    <span>Scenario Modeling</span>
+                    <input
+                      type="checkbox"
+                      checked={includeScenarios}
+                      onChange={(e) => setIncludeScenarios(e.target.checked)}
+                      disabled={isAnalyzing}
+                      className="h-4 w-4"
+                    />
+                  </label>
+                  <label className="flex items-center justify-between gap-3 text-sm font-semibold text-foreground">
+                    <span>Rebalancing Recommendation</span>
+                    <input
+                      type="checkbox"
+                      checked={includeRebalance}
+                      onChange={(e) => setIncludeRebalance(e.target.checked)}
+                      disabled={isAnalyzing}
+                      className="h-4 w-4"
+                    />
+                  </label>
+                  <p className="text-xs text-muted">
+                    Scenarios appear in the Retirement tab; rebalancing appears as a new
+                    tab in the results view.
+                  </p>
+                </div>
               </div>
 
               {isAnalyzing && (

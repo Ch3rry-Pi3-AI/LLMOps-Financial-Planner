@@ -34,7 +34,7 @@ Available tools (USE ONLY these three):
 Your workflow:
 1. Call invoke_reporter if the portfolio has ANY positions.
 2. Call invoke_charter if the portfolio has AT LEAST TWO positions.
-3. Call invoke_retirement if the user has retirement goal information.
+3. Call invoke_retirement if the user has retirement targets OR if scenario options are requested.
 4. When all necessary tools have been called, respond with exactly:  "Done"
 
 Rules:
