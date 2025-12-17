@@ -41,6 +41,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -108,6 +109,70 @@ def _normalize_markdown_report(text: str) -> str:
             return "\n".join(lines[idx:]).lstrip()
 
     return stripped
+
+
+def _remove_duplicate_title_heading(text: str, *, title: str) -> str:
+    """
+    Remove a redundant immediate subheading / list item that repeats the H1 title.
+
+    Some models output:
+      # Title
+      1. Title
+    or:
+      # Title
+      ## Title
+    which looks duplicated in the UI.
+    """
+    if not text:
+        return text
+
+    lines = text.splitlines()
+    if not lines:
+        return text
+
+    # Find first non-empty line (should be the title after normalization).
+    idx = 0
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    if idx >= len(lines):
+        return text
+
+    next_idx = idx + 1
+    while next_idx < len(lines) and not lines[next_idx].strip():
+        next_idx += 1
+    if next_idx >= len(lines):
+        return text
+
+    candidate = lines[next_idx].strip()
+    normalized_title = title.strip()
+    if not normalized_title:
+        return text
+
+    # Patterns that represent a duplicated title line.
+    is_heading_dup = candidate.startswith("#") and candidate.lstrip("#").strip() == normalized_title
+    is_plain_dup = candidate == normalized_title
+    is_numbered_dup = bool(
+        re.match(rf"^\d+[\.\)]\s*{re.escape(normalized_title)}\s*$", candidate, flags=re.IGNORECASE)
+    )
+
+    if not (is_heading_dup or is_plain_dup or is_numbered_dup):
+        return text
+
+    # Drop the duplicate line; keep surrounding content intact.
+    new_lines = lines[:next_idx] + lines[next_idx + 1 :]
+    return "\n".join(new_lines).strip() + "\n"
+
+
+def _replace_html_breaks(text: str) -> str:
+    """
+    Replace HTML line breaks with plain text separators.
+
+    The frontend markdown renderer does not render raw HTML by default, so
+    `<br>` would appear literally (especially inside table cells).
+    """
+    if not text:
+        return text
+    return re.sub(r"<br\\s*/?>", "; ", text, flags=re.IGNORECASE)
 
 
 # ============================================================
@@ -333,6 +398,11 @@ async def run_retirement_agent(
             raise
 
         markdown = _normalize_markdown_report(result.final_output)
+        markdown = _remove_duplicate_title_heading(
+            markdown,
+            title="Retirement Readiness Assessment",
+        )
+        markdown = _replace_html_breaks(markdown)
         retirement_payload = {
             "analysis": markdown,
             "generated_at": datetime.utcnow().isoformat(),

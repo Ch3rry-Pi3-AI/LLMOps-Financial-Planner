@@ -83,6 +83,45 @@ body {
   font-family: var(--font-sans);
 }
 
+/* --------------------------------------------------------------------------
+   Print / PDF Export
+   - Uses browser "Print" -> "Save to PDF" to export the currently visible tab.
+   -------------------------------------------------------------------------- */
+.print-only {
+  display: none;
+}
+
+@media print {
+  /* Show only the tab content area. */
+  body * {
+    visibility: hidden !important;
+  }
+
+  #print-area,
+  #print-area * {
+    visibility: visible !important;
+  }
+
+  #print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-only {
+    display: block !important;
+  }
+}
+
 /* Compatibility mappings so existing light-mode Tailwind utilities render well in dark mode. */
 html:not(.light-theme) .bg-white {
   background-color: var(--surface) !important;

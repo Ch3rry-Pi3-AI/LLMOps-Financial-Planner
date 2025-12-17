@@ -130,12 +130,12 @@ def _pick_symbol(
     asset_class: str,
     *,
     jurisdiction: str,
-) -> str:
+) -> Tuple[str, bool]:
     items = holdings_by_class.get(asset_class, [])
     if items:
         items_sorted = sorted(items, key=lambda x: x[1], reverse=True)
-        return items_sorted[0][0]
-    return _default_symbol_for_asset_class(asset_class, jurisdiction=jurisdiction)
+        return items_sorted[0][0], False
+    return _default_symbol_for_asset_class(asset_class, jurisdiction=jurisdiction), True
 
 
 def compute_rebalance_recommendation(
@@ -163,6 +163,7 @@ def compute_rebalance_recommendation(
     symbol_values: Dict[str, float] = {}
     symbol_prices: Dict[str, float] = {}
     symbol_asset_class: Dict[str, str] = {}
+    symbol_company: Dict[str, str] = {}
     holdings_by_class: Dict[str, List[Tuple[str, float]]] = {}
     tax_buckets: Dict[str, int] = {"tax_free": 0, "tax_deferred": 0, "taxable": 0, "unknown": 0}
 
@@ -180,6 +181,9 @@ def compute_rebalance_recommendation(
                 continue
 
             instrument = pos.get("instrument") or {}
+            name = instrument.get("name") or instrument.get("instrument_name")
+            if isinstance(name, str) and name.strip():
+                symbol_company.setdefault(symbol, name.strip())
             price = _safe_float(
                 pos.get("current_price", instrument.get("current_price")),
                 default=0.0,
@@ -217,6 +221,7 @@ def compute_rebalance_recommendation(
     sells_excess = {cls: -amt for cls, amt in deltas.items() if amt < -drift_band_value}
 
     trades: List[Dict[str, Any]] = []
+    placeholders_used: Dict[str, str] = {}
     cash_to_spend = total_cash
     turnover_cap_value = (opts.max_turnover_pct / 100.0) * total_value
     turnover_used = 0.0
@@ -224,8 +229,17 @@ def compute_rebalance_recommendation(
     def add_trade(symbol: str, action: str, value_amount: float) -> None:
         price = symbol_prices.get(symbol, 0.0)
         qty = (value_amount / price) if price > 0 else None
+        placeholder_company = {
+            "BND": "Vanguard Total Bond Market ETF",
+            "VTI": "Vanguard Total Stock Market ETF",
+            "VWRL": "Vanguard FTSE All-World ETF",
+            "AGGG": "iShares Core Global Aggregate Bond UCITS ETF",
+            "CASH": "Cash",
+        }
+        company = symbol_company.get(symbol) or placeholder_company.get(symbol.upper()) or symbol
         trades.append(
             {
+                "company": company,
                 "symbol": symbol,
                 "action": action,
                 "estimated_value": round(value_amount, 2),
@@ -244,7 +258,13 @@ def compute_rebalance_recommendation(
             spend = min(cash_to_spend, need, cash_to_spend * portion)
             if spend <= 0:
                 continue
-            symbol = _pick_symbol(holdings_by_class, cls, jurisdiction=opts.jurisdiction)
+            symbol, used_placeholder = _pick_symbol(
+                holdings_by_class,
+                cls,
+                jurisdiction=opts.jurisdiction,
+            )
+            if used_placeholder and symbol:
+                placeholders_used[symbol] = cls
             add_trade(symbol, "buy", spend)
             cash_to_spend -= spend
             buys_needed[cls] = max(0.0, buys_needed[cls] - spend)
@@ -259,7 +279,13 @@ def compute_rebalance_recommendation(
                 sell_amount = min(excess, remaining_buy, turnover_cap_value - turnover_used)
                 if sell_amount <= 0:
                     continue
-                sell_symbol = _pick_symbol(holdings_by_class, sell_cls, jurisdiction=opts.jurisdiction)
+                sell_symbol, used_placeholder = _pick_symbol(
+                    holdings_by_class,
+                    sell_cls,
+                    jurisdiction=opts.jurisdiction,
+                )
+                if used_placeholder and sell_symbol:
+                    placeholders_used[sell_symbol] = sell_cls
                 add_trade(sell_symbol, "sell", sell_amount)
                 turnover_used += sell_amount
 
@@ -268,7 +294,13 @@ def compute_rebalance_recommendation(
                     if need <= 0:
                         continue
                     buy_amount = min(need, sell_amount)
-                    buy_symbol = _pick_symbol(holdings_by_class, buy_cls, jurisdiction=opts.jurisdiction)
+                    buy_symbol, used_placeholder = _pick_symbol(
+                        holdings_by_class,
+                        buy_cls,
+                        jurisdiction=opts.jurisdiction,
+                    )
+                    if used_placeholder and buy_symbol:
+                        placeholders_used[buy_symbol] = buy_cls
                     add_trade(buy_symbol, "buy", buy_amount)
                     buys_needed[buy_cls] = max(0.0, buys_needed[buy_cls] - buy_amount)
                     remaining_buy -= buy_amount
@@ -292,6 +324,23 @@ def compute_rebalance_recommendation(
             "In taxable accounts, prefer using new cash/dividends first; be mindful of CGT and UK share matching rules.",
         ]
 
+    placeholder_notes: List[str] = []
+    if placeholders_used:
+        placeholder_notes.append(
+            "Some symbols below are placeholders used when you don't currently hold a suitable fund in that asset class:",
+        )
+        descriptions = {
+            "BND": "broad US bond market ETF (Vanguard Total Bond Market ETF).",
+            "VTI": "broad US stock market ETF (Vanguard Total Stock Market ETF).",
+            "VWRL": "global stock market ETF (Vanguard FTSE All-World ETF).",
+            "AGGG": "global aggregate bond ETF (iShares Core Global Aggregate Bond).",
+            "CASH": "cash placeholder (not a tradable ticker).",
+        }
+        for symbol in sorted(placeholders_used.keys()):
+            desc = descriptions.get(symbol.upper())
+            if desc:
+                placeholder_notes.append(f"- {symbol.upper()}: {desc}")
+
     return {
         "enabled": True,
         "jurisdiction": opts.jurisdiction,
@@ -313,9 +362,9 @@ def compute_rebalance_recommendation(
         "trades": trades,
         "estimated_transaction_cost": round(est_cost, 2),
         "notes": [
-            "This is a heuristic MVP; quantities are estimates based on latest known prices.",
+            "This is a simplified estimate (not a full tax-lot optimizer); quantities are based on the latest known prices.",
             "If a recommended symbol is not held, a common-market ETF placeholder may be used.",
+            *placeholder_notes,
             *tax_guidance,
         ],
     }
-

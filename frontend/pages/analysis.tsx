@@ -244,6 +244,13 @@ const MarkdownPanel = ({ content }: { content: string }) => (
   </div>
 );
 
+const TAB_TITLES: Record<TabType, string> = {
+  overview: "Overview",
+  charts: "Charts",
+  retirement: "Retirement Projection",
+  rebalance: "Rebalancing",
+};
+
 /**
  * Analysis
  *
@@ -305,7 +312,7 @@ export default function Analysis() {
         const jobs: JobListItem[] = data.jobs || [];
 
         const latestCompletedJob = jobs
-          .filter((j) => j.status === "completed")
+          .filter((j) => j.status === "completed" && j.job_type === "portfolio_analysis")
           .sort(
             (a, b) =>
               new Date(b.created_at).getTime() -
@@ -811,9 +818,11 @@ export default function Analysis() {
 
     return (
       <div className="space-y-8">
-        {retirementAnalysis && (
-          <div className="bg-ai-accent/10 border border-ai-accent/20 rounded-lg p-6">
-            <MarkdownPanel content={retirementAnalysis} />
+        {retirementAnalysis ? (
+          <MarkdownPanel content={retirementAnalysis} />
+        ) : (
+          <div className="text-center py-12 text-gray-500">
+            No retirement projection available.
           </div>
         )}
       </div>
@@ -839,124 +848,67 @@ export default function Analysis() {
 
     const trades: any[] = Array.isArray(rebalance.trades) ? rebalance.trades : [];
     const notes: string[] = Array.isArray(rebalance.notes) ? rebalance.notes : [];
+    const estCost = rebalance.estimated_transaction_cost;
+
+    const fmtPct = (value: any): string => `${Number(value || 0).toFixed(2)}%`;
+
+    const allocationKeys = Array.from(
+      new Set([...Object.keys(currentPct), ...Object.keys(targetPct)]),
+    );
+
+    const allocationRows = allocationKeys
+      .map((k) => `| ${formatLabelName(k)} | ${fmtPct(currentPct[k])} | ${fmtPct(targetPct[k])} |`)
+      .join("\n");
+
+    const tradesRows =
+      trades.length === 0
+        ? "| - | - | - | - | - |"
+        : trades
+            .map((t) => {
+              const company = String(t.company || t.symbol || "-");
+              const ticker = String(t.symbol || "-");
+              const action = String(t.action || "").toUpperCase() || "-";
+              const estValue = formatCurrency(Number(t.estimated_value || 0), currency);
+              const estQty =
+                t.estimated_quantity != null
+                  ? Number(t.estimated_quantity).toLocaleString("en-US", {
+                      maximumFractionDigits: 6,
+                    })
+                  : "-";
+              return `| ${company} | ${ticker} | ${action} | ${estValue} | ${estQty} |`;
+            })
+            .join("\n");
+
+    const cleanedNotes = notes
+      .map((n) => String(n || "").trim())
+      .filter(Boolean)
+      .map((n) => n.replace(/^-+\s*/, ""));
+
+    const md = [
+      "# Rebalancing Recommendation",
+      "",
+      "This tab provides a simplified rebalancing suggestion. It compares your current asset-class weights to your target weights and suggests example trades to move you closer to target (cash-first where possible).",
+      "",
+      ...(typeof estCost === "number" && estCost > 0
+        ? [`Estimated transaction cost: **${formatCurrency(estCost, currency)}**`, ""]
+        : []),
+      "## Allocation (Asset Class)",
+      "| Asset Class | Current | Target |",
+      "|---|---:|---:|",
+      allocationRows || "| - | - | - |",
+      "",
+      "## Suggested Trades",
+      "| Company | Ticker | Action | Est. Value | Est. Qty |",
+      "|---|---|---|---:|---:|",
+      tradesRows,
+      "",
+      "## Notes",
+      ...(cleanedNotes.length ? cleanedNotes.map((n) => `- ${n}`) : ["- No additional notes."]),
+      "",
+    ].join("\n");
 
     return (
-      <div className="space-y-8">
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
-          <h3 className="text-xl font-semibold mb-3 text-gray-800">
-            Allocation (Asset Class)
-          </h3>
-
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-gray-200">
-                  <th className="text-left py-3 px-4 font-semibold text-gray-700">
-                    Asset Class
-                  </th>
-                  <th className="text-right py-3 px-4 font-semibold text-gray-700">
-                    Current
-                  </th>
-                  <th className="text-right py-3 px-4 font-semibold text-gray-700">
-                    Target
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {Array.from(
-                  new Set([
-                    ...Object.keys(currentPct),
-                    ...Object.keys(targetPct),
-                  ])
-                ).map((key) => (
-                  <tr
-                    key={key}
-                    className="border-b border-gray-100 hover:bg-gray-50 transition-colors"
-                  >
-                    <td className="py-3 px-4 font-medium">{formatLabelName(key)}</td>
-                    <td className="py-3 px-4 text-right">
-                      {Number(currentPct[key] || 0).toFixed(2)}%
-                    </td>
-                    <td className="py-3 px-4 text-right">
-                      {Number(targetPct[key] || 0).toFixed(2)}%
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
-          <h3 className="text-xl font-semibold mb-3 text-gray-800">
-            Suggested Trades (Heuristic)
-          </h3>
-
-          {trades.length === 0 ? (
-            <p className="text-gray-600">No trades suggested within drift bands.</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-gray-200">
-                    <th className="text-left py-3 px-4 font-semibold text-gray-700">
-                      Symbol
-                    </th>
-                    <th className="text-left py-3 px-4 font-semibold text-gray-700">
-                      Action
-                    </th>
-                    <th className="text-right py-3 px-4 font-semibold text-gray-700">
-                      Est. Value
-                    </th>
-                    <th className="text-right py-3 px-4 font-semibold text-gray-700">
-                      Est. Qty
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {trades.map((t, idx) => (
-                    <tr
-                      key={`${t.symbol}-${idx}`}
-                      className="border-b border-gray-100 hover:bg-gray-50 transition-colors"
-                    >
-                      <td className="py-3 px-4 font-medium">{t.symbol}</td>
-                      <td className="py-3 px-4">
-                        <span
-                          className={`inline-flex px-2 py-1 rounded text-xs font-semibold ${
-                            t.action === "sell"
-                              ? "bg-red-50 text-red-700"
-                              : "bg-green-50 text-green-700"
-                          }`}
-                        >
-                          {String(t.action || "").toUpperCase()}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        {formatCurrency(Number(t.estimated_value || 0), currency)}
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        {t.estimated_quantity != null
-                          ? Number(t.estimated_quantity).toLocaleString("en-US", {
-                              maximumFractionDigits: 6,
-                            })
-                          : "—"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {notes.length > 0 && (
-            <div className="mt-4 text-sm text-gray-600 space-y-1">
-              {notes.map((n, i) => (
-                <p key={i}>{n}</p>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
+      <MarkdownPanel content={md} />
     );
   };
 
@@ -1039,10 +991,34 @@ export default function Analysis() {
 
             {/* Tab Content */}
             <div className="bg-white rounded-lg shadow px-8 py-6">
-              {activeTab === "overview" && renderOverview()}
-              {activeTab === "charts" && renderCharts()}
-              {activeTab === "retirement" && renderRetirement()}
-              {activeTab === "rebalance" && renderRebalance()}
+              <div className="flex items-center justify-between gap-4 mb-6 no-print">
+                <div className="text-sm text-gray-500">
+                  Export just this tab using your browser’s “Save to PDF”.
+                </div>
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-blue-600 font-semibold"
+                >
+                  Export PDF
+                </button>
+              </div>
+
+              <div id="print-area">
+                <div className="print-only mb-6">
+                  <h1 className="text-2xl font-bold text-gray-900">
+                    {TAB_TITLES[activeTab]}
+                  </h1>
+                  <p className="text-sm text-gray-600">
+                    Completed on {formatDate(job.created_at)}
+                  </p>
+                </div>
+
+                {activeTab === "overview" && renderOverview()}
+                {activeTab === "charts" && renderCharts()}
+                {activeTab === "retirement" && renderRetirement()}
+                {activeTab === "rebalance" && renderRebalance()}
+              </div>
             </div>
           </div>
         </div>

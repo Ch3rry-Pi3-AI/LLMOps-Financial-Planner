@@ -700,28 +700,32 @@ def create_agent(
         ]
     )
 
-    goals_section = ""
+    goals_row = ""
     if retirement_goals:
-        goals_section = f"\n- Stated Retirement Goals: {retirement_goals}"
+        goals_row = f"\n| Stated Retirement Goals | {retirement_goals} |"
 
     task = f"""
 # Portfolio Analysis Context
 
 ## Current Situation
-- Portfolio Value: ${portfolio_value:,.0f}
-- Asset Allocation: {allocation_summary or "No allocation data available"}
-- Years to Retirement: {years_until_retirement}
-- Target Annual Income: ${target_income:,.0f}
-- Current Age: {current_age}{goals_section}
-- Annual Contribution Assumption: ${annual_contribution:,.0f}
+| Metric | Value |
+|---|---:|
+| Portfolio Value | ${portfolio_value:,.0f} |
+| Asset Allocation | {allocation_summary or "No allocation data available"} |
+| Years to Retirement | {years_until_retirement} |
+| Target Annual Income | ${target_income:,.0f} |
+| Current Age | {current_age} |
+| Annual Contribution Assumption | ${annual_contribution:,.0f} |{goals_row}
 
 ## Monte Carlo Simulation Results (500 scenarios)
-- Success Rate: {monte_carlo["success_rate"]}% (probability of sustaining retirement income for 30 years)
-- Expected Portfolio Value at Retirement: ${monte_carlo["expected_value_at_retirement"]:,.0f}
-- 10th Percentile Outcome: ${monte_carlo["percentile_10"]:,.0f} (worst case)
-- Median Final Value: ${monte_carlo["median_final_value"]:,.0f}
-- 90th Percentile Outcome: ${monte_carlo["percentile_90"]:,.0f} (best case)
-- Average Years Portfolio Lasts: {monte_carlo["average_years_lasted"]} years
+| Metric | Value |
+|---|---:|
+| Success Rate | {monte_carlo["success_rate"]}% |
+| Expected Portfolio Value at Retirement | ${monte_carlo["expected_value_at_retirement"]:,.0f} |
+| 10th Percentile Outcome (worst case) | ${monte_carlo["percentile_10"]:,.0f} |
+| Median Final Value | ${monte_carlo["median_final_value"]:,.0f} |
+| 90th Percentile Outcome (best case) | ${monte_carlo["percentile_90"]:,.0f} |
+| Average Years Portfolio Lasts | {monte_carlo["average_years_lasted"]} years |
 
 """
 
@@ -769,9 +773,11 @@ def create_agent(
 - Market volatility (e.g. equity standard deviation around 18%)
 
 ## Safe Withdrawal Rate Analysis
-- 4% Rule: ${portfolio_value * 0.04:,.0f} initial annual income
-- Target Income: ${target_income:,.0f}
-- Gap: ${target_income - (portfolio_value * 0.04):,.0f}
+| Metric | Value |
+|---|---:|
+| 4% Rule (initial annual income) | ${portfolio_value * 0.04:,.0f} |
+| Target Income | ${target_income:,.0f} |
+| Gap | ${target_income - (portfolio_value * 0.04):,.0f} |
 
 Your task: Analyse this retirement readiness data and provide a comprehensive retirement analysis including:
 1. Clear assessment of retirement readiness

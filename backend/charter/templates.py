@@ -61,7 +61,7 @@ CHART IDEAS TO IMPLEMENT:
 - Asset class distribution (equity vs bonds vs alternatives)
 - Geographic exposure (North America, Europe, Asia, etc.)
 - Sector breakdown (Technology, Healthcare, Financials, etc.)
-- Account type allocation (401k, IRA, Taxable, etc.)
+- Tax status allocation (taxable vs tax-advantaged accounts)
 - Top holdings concentration (largest 5-10 positions)
 - Tax efficiency (tax-advantaged vs taxable accounts)
 
