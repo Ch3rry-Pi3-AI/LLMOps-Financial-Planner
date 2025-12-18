@@ -342,6 +342,10 @@ class UserCreate(BaseModel):
         default={"north_america": 50, "international": 50},
         description="Target geographic allocation for rebalancing. Must sum to 100.",
     )
+    user_preferences: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Optional user-level personalization and goal preferences (stored as JSON).",
+    )
 
 
 class AccountCreate(BaseModel):

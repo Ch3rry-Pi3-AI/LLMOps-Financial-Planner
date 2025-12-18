@@ -101,6 +101,16 @@ export default function Layout({ children }: LayoutProps) {
                   >
                     Analysis
                   </Link>
+                  <Link
+                    href="/history"
+                    className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                      isActive("/history")
+                        ? "bg-surface text-foreground shadow-sm"
+                        : "text-muted hover:text-foreground hover:bg-surface/60"
+                    }`}
+                  >
+                    History
+                  </Link>
                 </div>
               </div>
 
@@ -154,6 +164,16 @@ export default function Layout({ children }: LayoutProps) {
                 }`}
               >
                 Analysis
+              </Link>
+              <Link
+                href="/history"
+                className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                  isActive("/history")
+                    ? "bg-surface text-foreground shadow-sm"
+                    : "text-muted hover:text-foreground hover:bg-surface/60"
+                }`}
+              >
+                History
               </Link>
             </div>
           </div>

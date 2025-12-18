@@ -45,6 +45,7 @@ interface UserData {
   target_retirement_income?: number | string;
   asset_class_targets?: Record<string, number>;
   region_targets?: Record<string, number>;
+  user_preferences?: Record<string, unknown>;
 }
 
 /**
@@ -178,6 +179,8 @@ export default function Dashboard() {
   const [fixedIncomeTarget, setFixedIncomeTarget] = useState(0);
   const [northAmericaTarget, setNorthAmericaTarget] = useState(0);
   const [internationalTarget, setInternationalTarget] = useState(0);
+  const [maxDrawdownTolerancePct, setMaxDrawdownTolerancePct] = useState(20);
+  const [esgPreference, setEsgPreference] = useState("neutral");
 
   const [lastAnalysisDate, setLastAnalysisDate] = useState<Date | null>(null);
 
@@ -311,6 +314,24 @@ export default function Dashboard() {
         );
         setInternationalTarget(
           backendUser.region_targets?.international ?? 0,
+        );
+
+        const prefs = backendUser.user_preferences;
+        const goalsRaw =
+          prefs && typeof prefs === "object" && "goals" in prefs
+            ? (prefs as Record<string, unknown>).goals
+            : undefined;
+        const goals =
+          goalsRaw && typeof goalsRaw === "object"
+            ? (goalsRaw as Record<string, unknown>)
+            : {};
+
+        const drawdown = Number(goals.max_drawdown_tolerance_pct);
+        setMaxDrawdownTolerancePct(Number.isFinite(drawdown) ? drawdown : 20);
+        setEsgPreference(
+          typeof goals.esg_preference === "string"
+            ? goals.esg_preference
+            : "neutral",
         );
 
         // Fetch most recent completed job to populate the "Last analysis" badge
@@ -497,6 +518,11 @@ export default function Dashboard() {
         return;
       }
 
+      if (maxDrawdownTolerancePct < 0 || maxDrawdownTolerancePct > 100) {
+        showToast("error", "Max drawdown tolerance must be between 0 and 100%");
+        return;
+      }
+
       // Validate asset-class allocation percentages
       const equityFixed = equityTarget + fixedIncomeTarget;
       if (Math.abs(equityFixed - 100) > 0.01) {
@@ -525,6 +551,13 @@ export default function Dashboard() {
         region_targets: {
           north_america: northAmericaTarget,
           international: internationalTarget,
+        },
+        user_preferences: {
+          goals: {
+            income_floor: targetRetirementIncome,
+            max_drawdown_tolerance_pct: maxDrawdownTolerancePct,
+            esg_preference: esgPreference,
+          },
         },
       };
 
@@ -846,6 +879,43 @@ export default function Dashboard() {
                         />
                       </div>
                     </div>
+                  </div>
+
+                  {/* Personalization */}
+                  <div className="mb-6">
+                    <h3 className="text-sm font-medium text-gray-700 mb-2">
+                      Goals & Preferences
+                    </h3>
+                    <label className="block text-xs text-gray-600 mb-3">
+                      Max drawdown tolerance (%)
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={1}
+                        className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm"
+                        value={maxDrawdownTolerancePct}
+                        onChange={(e) =>
+                          setMaxDrawdownTolerancePct(Number(e.target.value || 0))
+                        }
+                      />
+                    </label>
+                    <label className="block text-xs text-gray-600">
+                      ESG preference
+                      <select
+                        className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm"
+                        value={esgPreference}
+                        onChange={(e) => setEsgPreference(e.target.value)}
+                      >
+                        <option value="neutral">Neutral</option>
+                        <option value="prefer_esg">Prefer ESG</option>
+                        <option value="strict_esg">Strict ESG</option>
+                      </select>
+                    </label>
+                    <p className="mt-2 text-xs text-gray-400">
+                      These preferences are stored with your profile and can drive
+                      future analysis outputs.
+                    </p>
                   </div>
 
                   <button

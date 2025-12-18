@@ -24,7 +24,7 @@ import os
 import json
 import logging
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import cast
 from contextvars import ContextVar
@@ -49,6 +49,14 @@ from src.schemas import (
     JobUpdate,
     JobType,
     JobStatus,
+)
+
+from rebalancer.rebalance import compute_rebalance_recommendation
+from retirement.simulation import (
+    calculate_portfolio_value,
+    calculate_asset_allocation,
+    generate_projections,
+    run_monte_carlo_simulation,
 )
 
 # =========================
@@ -283,6 +291,151 @@ sqs_client = boto3.client(
 SQS_QUEUE_URL: str = os.getenv("SQS_QUEUE_URL", "")
 
 # =========================
+# Portfolio Snapshot Helpers
+# =========================
+
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            # RDS Data API returns ISO timestamps without timezone.
+            return datetime.fromisoformat(s)
+        except ValueError:
+            return None
+    return None
+
+
+def _load_portfolio_snapshot(clerk_user_id: str) -> List[Dict[str, Any]]:
+    """
+    Load a portfolio snapshot suitable for deterministic analysis utilities.
+    """
+    accounts_raw = db.accounts.find_by_user(clerk_user_id)
+    snapshot_accounts: List[Dict[str, Any]] = []
+    for account in accounts_raw:
+        account_id = account.get("id")
+        if not account_id:
+            continue
+        positions = db.positions.find_by_account(account_id)
+        snapshot_positions: List[Dict[str, Any]] = []
+        for p in positions:
+            instrument = {
+                "symbol": p.get("symbol"),
+                "name": p.get("instrument_name"),
+                "instrument_type": p.get("instrument_type"),
+                "current_price": p.get("current_price"),
+                "allocation_regions": p.get("allocation_regions") or {},
+                "allocation_sectors": p.get("allocation_sectors") or {},
+                "allocation_asset_class": p.get("allocation_asset_class") or {},
+                "updated_at": p.get("instrument_updated_at"),
+            }
+            snapshot_positions.append(
+                {
+                    "symbol": p.get("symbol"),
+                    "quantity": float(p.get("quantity") or 0.0),
+                    "as_of_date": p.get("as_of_date"),
+                    "current_price": float(p.get("current_price") or 0.0),
+                    "instrument": instrument,
+                }
+            )
+
+        snapshot_accounts.append(
+            {
+                "id": str(account_id),
+                "name": account.get("account_name"),
+                "purpose": account.get("account_purpose"),
+                "cash_balance": float(account.get("cash_balance") or 0.0),
+                "positions": snapshot_positions,
+            }
+        )
+
+    return snapshot_accounts
+
+
+def _compute_data_quality(snapshot_accounts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Compute missing/stale metadata indicators from a portfolio snapshot.
+    """
+    missing_prices: List[Dict[str, Any]] = []
+    missing_allocations: List[Dict[str, Any]] = []
+    stale_prices: List[Dict[str, Any]] = []
+
+    latest_instrument_update: Optional[datetime] = None
+    latest_position_as_of: Optional[datetime] = None
+    now = datetime.now(timezone.utc)
+
+    seen_symbols: set[str] = set()
+
+    for account in snapshot_accounts:
+        for pos in account.get("positions") or []:
+            symbol = str(pos.get("symbol") or "").upper()
+            instrument = pos.get("instrument") or {}
+
+            as_of = _parse_iso_datetime(pos.get("as_of_date"))
+            if as_of and (latest_position_as_of is None or as_of > latest_position_as_of):
+                latest_position_as_of = as_of
+
+            updated_at = _parse_iso_datetime(instrument.get("updated_at"))
+            if updated_at and (latest_instrument_update is None or updated_at > latest_instrument_update):
+                latest_instrument_update = updated_at
+
+            if symbol in seen_symbols:
+                continue
+            seen_symbols.add(symbol)
+
+            price = instrument.get("current_price")
+            try:
+                price_f = float(price) if price is not None else 0.0
+            except (TypeError, ValueError):
+                price_f = 0.0
+
+            if price_f <= 0:
+                missing_prices.append({"symbol": symbol, "name": instrument.get("name")})
+
+            alloc_asset = instrument.get("allocation_asset_class") or {}
+            alloc_regions = instrument.get("allocation_regions") or {}
+            alloc_sectors = instrument.get("allocation_sectors") or {}
+
+            has_alloc = bool(alloc_asset) and bool(alloc_regions) and bool(alloc_sectors)
+            if not has_alloc:
+                missing_allocations.append({"symbol": symbol, "name": instrument.get("name")})
+
+            if updated_at:
+                age_days = (now - updated_at.replace(tzinfo=timezone.utc)).days
+                if age_days >= 7:
+                    stale_prices.append({"symbol": symbol, "name": instrument.get("name"), "age_days": age_days})
+
+    confidence = "high"
+    if missing_prices or missing_allocations:
+        confidence = "medium"
+    if missing_prices or len(stale_prices) >= 3:
+        confidence = "low"
+
+    return {
+        "confidence": confidence,
+        "counts": {
+            "missing_prices": len(missing_prices),
+            "missing_allocations": len(missing_allocations),
+            "stale_prices": len(stale_prices),
+        },
+        "latest": {
+            "instrument_updated_at": latest_instrument_update.isoformat() if latest_instrument_update else None,
+            "positions_as_of": latest_position_as_of.isoformat() if latest_position_as_of else None,
+        },
+        "details": {
+            "missing_prices": missing_prices[:50],
+            "missing_allocations": missing_allocations[:50],
+            "stale_prices": sorted(stale_prices, key=lambda x: x.get("age_days") or 0, reverse=True)[:50],
+        },
+    }
+
+# =========================
 # Clerk Authentication Setup
 # =========================
 
@@ -362,6 +515,7 @@ class UserUpdate(BaseModel):
     target_retirement_income: Optional[float] = None
     asset_class_targets: Optional[Dict[str, float]] = None
     region_targets: Optional[Dict[str, float]] = None
+    user_preferences: Optional[Dict[str, Any]] = None
 
 
 class AccountUpdate(BaseModel):
@@ -430,6 +584,33 @@ class AnalyzeResponse(BaseModel):
 
     job_id: str
     message: str
+
+
+class RebalancePreviewRequest(BaseModel):
+    cash_only: bool = True
+    allow_sells: bool = False
+    drift_band_pct: float = Field(default=5.0, ge=0.0, le=100.0)
+    drift_band_pct_by_class: Optional[Dict[str, float]] = None
+    max_turnover_pct: float = Field(default=20.0, ge=0.0, le=100.0)
+    transaction_cost_bps: float = Field(default=10.0, ge=0.0, le=10_000.0)
+    allow_taxable_sells: bool = True
+    excluded_accounts: Optional[List[str]] = None
+    jurisdiction: Optional[str] = None
+    persist: bool = False
+
+
+class RetirementPreviewRequest(BaseModel):
+    annual_contribution: float = Field(default=10_000.0, ge=0.0)
+    years_until_retirement: Optional[int] = Field(default=None, ge=0)
+    retirement_age: Optional[int] = Field(default=None, ge=0)
+    current_age: Optional[int] = Field(default=None, ge=0)
+    target_annual_income: Optional[float] = Field(default=None, ge=0.0)
+    inflation_rate: float = Field(default=0.03, ge=0.0, le=0.2)
+    return_shift: float = Field(default=0.0, ge=-0.2, le=0.2)
+    volatility_mult: float = Field(default=1.0, ge=0.1, le=5.0)
+    shock_year: Optional[int] = Field(default=None, ge=0)
+    shock_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    num_simulations: int = Field(default=500, ge=50, le=5000)
 
 
 # =========================
@@ -507,6 +688,13 @@ async def get_or_create_user(
             "target_retirement_income": 60000,
             "asset_class_targets": {"equity": 70, "fixed_income": 30},
             "region_targets": {"north_america": 50, "international": 50},
+            "user_preferences": {
+                "goals": {
+                    "income_floor": 60000,
+                    "max_drawdown_tolerance_pct": 20,
+                    "esg_preference": "neutral",
+                }
+            },
         }
 
         # Insert user into database using Clerk user id as the primary key
@@ -1239,6 +1427,163 @@ async def get_job_status(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
         ) from e
+
+
+@app.get("/api/jobs/{job_id}/data-quality")
+async def get_job_data_quality(
+    job_id: str, clerk_user_id: str = Depends(get_current_user_id)
+) -> Dict[str, Any]:
+    """
+    Compute data quality + freshness indicators for the current user's portfolio.
+    """
+    job: Optional[Dict[str, Any]] = db.jobs.find_by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if job.get("clerk_user_id") != clerk_user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
+    snapshot = _load_portfolio_snapshot(clerk_user_id)
+    return _compute_data_quality(snapshot)
+
+
+@app.post("/api/jobs/{job_id}/rebalance/preview")
+async def preview_rebalance(
+    job_id: str,
+    payload: RebalancePreviewRequest,
+    clerk_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    """
+    Deterministically recompute rebalancing suggestions with editable options.
+    """
+    job: Optional[Dict[str, Any]] = db.jobs.find_by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if job.get("clerk_user_id") != clerk_user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
+    user: Optional[Dict[str, Any]] = db.users.find_by_clerk_id(clerk_user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    snapshot_accounts = _load_portfolio_snapshot(clerk_user_id)
+    jurisdiction = (payload.jurisdiction or "US").strip().upper()
+
+    options: Dict[str, Any] = {
+        "jurisdiction": jurisdiction,
+        "cash_only": bool(payload.cash_only) if not payload.allow_sells else False,
+        "drift_band_pct": float(payload.drift_band_pct),
+        "drift_band_pct_by_class": payload.drift_band_pct_by_class,
+        "max_turnover_pct": float(payload.max_turnover_pct),
+        "transaction_cost_bps": float(payload.transaction_cost_bps),
+        "allow_taxable_sells": bool(payload.allow_taxable_sells),
+        "excluded_accounts": payload.excluded_accounts or [],
+    }
+
+    rebalance_payload = compute_rebalance_recommendation(
+        accounts=snapshot_accounts,
+        asset_class_targets=(user or {}).get("asset_class_targets") or {},
+        options=options,
+    )
+
+    if payload.persist:
+        existing = job.get("summary_payload") or {}
+        if not isinstance(existing, dict):
+            existing = {}
+        db.jobs.update_summary(job_id, {**existing, "rebalance": rebalance_payload})
+
+    return {"rebalance": rebalance_payload, "data_quality": _compute_data_quality(snapshot_accounts)}
+
+
+@app.post("/api/jobs/{job_id}/retirement/preview")
+async def preview_retirement(
+    job_id: str,
+    payload: RetirementPreviewRequest,
+    clerk_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    """
+    Deterministically recompute retirement stress-test metrics (no LLM call).
+    """
+    job: Optional[Dict[str, Any]] = db.jobs.find_by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if job.get("clerk_user_id") != clerk_user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
+    user: Optional[Dict[str, Any]] = db.users.find_by_clerk_id(clerk_user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    snapshot_accounts = _load_portfolio_snapshot(clerk_user_id)
+    portfolio_data = {"accounts": snapshot_accounts}
+
+    current_age = int(payload.current_age or 40)
+    base_years = int(user.get("years_until_retirement") or 30)
+    years_until = payload.years_until_retirement
+    if years_until is None and payload.retirement_age is not None:
+        years_until = max(0, int(payload.retirement_age) - current_age)
+    years_until = int(years_until if years_until is not None else base_years)
+
+    target_income = float(
+        payload.target_annual_income
+        if payload.target_annual_income is not None
+        else (user.get("target_retirement_income") or 80_000)
+    )
+
+    annual_contribution = float(payload.annual_contribution or 0.0)
+
+    portfolio_value = calculate_portfolio_value(portfolio_data)
+    allocation = calculate_asset_allocation(portfolio_data)
+
+    shock = None
+    if payload.shock_year is not None and payload.shock_pct is not None:
+        shock = {"year": int(payload.shock_year), "pct": float(payload.shock_pct)}
+
+    monte_carlo = run_monte_carlo_simulation(
+        current_value=float(portfolio_value),
+        years_until_retirement=years_until,
+        target_annual_income=target_income,
+        asset_allocation=allocation,
+        num_simulations=int(payload.num_simulations),
+        annual_contribution=annual_contribution,
+        shock=shock,
+        return_shift=float(payload.return_shift),
+        volatility_mult=float(payload.volatility_mult),
+        inflation_rate=float(payload.inflation_rate),
+    )
+
+    projections = generate_projections(
+        current_value=float(portfolio_value),
+        years_until_retirement=years_until,
+        asset_allocation=allocation,
+        current_age=current_age,
+        annual_contribution=annual_contribution,
+    )
+
+    metrics = {
+        "portfolio_value": round(float(portfolio_value), 2),
+        "years_until_retirement": years_until,
+        "target_annual_income": round(float(target_income), 2),
+        "current_age": current_age,
+        "annual_contribution_assumption": round(float(annual_contribution), 2),
+        "asset_allocation_pct": {k: round(float(v) * 100.0, 2) for k, v in allocation.items()},
+        "monte_carlo": monte_carlo,
+        "safe_withdrawal": {
+            "safe_withdrawal_rate": 0.04,
+            "income_4pct": round(float(portfolio_value) * 0.04, 2),
+            "gap": round(float(target_income - (portfolio_value * 0.04)), 2),
+        },
+        "assumptions": {
+            "inflation_rate": float(payload.inflation_rate),
+            "safe_withdrawal_rate": 0.04,
+            "num_simulations": int(payload.num_simulations),
+            "return_shift": float(payload.return_shift),
+            "volatility_mult": float(payload.volatility_mult),
+            "shock": shock,
+        },
+        "projections": projections[:10],
+    }
+
+    return {"metrics": metrics, "data_quality": _compute_data_quality(snapshot_accounts)}
 
 
 @app.get("/api/jobs")

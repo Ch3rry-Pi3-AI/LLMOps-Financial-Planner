@@ -245,6 +245,7 @@ def run_monte_carlo_simulation(
     shock: Dict[str, Any] | None = None,
     return_shift: float = 0.0,
     volatility_mult: float = 1.0,
+    inflation_rate: float = 0.03,
 ) -> Dict[str, Any]:
     """
     Run a simplified Monte Carlo simulation for retirement planning.
@@ -335,8 +336,8 @@ def run_monte_carlo_simulation(
             if portfolio_value <= 0:
                 break
 
-            # Inflation adjustment (3% per year)
-            annual_withdrawal *= 1.03
+            # Inflation adjustment (defaults to 3% per year)
+            annual_withdrawal *= 1.0 + max(0.0, float(inflation_rate))
 
             equity_return = random.gauss(equity_return_mean, equity_return_std)
             bond_return = random.gauss(bond_return_mean, bond_return_std)
@@ -490,7 +491,7 @@ def create_agent(
     db: Any = None,
     *,
     analysis_options: Dict[str, Any] | None = None,
-) -> Tuple[LitellmModel, List[Any], str]:
+) -> Tuple[LitellmModel, List[Any], str, Dict[str, Any]]:
     """
     Construct the Retirement Specialist Agent model and task prompt.
 
@@ -548,6 +549,7 @@ def create_agent(
         or user_preferences.get("annual_contribution")
         or 10_000
     )
+    inflation_rate = float((analysis_options or {}).get("inflation_rate") or 0.03)
 
     # Optional narrative goal text (sanitised to avoid prompt injection)
     raw_goals = str(user_preferences.get("retirement_goals", "") or "")
@@ -633,6 +635,7 @@ def create_agent(
         asset_allocation=allocation,
         num_simulations=500,
         annual_contribution=annual_contribution,
+        inflation_rate=inflation_rate,
     )
 
     scenario_results: List[Dict[str, Any]] = []
@@ -667,6 +670,7 @@ def create_agent(
                 shock=shock_s,
                 return_shift=shift_s,
                 volatility_mult=vol_s,
+                inflation_rate=inflation_rate,
             )
             scenario_results.append(
                 {
@@ -700,28 +704,32 @@ def create_agent(
         ]
     )
 
-    goals_section = ""
+    goals_row = ""
     if retirement_goals:
-        goals_section = f"\n- Stated Retirement Goals: {retirement_goals}"
+        goals_row = f"\n| Stated Retirement Goals | {retirement_goals} |"
 
     task = f"""
 # Portfolio Analysis Context
 
 ## Current Situation
-- Portfolio Value: ${portfolio_value:,.0f}
-- Asset Allocation: {allocation_summary or "No allocation data available"}
-- Years to Retirement: {years_until_retirement}
-- Target Annual Income: ${target_income:,.0f}
-- Current Age: {current_age}{goals_section}
-- Annual Contribution Assumption: ${annual_contribution:,.0f}
+| Metric | Value |
+|---|---:|
+| Portfolio Value | ${portfolio_value:,.0f} |
+| Asset Allocation | {allocation_summary or "No allocation data available"} |
+| Years to Retirement | {years_until_retirement} |
+| Target Annual Income | ${target_income:,.0f} |
+| Current Age | {current_age} |
+| Annual Contribution Assumption | ${annual_contribution:,.0f} |{goals_row}
 
 ## Monte Carlo Simulation Results (500 scenarios)
-- Success Rate: {monte_carlo["success_rate"]}% (probability of sustaining retirement income for 30 years)
-- Expected Portfolio Value at Retirement: ${monte_carlo["expected_value_at_retirement"]:,.0f}
-- 10th Percentile Outcome: ${monte_carlo["percentile_10"]:,.0f} (worst case)
-- Median Final Value: ${monte_carlo["median_final_value"]:,.0f}
-- 90th Percentile Outcome: ${monte_carlo["percentile_90"]:,.0f} (best case)
-- Average Years Portfolio Lasts: {monte_carlo["average_years_lasted"]} years
+| Metric | Value |
+|---|---:|
+| Success Rate | {monte_carlo["success_rate"]}% |
+| Expected Portfolio Value at Retirement | ${monte_carlo["expected_value_at_retirement"]:,.0f} |
+| 10th Percentile Outcome (worst case) | ${monte_carlo["percentile_10"]:,.0f} |
+| Median Final Value | ${monte_carlo["median_final_value"]:,.0f} |
+| 90th Percentile Outcome (best case) | ${monte_carlo["percentile_90"]:,.0f} |
+| Average Years Portfolio Lasts | {monte_carlo["average_years_lasted"]} years |
 
 """
 
@@ -769,9 +777,11 @@ def create_agent(
 - Market volatility (e.g. equity standard deviation around 18%)
 
 ## Safe Withdrawal Rate Analysis
-- 4% Rule: ${portfolio_value * 0.04:,.0f} initial annual income
-- Target Income: ${target_income:,.0f}
-- Gap: ${target_income - (portfolio_value * 0.04):,.0f}
+| Metric | Value |
+|---|---:|
+| 4% Rule (initial annual income) | ${portfolio_value * 0.04:,.0f} |
+| Target Income | ${target_income:,.0f} |
+| Gap | ${target_income - (portfolio_value * 0.04):,.0f} |
 
 Your task: Analyse this retirement readiness data and provide a comprehensive retirement analysis including:
 1. Clear assessment of retirement readiness
@@ -785,4 +795,24 @@ Provide your analysis in clear markdown format with specific numbers and actiona
     # Final guardrail: ensure the task is not excessively long
     task = truncate_response(task, max_length=50_000)
 
-    return model, tools, task
+    metrics: Dict[str, Any] = {
+        "portfolio_value": round(float(portfolio_value), 2),
+        "years_until_retirement": int(years_until_retirement),
+        "target_annual_income": round(float(target_income), 2),
+        "current_age": int(current_age),
+        "annual_contribution_assumption": round(float(annual_contribution), 2),
+        "asset_allocation_pct": {k: round(float(v) * 100.0, 2) for k, v in allocation.items()},
+        "monte_carlo": monte_carlo,
+        "safe_withdrawal": {
+            "safe_withdrawal_rate": 0.04,
+            "income_4pct": round(float(portfolio_value) * 0.04, 2),
+            "gap": round(float(target_income - (portfolio_value * 0.04)), 2),
+        },
+        "assumptions": {
+            "inflation_rate": round(float(inflation_rate), 4),
+            "safe_withdrawal_rate": 0.04,
+            "num_simulations": 500,
+        },
+    }
+
+    return model, tools, task, metrics

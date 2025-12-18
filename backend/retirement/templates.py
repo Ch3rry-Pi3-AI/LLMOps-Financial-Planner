@@ -70,6 +70,14 @@ Style and Output Requirements
 * Explain trade-offs and uncertainties in plain language.
 * Where relevant, discuss multiple scenarios (e.g. conservative, base, optimistic)
   to illustrate the range of possible outcomes.
+* Use markdown tables (not prose lists) for:
+  - Current Situation (key inputs)
+  - Monte Carlo Simulation Results (key outputs)
+  - Safe Withdrawal Rate Analysis (4% rule vs target income gap)
+  - Action Items with a Realistic Timeline (timeframe -> actions)
+    - Use one action per row (repeat the timeframe as needed).
+    - Do NOT use HTML tags like `<br>` inside table cells.
+* Do not repeat the report title as a numbered item or subheading.
 * Output markdown only. Do not include any preamble line before the report.
 * The very first line of your output MUST be the H1 header: "# Retirement Readiness Assessment".
 """

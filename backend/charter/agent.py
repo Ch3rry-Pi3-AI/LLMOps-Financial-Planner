@@ -139,6 +139,34 @@ def _top_n_with_other(buckets: Dict[str, float], n: int) -> list[dict[str, Any]]
     return data
 
 
+def _infer_tax_status(label: str) -> str:
+    text = (label or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not text:
+        return "unknown"
+
+    # Common taxable wrappers.
+    if "taxable" in text or "brokerage" in text:
+        return "taxable"
+
+    # Common tax-advantaged / non-taxable wrappers (US + UK + misc).
+    non_taxable_markers = (
+        "401k",
+        "ira",
+        "roth",
+        "hsa",
+        "529",
+        "pension",
+        "isa",
+        "sipp",
+        "rrsp",
+        "tfsa",
+    )
+    if any(marker in text for marker in non_taxable_markers):
+        return "tax_advantaged"
+
+    return "unknown"
+
+
 def generate_deterministic_charts(portfolio_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Deterministically generate the 6 charts used by the Analysis page.
@@ -152,7 +180,7 @@ def generate_deterministic_charts(portfolio_data: Dict[str, Any]) -> Dict[str, A
     # Aggregates
     position_values: Dict[str, float] = {}
     account_values: Dict[str, float] = {}
-    account_type_values: Dict[str, float] = {}
+    tax_status_values: Dict[str, float] = {}
     asset_classes: Dict[str, float] = {}
     regions: Dict[str, float] = {}
     sectors: Dict[str, float] = {}
@@ -162,13 +190,22 @@ def generate_deterministic_charts(portfolio_data: Dict[str, Any]) -> Dict[str, A
 
     for account in portfolio_data.get("accounts", []):
         account_name = sanitize_user_input(str(account.get("name", "Unknown")))
-        account_type = str(account.get("type", "unknown") or "unknown")
+        account_label = " ".join(
+            [
+                str(account.get("name") or ""),
+                str(account.get("type") or ""),
+                str(account.get("purpose") or ""),
+                str(account.get("account_name") or ""),
+                str(account.get("account_purpose") or ""),
+            ]
+        ).strip()
+        tax_status = _infer_tax_status(account_label)
 
         cash = _safe_float(account.get("cash_balance"), 0.0) or 0.0
         total_cash += cash
         total_portfolio_value += cash
         account_values[account_name] = account_values.get(account_name, 0.0) + cash
-        account_type_values[account_type] = account_type_values.get(account_type, 0.0) + cash
+        tax_status_values[tax_status] = tax_status_values.get(tax_status, 0.0) + cash
 
         for position in account.get("positions", []):
             symbol = str(position.get("symbol", "Unknown") or "Unknown")
@@ -181,7 +218,7 @@ def generate_deterministic_charts(portfolio_data: Dict[str, Any]) -> Dict[str, A
 
             position_values[symbol] = position_values.get(symbol, 0.0) + value
             account_values[account_name] = account_values.get(account_name, 0.0) + value
-            account_type_values[account_type] = account_type_values.get(account_type, 0.0) + value
+            tax_status_values[tax_status] = tax_status_values.get(tax_status, 0.0) + value
 
             # Allocation buckets (values in pct)
             asset_alloc = instrument.get("allocation_asset_class", {}) or {}
@@ -246,10 +283,24 @@ def generate_deterministic_charts(portfolio_data: Dict[str, Any]) -> Dict[str, A
         "data": _top_n_with_other(regions, 8),
     }
     charts["account_type_allocation"] = {
-        "title": "Account Type Allocation",
+        "title": "Tax Status Allocation",
         "type": "pie",
-        "description": "Allocation across account types",
-        "data": _top_n_with_other(account_type_values, 8),
+        "description": "Allocation across taxable vs tax-advantaged accounts",
+        "data": [
+            item
+            for item in [
+                {
+                    "name": "Taxable",
+                    "value": float(tax_status_values.get("taxable", 0.0) or 0.0),
+                },
+                {
+                    "name": "Tax-Advantaged",
+                    "value": float(tax_status_values.get("tax_advantaged", 0.0) or 0.0),
+                },
+                {"name": "Unknown", "value": float(tax_status_values.get("unknown", 0.0) or 0.0)},
+            ]
+            if float(item.get("value") or 0.0) > 0.0
+        ],
     }
     charts["sector_allocation"] = {
         "title": "Sector Allocation",

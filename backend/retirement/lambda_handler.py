@@ -41,6 +41,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -108,6 +109,122 @@ def _normalize_markdown_report(text: str) -> str:
             return "\n".join(lines[idx:]).lstrip()
 
     return stripped
+
+
+def _remove_duplicate_title_heading(text: str, *, title: str) -> str:
+    """
+    Remove a redundant immediate subheading / list item that repeats the H1 title.
+
+    Some models output:
+      # Title
+      1. Title
+    or:
+      # Title
+      ## Title
+    which looks duplicated in the UI.
+    """
+    if not text:
+        return text
+
+    lines = text.splitlines()
+    if not lines:
+        return text
+
+    # Find first non-empty line (should be the title after normalization).
+    idx = 0
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    if idx >= len(lines):
+        return text
+
+    next_idx = idx + 1
+    while next_idx < len(lines) and not lines[next_idx].strip():
+        next_idx += 1
+    if next_idx >= len(lines):
+        return text
+
+    candidate = lines[next_idx].strip()
+    normalized_title = title.strip()
+    if not normalized_title:
+        return text
+
+    # Patterns that represent a duplicated title line.
+    is_heading_dup = candidate.startswith("#") and candidate.lstrip("#").strip() == normalized_title
+    is_plain_dup = candidate == normalized_title
+    is_numbered_dup = bool(
+        re.match(rf"^\d+[\.\)]\s*{re.escape(normalized_title)}\s*$", candidate, flags=re.IGNORECASE)
+    )
+
+    if not (is_heading_dup or is_plain_dup or is_numbered_dup):
+        return text
+
+    # Drop the duplicate line; keep surrounding content intact.
+    new_lines = lines[:next_idx] + lines[next_idx + 1 :]
+    return "\n".join(new_lines).strip() + "\n"
+
+
+def _replace_html_breaks(text: str) -> str:
+    """
+    Replace HTML line breaks with plain text separators.
+
+    The frontend markdown renderer does not render raw HTML by default, so
+    `<br>` would appear literally (especially inside table cells).
+    """
+    if not text:
+        return text
+    return re.sub(r"<br\\s*/?>", "; ", text, flags=re.IGNORECASE)
+
+
+def _extract_action_items(markdown: str) -> list[dict[str, str]]:
+    """
+    Extract action items from a markdown table that has Timeframe/Action columns.
+    """
+    if not markdown:
+        return []
+
+    lines = markdown.splitlines()
+
+    def _split_row(line: str) -> list[str]:
+        return [p.strip() for p in line.strip().strip("|").split("|")]
+
+    for i in range(len(lines) - 2):
+        header = lines[i].strip()
+        if "|" not in header:
+            continue
+        header_cells = [c.lower() for c in _split_row(header)]
+        if "timeframe" not in header_cells:
+            continue
+        if not any(h in header_cells for h in ["action", "action items", "actions"]):
+            continue
+
+        separator = lines[i + 1].strip()
+        if "|" not in separator or not re.search(r"-{3,}", separator):
+            continue
+
+        tf_idx = header_cells.index("timeframe")
+        action_idx = None
+        for name in ["action items", "actions", "action"]:
+            if name in header_cells:
+                action_idx = header_cells.index(name)
+                break
+        if action_idx is None:
+            continue
+
+        out: list[dict[str, str]] = []
+        for j in range(i + 2, len(lines)):
+            row_line = lines[j].strip()
+            if not row_line or "|" not in row_line:
+                break
+            row = _split_row(row_line)
+            if max(tf_idx, action_idx) >= len(row):
+                continue
+            timeframe = row[tf_idx].strip()
+            action = row[action_idx].strip()
+            if timeframe or action:
+                out.append({"timeframe": timeframe, "action": action})
+        return out
+
+    return []
 
 
 # ============================================================
@@ -278,7 +395,7 @@ async def run_retirement_agent(
     )
 
     # Create configured agent (model, tools, and task prompt)
-    model, tools, task = create_agent(
+    model, tools, task, metrics = create_agent(
         job_id,
         portfolio_data,
         user_preferences,
@@ -333,10 +450,30 @@ async def run_retirement_agent(
             raise
 
         markdown = _normalize_markdown_report(result.final_output)
+        markdown = _remove_duplicate_title_heading(
+            markdown,
+            title="Retirement Readiness Assessment",
+        )
+        markdown = _replace_html_breaks(markdown)
+
+        action_items = _extract_action_items(markdown)
+        end_time = datetime.now(timezone.utc)
+        duration_ms = int((end_time - start_time).total_seconds() * 1000)
+        model_id = os.getenv(
+            "BEDROCK_MODEL_ID",
+            "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        )
+
         retirement_payload = {
             "analysis": markdown,
+            "metrics": metrics,
+            "action_items": action_items,
             "generated_at": datetime.utcnow().isoformat(),
             "agent": "retirement",
+            "audit": {
+                "model_used": f"bedrock/{model_id}",
+                "duration_ms": duration_ms,
+            },
         }
 
         success = db.jobs.update_retirement(job_id, retirement_payload)
@@ -362,7 +499,6 @@ async def run_retirement_agent(
                 )
             )
 
-        end_time = datetime.now(timezone.utc)
         logger.info(
             json.dumps(
                 {

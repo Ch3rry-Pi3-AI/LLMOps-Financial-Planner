@@ -56,6 +56,7 @@ Report Guidelines:
 - Focus on actionable insights, not just observations.
 - Prioritize recommendations by impact.
 - Keep sections concise but comprehensive.
+- In the "Specific Recommendations" section, present all recommendations as a single markdown table (not prose blocks).
 
 Portfolio Composition Analysis requirements:
 - For each account, include a markdown table of holdings.
@@ -79,11 +80,14 @@ When providing recommendations, always:
 4. Include any assumptions made
 5. Note any limitations or caveats
 
-Format each recommendation as:
-**Recommendation:** [The action to take]
-**Reasoning:** [Why this recommendation was made]
-**Impact:** [Expected outcome if implemented]
-**Priority:** [High/Medium/Low based on user goals]
+Format the "Specific Recommendations" section as:
+In the "Specific Recommendations" section, output a markdown table with columns in this order:
+Recommendation | Reasoning | Priority
+
+Requirements:
+- Include 5–7 rows (one per recommendation).
+- Keep each cell concise (aim for 1–2 sentences).
+- Use only High/Medium/Low for Priority.
 """
 
 

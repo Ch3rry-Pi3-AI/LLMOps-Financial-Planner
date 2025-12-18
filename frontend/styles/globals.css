@@ -83,6 +83,121 @@ body {
   font-family: var(--font-sans);
 }
 
+/* --------------------------------------------------------------------------
+   Print / PDF Export
+   - Uses browser "Print" -> "Save to PDF" to export the currently visible tab.
+   -------------------------------------------------------------------------- */
+.print-only {
+  display: none;
+}
+
+@media print {
+  /* Show only the tab content area. */
+  body * {
+    visibility: hidden !important;
+  }
+
+  #print-area,
+  #print-area * {
+    visibility: visible !important;
+  }
+
+  #print-all-area,
+  #print-all-area * {
+    visibility: visible !important;
+  }
+
+  /* Default to printing the current tab unless explicitly exporting all tabs. */
+  body[data-print-scope="all"] #print-area {
+    display: none !important;
+  }
+  body[data-print-scope="tab"] #print-all-area {
+    display: none !important;
+  }
+
+  #print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  #print-all-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  /* Print header/footer and page layout helpers */
+  .print-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 12px 16px;
+    border-bottom: 1px solid #e5e7eb;
+    background: #ffffff;
+    z-index: 10;
+  }
+
+  .print-footer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 10px 16px;
+    border-top: 1px solid #e5e7eb;
+    background: #ffffff;
+    z-index: 10;
+  }
+
+  .print-page-content {
+    padding-top: 72px;
+    padding-bottom: 56px;
+  }
+
+  .page-break {
+    break-before: page;
+    page-break-before: always;
+  }
+
+  /* Make charts and tables behave better on paper */
+  table,
+  thead,
+  tbody,
+  tr,
+  td,
+  th,
+  .recharts-wrapper,
+  .recharts-surface,
+  svg {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-only {
+    display: block !important;
+  }
+}
+
 /* Compatibility mappings so existing light-mode Tailwind utilities render well in dark mode. */
 html:not(.light-theme) .bg-white {
   background-color: var(--surface) !important;

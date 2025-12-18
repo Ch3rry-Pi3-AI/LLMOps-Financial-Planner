@@ -144,6 +144,38 @@ def main() -> None:
             # Warn if the expected database package is missing
             print(f"Warning: Database package not found at {database_src}")
 
+        # Copy deterministic helper packages used by the API (rebalancer + retirement simulation).
+        rebalancer_src: Path = backend_dir / "rebalancer"
+        rebalancer_dst: Path = package_dir / "rebalancer"
+        if rebalancer_src.exists():
+            shutil.copytree(
+                rebalancer_src,
+                rebalancer_dst,
+                ignore=shutil.ignore_patterns(
+                    "__pycache__",
+                    "*.pyc",
+                    "*.zip",
+                    "package_docker.py",
+                    "test_*.py",
+                    ".venv",
+                ),
+            )
+            print(f"Copied rebalancer package from {rebalancer_src}")
+        else:
+            print(f"Warning: Rebalancer package not found at {rebalancer_src}")
+
+        retirement_src: Path = backend_dir / "retirement"
+        retirement_dst: Path = package_dir / "retirement"
+        if retirement_src.exists():
+            retirement_dst.mkdir(parents=True, exist_ok=True)
+            for filename in ["__init__.py", "simulation.py"]:
+                src_file = retirement_src / filename
+                if src_file.exists():
+                    shutil.copy2(src_file, retirement_dst / filename)
+            print(f"Copied retirement simulation module from {retirement_src}")
+        else:
+            print(f"Warning: Retirement package not found at {retirement_src}")
+
         # Build a minimal requirements.txt containing runtime dependencies
         requirements_file: Path = package_dir / "requirements.txt"
         with requirements_file.open("w", encoding="utf-8") as f:

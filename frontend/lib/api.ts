@@ -33,6 +33,8 @@ export interface User {
   asset_class_targets: Record<string, number>;
   /** Target regional allocation (e.g. US, UK, Europe) as percentages or weights */
   region_targets: Record<string, number>;
+  /** Personalization and goal preferences (stored as JSON) */
+  user_preferences?: Record<string, unknown>;
 }
 
 /**

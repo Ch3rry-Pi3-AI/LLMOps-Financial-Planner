@@ -13,7 +13,7 @@
  *  - A retirement projection view rendered from Markdown
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { useRouter } from "next/router";
 import { useAuth } from "@clerk/nextjs";
 import ReactMarkdown from "react-markdown";
@@ -53,6 +53,16 @@ interface Job {
     agent: string;
     content: string;
     generated_at: string;
+    recommendations?: Array<{
+      recommendation: string;
+      reasoning: string;
+      priority: string;
+    }>;
+    audit?: {
+      model_used?: string;
+      duration_ms?: number;
+      input_hash?: string;
+    };
   };
   // Charter stores charts with dynamic keys and arbitrary payload structures
   charts_payload?: Record<string, any> | null;
@@ -60,6 +70,12 @@ interface Job {
     agent: string;
     analysis: string;
     generated_at: string;
+    metrics?: Record<string, any>;
+    action_items?: Array<{ timeframe: string; action: string }>;
+    audit?: {
+      model_used?: string;
+      duration_ms?: number;
+    };
   };
   summary_payload?: Record<string, any> | null;
   error_message?: string;
@@ -86,6 +102,20 @@ interface JobListItem {
 type TabType = "overview" | "charts" | "retirement" | "rebalance";
 
 type CurrencyCode = "GBP" | "USD";
+
+type DataQuality = {
+  confidence?: "high" | "medium" | "low" | string;
+  counts?: {
+    missing_prices?: number;
+    missing_allocations?: number;
+    stale_prices?: number;
+  };
+  latest?: {
+    instrument_updated_at?: string | null;
+    positions_as_of?: string | null;
+  };
+  details?: Record<string, any>;
+};
 
 /**
  * COLORS
@@ -244,6 +274,23 @@ const MarkdownPanel = ({ content }: { content: string }) => (
   </div>
 );
 
+const TAB_TITLES: Record<TabType, string> = {
+  overview: "Overview",
+  charts: "Charts",
+  retirement: "Retirement Projection",
+  rebalance: "Rebalancing",
+};
+
+const safeNumber = (value: any): number => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+};
+
+const pct = (numerator: number, denominator: number): string => {
+  if (!denominator || denominator <= 0) return "0.0%";
+  return `${((numerator / denominator) * 100).toFixed(1)}%`;
+};
+
 /**
  * Analysis
  *
@@ -261,6 +308,76 @@ export default function Analysis() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<TabType>("overview");
   const [fetchingLatest, setFetchingLatest] = useState(false);
+  const [dataQuality, setDataQuality] = useState<DataQuality | null>(null);
+  const [rebalancePreview, setRebalancePreview] = useState<any | null>(null);
+  const [retirementPreview, setRetirementPreview] = useState<any | null>(null);
+  const [scenarioLoading, setScenarioLoading] = useState(false);
+  const [rebalanceLoading, setRebalanceLoading] = useState(false);
+  const [printScope, setPrintScope] = useState<"tab" | "all">("tab");
+  const [rebalanceForm, setRebalanceForm] = useState({
+    cashOnly: true,
+    allowSells: false,
+    allowTaxableSells: true,
+    driftBandPct: 5,
+    maxTurnoverPct: 20,
+    transactionCostBps: 10,
+    persist: false,
+  });
+  const [retirementForm, setRetirementForm] = useState({
+    annualContribution: 10000,
+    yearsUntilRetirement: "",
+    retirementAge: "",
+    inflationRate: 0.03,
+    returnShift: 0.0,
+    volatilityMult: 1.0,
+    shockYear: "",
+    shockPct: "",
+    numSimulations: 500,
+  });
+
+  useEffect(() => {
+    const handleBefore = () => {
+      document.body.dataset.printScope = printScope;
+    };
+
+    const handleAfter = () => {
+      document.body.dataset.printScope = "tab";
+      setPrintScope("tab");
+    };
+
+    window.addEventListener("beforeprint", handleBefore);
+    window.addEventListener("afterprint", handleAfter);
+    return () => {
+      window.removeEventListener("beforeprint", handleBefore);
+      window.removeEventListener("afterprint", handleAfter);
+    };
+  }, [printScope]);
+
+  const triggerPrint = (scope: "tab" | "all") => {
+    document.body.dataset.printScope = scope;
+    setPrintScope(scope);
+    requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
+  };
+
+  const readSessionJson = <T,>(key: string): T | null => {
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = window.sessionStorage.getItem(key);
+      if (!raw) return null;
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
+  };
+
+  const writeSessionJson = (key: string, value: unknown) => {
+    if (typeof window === "undefined") return;
+    try {
+      window.sessionStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      // Ignore storage quota / serialization errors
+    }
+  };
 
   /**
    * loadJob
@@ -277,6 +394,24 @@ export default function Analysis() {
         }
         const jobData = await apiRequest<Job>(`/api/jobs/${jobId}`, token);
         setJob(jobData);
+        setRebalancePreview(null);
+        setRetirementPreview(null);
+        writeSessionJson(`analysis:job:${jobId}`, jobData);
+        writeSessionJson("analysis:latestCompletedJobId", jobId);
+
+        try {
+          const cachedDq = readSessionJson<DataQuality>(`analysis:dq:${jobId}`);
+          if (cachedDq) setDataQuality(cachedDq);
+          const dq = await apiRequest<DataQuality>(
+            `/api/jobs/${jobId}/data-quality`,
+            token,
+          );
+          setDataQuality(dq);
+          writeSessionJson(`analysis:dq:${jobId}`, dq);
+        } catch (err) {
+          console.warn("Could not load data quality:", err);
+          setDataQuality(null);
+        }
       } catch (error) {
         console.error("Error fetching job:", error);
       } finally {
@@ -301,11 +436,23 @@ export default function Analysis() {
           setLoading(false);
           return;
         }
+
+        const cachedLatestId = readSessionJson<string>("analysis:latestCompletedJobId");
+        if (cachedLatestId) {
+          const cachedJob = readSessionJson<Job>(`analysis:job:${cachedLatestId}`);
+          if (cachedJob) {
+            setJob(cachedJob);
+            setLoading(false);
+            router.replace(`/analysis?job_id=${cachedLatestId}`, undefined, {
+              shallow: true,
+            });
+          }
+        }
         const data = await apiRequest<{ jobs?: JobListItem[] }>("/api/jobs", token);
         const jobs: JobListItem[] = data.jobs || [];
 
         const latestCompletedJob = jobs
-          .filter((j) => j.status === "completed")
+          .filter((j) => j.status === "completed" && j.job_type === "portfolio_analysis")
           .sort(
             (a, b) =>
               new Date(b.created_at).getTime() -
@@ -331,6 +478,11 @@ export default function Analysis() {
     };
 
     if (job_id) {
+      const cachedJob = readSessionJson<Job>(`analysis:job:${job_id as string}`);
+      if (cachedJob) {
+        setJob(cachedJob);
+        setLoading(false);
+      }
       // Explicit job_id provided in query
       loadJob(job_id as string);
     } else if (router.isReady) {
@@ -338,6 +490,36 @@ export default function Analysis() {
       loadLatestJob();
     }
   }, [job_id, router.isReady, getToken, router]);
+
+  useEffect(() => {
+    if (!job) return;
+
+    const reb = job.summary_payload?.rebalance;
+    if (reb?.options) {
+      setRebalanceForm((prev) => ({
+        ...prev,
+        cashOnly: Boolean(reb.options.cash_only ?? true),
+        allowSells: Boolean(reb.options.cash_only === false),
+        allowTaxableSells: Boolean(reb.options.allow_taxable_sells ?? true),
+        driftBandPct: Number(reb.options.drift_band_pct ?? 5),
+        maxTurnoverPct: Number(reb.options.max_turnover_pct ?? 20),
+        transactionCostBps: Number(reb.options.transaction_cost_bps ?? 10),
+      }));
+    }
+
+    const metrics = job.retirement_payload?.metrics;
+    if (metrics) {
+      setRetirementForm((prev) => ({
+        ...prev,
+        annualContribution: Number(metrics.annual_contribution_assumption ?? 10000),
+        yearsUntilRetirement: String(metrics.years_until_retirement ?? ""),
+        inflationRate: Number(metrics.assumptions?.inflation_rate ?? 0.03),
+        returnShift: Number(metrics.assumptions?.return_shift ?? 0.0),
+        volatilityMult: Number(metrics.assumptions?.volatility_mult ?? 1.0),
+        numSimulations: Number(metrics.assumptions?.num_simulations ?? 500),
+      }));
+    }
+  }, [job]);
 
   /**
    * formatDate
@@ -497,6 +679,269 @@ export default function Analysis() {
     }
 
     return <MarkdownPanel content={report} />;
+  };
+
+  const renderTabSummary = (tab: TabType = activeTab) => {
+    if (!job) return null;
+
+    const charts = job.charts_payload || {};
+    const assetClass = charts.asset_class_allocation?.data || [];
+    const topHoldings = charts.top_holdings?.data || [];
+    const accountValues = charts.account_values?.data || [];
+
+    const totalValue = assetClass.reduce(
+      (sum: number, item: any) => sum + safeNumber(item?.value),
+      0,
+    );
+    const cashValue =
+      assetClass.find((d: any) => String(d?.name || "").toLowerCase() === "cash")
+        ?.value ?? 0;
+    const equityValue =
+      assetClass.find(
+        (d: any) => String(d?.name || "").toLowerCase() === "equity",
+      )?.value ?? 0;
+    const topHoldingValue = safeNumber(topHoldings?.[0]?.value);
+    const numAccounts = Array.isArray(accountValues) ? accountValues.length : 0;
+
+    const overviewRecs = job.report_payload?.recommendations || [];
+    const retirementMetrics =
+      (retirementPreview?.metrics as any) ?? job.retirement_payload?.metrics ?? null;
+    const retirementActions = job.retirement_payload?.action_items || [];
+    const rebalance = rebalancePreview ?? job.summary_payload?.rebalance ?? null;
+    const rebalanceTrades: any[] = Array.isArray(rebalance?.trades)
+      ? rebalance.trades
+      : [];
+
+    const card = (title: string, body: ReactNode, key: string) => (
+      <div
+        key={key}
+        className="bg-white rounded-lg border border-gray-200 p-6"
+      >
+        <h3 className="text-xl font-semibold mb-3 text-gray-800">{title}</h3>
+        {body}
+      </div>
+    );
+
+    if (tab === "overview") {
+      return (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          {card(
+            "Key Takeaways",
+            <ul className="list-disc ml-6 text-gray-600 space-y-1">
+              <li>Cash: {pct(safeNumber(cashValue), totalValue)}</li>
+              <li>Equity: {pct(safeNumber(equityValue), totalValue)}</li>
+              <li>Top holding concentration: {pct(topHoldingValue, totalValue)}</li>
+              <li>Accounts: {numAccounts}</li>
+              {dataQuality?.confidence && (
+                <li>
+                  Data quality:{" "}
+                  <span className="font-medium">{dataQuality.confidence}</span>{" "}
+                  (missing prices: {dataQuality.counts?.missing_prices ?? 0}, missing
+                  allocations: {dataQuality.counts?.missing_allocations ?? 0})
+                </li>
+              )}
+              {dataQuality?.latest?.instrument_updated_at && (
+                <li>
+                  Prices updated:{" "}
+                  {new Date(dataQuality.latest.instrument_updated_at).toLocaleString(
+                    "en-US",
+                  )}
+                </li>
+              )}
+            </ul>,
+            "overview-kpis",
+          )}
+          {card(
+            "Next Actions",
+            <ul className="list-disc ml-6 text-gray-600 space-y-1">
+              {overviewRecs.slice(0, 3).map((r, i) => (
+                <li key={i}>
+                  <span className="font-medium">{r.priority || "—"}:</span>{" "}
+                  {r.recommendation}
+                </li>
+              ))}
+              {overviewRecs.length === 0 && (
+                <li>No structured recommendations found in this report.</li>
+              )}
+            </ul>,
+            "overview-actions",
+          )}
+        </div>
+      );
+    }
+
+    if (tab === "retirement") {
+      const successRate = safeNumber(retirementMetrics?.monte_carlo?.success_rate);
+      const expectedAtRet = safeNumber(
+        retirementMetrics?.monte_carlo?.expected_value_at_retirement,
+      );
+      const gap = safeNumber(retirementMetrics?.safe_withdrawal?.gap);
+
+      return (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          {card(
+            "Key Takeaways",
+            <ul className="list-disc ml-6 text-gray-600 space-y-1">
+              <li>Success rate: {successRate.toFixed(1)}%</li>
+              <li>
+                Expected value at retirement:{" "}
+                {expectedAtRet ? expectedAtRet.toLocaleString("en-US") : "-"}
+              </li>
+              <li>
+                4% rule income gap: {gap ? gap.toLocaleString("en-US") : "-"}
+              </li>
+              {dataQuality?.confidence && (
+                <li>
+                  Data quality:{" "}
+                  <span className="font-medium">{dataQuality.confidence}</span>
+                </li>
+              )}
+            </ul>,
+            "retirement-kpis",
+          )}
+          {card(
+            "Next Actions",
+            <ul className="list-disc ml-6 text-gray-600 space-y-1">
+              {retirementActions.slice(0, 4).map((a, i) => (
+                <li key={i}>
+                  <span className="font-medium">{a.timeframe}:</span> {a.action}
+                </li>
+              ))}
+              {retirementActions.length === 0 && (
+                <li>Review the timeline section in the report.</li>
+              )}
+            </ul>,
+            "retirement-actions",
+          )}
+        </div>
+      );
+    }
+
+    if (tab === "rebalance") {
+      const currency: CurrencyCode =
+        String(rebalance?.jurisdiction || "").toUpperCase() === "US" ? "USD" : "GBP";
+      const estCost = safeNumber(rebalance?.estimated_transaction_cost);
+      return (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          {card(
+            "Key Takeaways",
+            <ul className="list-disc ml-6 text-gray-600 space-y-1">
+              <li>Suggested trades: {rebalanceTrades.length}</li>
+              <li>
+                Estimated transaction cost:{" "}
+                {estCost ? formatCurrency(estCost, currency) : "-"}
+              </li>
+              <li>
+                Approach:{" "}
+                {rebalance?.options?.cash_only === false
+                  ? "May include sells"
+                  : "Cash-first"}
+              </li>
+              {rebalance?.confidence && (
+                <li>
+                  Confidence:{" "}
+                  <span className="font-medium">{String(rebalance.confidence)}</span>
+                </li>
+              )}
+            </ul>,
+            "rebalance-kpis",
+          )}
+          {card(
+            "Next Actions",
+            <ul className="list-disc ml-6 text-gray-600 space-y-1">
+              {rebalanceTrades.slice(0, 4).map((t, i) => (
+                <li key={i}>
+                  {String(t.action || "").toUpperCase()} {t.symbol} (
+                  {t.company || "—"})
+                </li>
+              ))}
+              {rebalanceTrades.length === 0 && <li>No trades suggested.</li>}
+            </ul>,
+            "rebalance-actions",
+          )}
+        </div>
+      );
+    }
+
+    if (tab === "charts") {
+      return (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          {card(
+            "Key Takeaways",
+            <ul className="list-disc ml-6 text-gray-600 space-y-1">
+              <li>Top holding concentration: {pct(topHoldingValue, totalValue)}</li>
+              <li>Cash: {pct(safeNumber(cashValue), totalValue)}</li>
+              <li>Charts available: {Object.keys(charts || {}).length}</li>
+            </ul>,
+            "charts-kpis",
+          )}
+          {card(
+            "Next Actions",
+            <ul className="list-disc ml-6 text-gray-600 space-y-1">
+              <li>Review concentration and diversification charts.</li>
+              <li>Use the Overview tab to act on recommendations.</li>
+            </ul>,
+            "charts-actions",
+          )}
+        </div>
+      );
+    }
+
+    return null;
+  };
+
+  const renderAuditPanel = (tab: TabType = activeTab) => {
+    if (!job) return null;
+
+    const base = {
+      job_created_at: job.created_at,
+      job_id: job.id,
+    };
+
+    const payload =
+      tab === "overview"
+        ? {
+            generated_at: job.report_payload?.generated_at,
+            agent: job.report_payload?.agent,
+            audit: job.report_payload?.audit,
+            ...base,
+          }
+        : tab === "retirement"
+          ? {
+              generated_at: job.retirement_payload?.generated_at,
+              agent: job.retirement_payload?.agent,
+              audit: job.retirement_payload?.audit,
+              assumptions:
+                (retirementPreview?.metrics as any)?.assumptions ??
+                job.retirement_payload?.metrics?.assumptions,
+              scenario_preview_applied: Boolean(retirementPreview),
+              ...base,
+            }
+          : tab === "rebalance"
+            ? {
+                agent: "rebalancer",
+                rebalance_options: (rebalancePreview as any)?.options ?? job.summary_payload?.rebalance?.options,
+                preview_applied: Boolean(rebalancePreview),
+                ...base,
+              }
+            : {
+                agent: "charter",
+                chart_keys: Object.keys(job.charts_payload || {}),
+                ...base,
+              };
+
+    return (
+      <details className="bg-white rounded-lg border border-gray-200 p-6 mb-6">
+        <summary className="cursor-pointer text-gray-700 font-semibold">
+          Assumptions & Audit
+        </summary>
+        <div className="mt-4 overflow-x-auto">
+          <pre className="text-xs text-gray-600 whitespace-pre-wrap">
+            {JSON.stringify(payload, null, 2)}
+          </pre>
+        </div>
+      </details>
+    );
   };
 
   /**
@@ -808,12 +1253,214 @@ export default function Analysis() {
     }
 
     const retirementAnalysis = retirement.analysis;
+    const effectiveMetrics =
+      (retirementPreview?.metrics as any) ?? job?.retirement_payload?.metrics ?? null;
 
     return (
       <div className="space-y-8">
-        {retirementAnalysis && (
-          <div className="bg-ai-accent/10 border border-ai-accent/20 rounded-lg p-6">
-            <MarkdownPanel content={retirementAnalysis} />
+        <div className="bg-white rounded-lg border border-gray-200 p-6 no-print">
+          <h3 className="text-xl font-semibold mb-3 text-gray-800">
+            Scenario Planning (Instant)
+          </h3>
+          <p className="text-gray-600 mb-4">
+            Adjust a few assumptions and recompute retirement success metrics instantly
+            (this does not regenerate the narrative text).
+          </p>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <label className="text-sm text-gray-600">
+              Annual contribution
+              <input
+                type="number"
+                className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                value={retirementForm.annualContribution}
+                onChange={(e) =>
+                  setRetirementForm((p) => ({
+                    ...p,
+                    annualContribution: Number(e.target.value || 0),
+                  }))
+                }
+              />
+            </label>
+            <label className="text-sm text-gray-600">
+              Years until retirement (optional)
+              <input
+                type="number"
+                className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                value={retirementForm.yearsUntilRetirement}
+                onChange={(e) =>
+                  setRetirementForm((p) => ({
+                    ...p,
+                    yearsUntilRetirement: e.target.value,
+                  }))
+                }
+              />
+            </label>
+            <label className="text-sm text-gray-600">
+              Inflation rate (e.g. 0.03)
+              <input
+                type="number"
+                step="0.001"
+                className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                value={retirementForm.inflationRate}
+                onChange={(e) =>
+                  setRetirementForm((p) => ({
+                    ...p,
+                    inflationRate: Number(e.target.value || 0),
+                  }))
+                }
+              />
+            </label>
+            <label className="text-sm text-gray-600">
+              Return shift (e.g. -0.02)
+              <input
+                type="number"
+                step="0.001"
+                className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                value={retirementForm.returnShift}
+                onChange={(e) =>
+                  setRetirementForm((p) => ({
+                    ...p,
+                    returnShift: Number(e.target.value || 0),
+                  }))
+                }
+              />
+            </label>
+            <label className="text-sm text-gray-600">
+              Volatility multiplier (e.g. 1.2)
+              <input
+                type="number"
+                step="0.1"
+                className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                value={retirementForm.volatilityMult}
+                onChange={(e) =>
+                  setRetirementForm((p) => ({
+                    ...p,
+                    volatilityMult: Number(e.target.value || 1),
+                  }))
+                }
+              />
+            </label>
+            <label className="text-sm text-gray-600">
+              Simulations
+              <input
+                type="number"
+                className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                value={retirementForm.numSimulations}
+                onChange={(e) =>
+                  setRetirementForm((p) => ({
+                    ...p,
+                    numSimulations: Number(e.target.value || 500),
+                  }))
+                }
+              />
+            </label>
+            <label className="text-sm text-gray-600">
+              Shock year (optional)
+              <input
+                type="number"
+                className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                value={retirementForm.shockYear}
+                onChange={(e) =>
+                  setRetirementForm((p) => ({
+                    ...p,
+                    shockYear: e.target.value,
+                  }))
+                }
+              />
+            </label>
+            <label className="text-sm text-gray-600">
+              Shock pct (0-1, optional)
+              <input
+                type="number"
+                step="0.01"
+                className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                value={retirementForm.shockPct}
+                onChange={(e) =>
+                  setRetirementForm((p) => ({
+                    ...p,
+                    shockPct: e.target.value,
+                  }))
+                }
+              />
+            </label>
+          </div>
+
+          <div className="mt-4 flex items-center gap-3">
+            <button
+              type="button"
+              disabled={scenarioLoading}
+              onClick={async () => {
+                try {
+                  setScenarioLoading(true);
+                  const token = await getToken();
+                  if (!token || !job?.id) return;
+
+                  const body: any = {
+                    annual_contribution: Number(retirementForm.annualContribution || 0),
+                    inflation_rate: Number(retirementForm.inflationRate || 0),
+                    return_shift: Number(retirementForm.returnShift || 0),
+                    volatility_mult: Number(retirementForm.volatilityMult || 1),
+                    num_simulations: Number(retirementForm.numSimulations || 500),
+                  };
+
+                  if (String(retirementForm.yearsUntilRetirement || "").trim() !== "") {
+                    body.years_until_retirement = Number(retirementForm.yearsUntilRetirement);
+                  }
+                  if (String(retirementForm.shockYear || "").trim() !== "") {
+                    body.shock_year = Number(retirementForm.shockYear);
+                  }
+                  if (String(retirementForm.shockPct || "").trim() !== "") {
+                    body.shock_pct = Number(retirementForm.shockPct);
+                  }
+
+                  const resp = await apiRequest<any>(
+                    `/api/jobs/${job.id}/retirement/preview`,
+                    token,
+                    { method: "POST", body: JSON.stringify(body) },
+                  );
+                  setRetirementPreview(resp);
+                  if (resp?.data_quality) setDataQuality(resp.data_quality);
+                } finally {
+                  setScenarioLoading(false);
+                }
+              }}
+              className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-blue-600 font-semibold disabled:opacity-50"
+            >
+              {scenarioLoading ? "Recomputing..." : "Recompute"}
+            </button>
+            {retirementPreview && (
+              <button
+                type="button"
+                onClick={() => setRetirementPreview(null)}
+                className="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 font-semibold"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+
+          {effectiveMetrics && (
+            <div className="mt-4 text-sm text-gray-600">
+              Preview success rate:{" "}
+              <span className="font-semibold">
+                {safeNumber(effectiveMetrics?.monte_carlo?.success_rate).toFixed(1)}%
+              </span>
+            </div>
+          )}
+        </div>
+
+        {scenarioLoading && (
+          <div className="no-print bg-gray-50 border border-gray-200 rounded-lg p-4 animate-pulse text-sm text-gray-600">
+            Recomputing scenario metrics…
+          </div>
+        )}
+
+        {retirementAnalysis ? (
+          <MarkdownPanel content={retirementAnalysis} />
+        ) : (
+          <div className="text-center py-12 text-gray-500">
+            No retirement projection available.
           </div>
         )}
       </div>
@@ -821,7 +1468,7 @@ export default function Analysis() {
   };
 
   const renderRebalance = () => {
-    const rebalance = job?.summary_payload?.rebalance;
+    const rebalance = rebalancePreview ?? job?.summary_payload?.rebalance;
     if (!rebalance || rebalance.enabled === false) {
       return (
         <div className="text-center py-12 text-gray-500">
@@ -839,123 +1486,209 @@ export default function Analysis() {
 
     const trades: any[] = Array.isArray(rebalance.trades) ? rebalance.trades : [];
     const notes: string[] = Array.isArray(rebalance.notes) ? rebalance.notes : [];
+    const estCost = rebalance.estimated_transaction_cost;
+
+    const fmtPct = (value: any): string => `${Number(value || 0).toFixed(2)}%`;
+
+    const allocationKeys = Array.from(
+      new Set([...Object.keys(currentPct), ...Object.keys(targetPct)]),
+    );
+
+    const allocationRows = allocationKeys
+      .map((k) => `| ${formatLabelName(k)} | ${fmtPct(currentPct[k])} | ${fmtPct(targetPct[k])} |`)
+      .join("\n");
+
+    const tradesRows =
+      trades.length === 0
+        ? "| - | - | - | - | - | - |"
+        : trades
+            .map((t) => {
+              const company = String(t.company || t.symbol || "-");
+              const ticker = String(t.symbol || "-");
+              const account = String(t.account || "-");
+              const action = String(t.action || "").toUpperCase() || "-";
+              const estValue = formatCurrency(Number(t.estimated_value || 0), currency);
+              const estQty =
+                t.estimated_quantity != null
+                  ? Number(t.estimated_quantity).toLocaleString("en-US", {
+                      maximumFractionDigits: 6,
+                    })
+                  : "-";
+              return `| ${company} | ${ticker} | ${account} | ${action} | ${estValue} | ${estQty} |`;
+            })
+            .join("\n");
+
+    const cleanedNotes = notes
+      .map((n) => String(n || "").trim())
+      .filter(Boolean)
+      .map((n) => n.replace(/^-+\s*/, ""));
+
+    const md = [
+      "# Rebalancing Recommendation",
+      "",
+      "This tab provides a deterministic rebalancing suggestion. It compares your current asset-class weights to your target weights and suggests example trades to move you closer to target (cash-first where possible).",
+      "",
+      ...(typeof estCost === "number" && estCost > 0
+        ? [`Estimated transaction cost: **${formatCurrency(estCost, currency)}**`, ""]
+        : []),
+      "## Allocation (Asset Class)",
+      "| Asset Class | Current | Target |",
+      "|---|---:|---:|",
+      allocationRows || "| - | - | - |",
+      "",
+      "## Suggested Trades",
+      "| Company | Ticker | Account | Action | Est. Value | Est. Qty |",
+      "|---|---|---|---|---:|---:|",
+      tradesRows,
+      "",
+      "## Notes",
+      ...(cleanedNotes.length ? cleanedNotes.map((n) => `- ${n}`) : ["- No additional notes."]),
+      "",
+    ].join("\n");
 
     return (
-      <div className="space-y-8">
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
+      <div className="space-y-6">
+        <div className="bg-white rounded-lg border border-gray-200 p-6 no-print">
           <h3 className="text-xl font-semibold mb-3 text-gray-800">
-            Allocation (Asset Class)
+            Rebalance Settings (Instant)
           </h3>
+          <p className="text-gray-600 mb-4">
+            Tune the heuristic options and recompute trade suggestions instantly.
+          </p>
 
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-gray-200">
-                  <th className="text-left py-3 px-4 font-semibold text-gray-700">
-                    Asset Class
-                  </th>
-                  <th className="text-right py-3 px-4 font-semibold text-gray-700">
-                    Current
-                  </th>
-                  <th className="text-right py-3 px-4 font-semibold text-gray-700">
-                    Target
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {Array.from(
-                  new Set([
-                    ...Object.keys(currentPct),
-                    ...Object.keys(targetPct),
-                  ])
-                ).map((key) => (
-                  <tr
-                    key={key}
-                    className="border-b border-gray-100 hover:bg-gray-50 transition-colors"
-                  >
-                    <td className="py-3 px-4 font-medium">{formatLabelName(key)}</td>
-                    <td className="py-3 px-4 text-right">
-                      {Number(currentPct[key] || 0).toFixed(2)}%
-                    </td>
-                    <td className="py-3 px-4 text-right">
-                      {Number(targetPct[key] || 0).toFixed(2)}%
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <label className="text-sm text-gray-600 flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={rebalanceForm.cashOnly}
+                onChange={(e) =>
+                  setRebalanceForm((p) => ({ ...p, cashOnly: e.target.checked }))
+                }
+              />
+              Cash-only (no sells)
+            </label>
+            <label className="text-sm text-gray-600 flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={rebalanceForm.allowSells}
+                onChange={(e) =>
+                  setRebalanceForm((p) => ({ ...p, allowSells: e.target.checked }))
+                }
+              />
+              Allow sells (if needed)
+            </label>
+            <label className="text-sm text-gray-600 flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={rebalanceForm.allowTaxableSells}
+                onChange={(e) =>
+                  setRebalanceForm((p) => ({
+                    ...p,
+                    allowTaxableSells: e.target.checked,
+                  }))
+                }
+              />
+              Allow taxable sells
+            </label>
+            <label className="text-sm text-gray-600">
+              Drift band (%)
+              <input
+                type="number"
+                step="0.1"
+                className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                value={rebalanceForm.driftBandPct}
+                onChange={(e) =>
+                  setRebalanceForm((p) => ({
+                    ...p,
+                    driftBandPct: Number(e.target.value || 0),
+                  }))
+                }
+              />
+            </label>
+            <label className="text-sm text-gray-600">
+              Max turnover (%)
+              <input
+                type="number"
+                step="0.1"
+                className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                value={rebalanceForm.maxTurnoverPct}
+                onChange={(e) =>
+                  setRebalanceForm((p) => ({
+                    ...p,
+                    maxTurnoverPct: Number(e.target.value || 0),
+                  }))
+                }
+              />
+            </label>
+            <label className="text-sm text-gray-600">
+              Transaction cost (bps)
+              <input
+                type="number"
+                step="1"
+                className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                value={rebalanceForm.transactionCostBps}
+                onChange={(e) =>
+                  setRebalanceForm((p) => ({
+                    ...p,
+                    transactionCostBps: Number(e.target.value || 0),
+                  }))
+                }
+              />
+            </label>
+          </div>
+
+          <div className="mt-4 flex items-center gap-3">
+            <button
+              type="button"
+              disabled={rebalanceLoading}
+              onClick={async () => {
+                try {
+                  setRebalanceLoading(true);
+                  const token = await getToken();
+                  if (!token || !job?.id) return;
+                  const body: any = {
+                    cash_only: Boolean(rebalanceForm.cashOnly),
+                    allow_sells: Boolean(rebalanceForm.allowSells),
+                    allow_taxable_sells: Boolean(rebalanceForm.allowTaxableSells),
+                    drift_band_pct: Number(rebalanceForm.driftBandPct || 0),
+                    max_turnover_pct: Number(rebalanceForm.maxTurnoverPct || 0),
+                    transaction_cost_bps: Number(rebalanceForm.transactionCostBps || 0),
+                    persist: Boolean(rebalanceForm.persist),
+                  };
+                  const resp = await apiRequest<any>(
+                    `/api/jobs/${job.id}/rebalance/preview`,
+                    token,
+                    { method: "POST", body: JSON.stringify(body) },
+                  );
+                  setRebalancePreview(resp?.rebalance ?? null);
+                  if (resp?.data_quality) setDataQuality(resp.data_quality);
+                } finally {
+                  setRebalanceLoading(false);
+                }
+              }}
+              className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-blue-600 font-semibold disabled:opacity-50"
+            >
+              {rebalanceLoading ? "Recomputing..." : "Recompute"}
+            </button>
+            {rebalancePreview && (
+              <button
+                type="button"
+                onClick={() => setRebalancePreview(null)}
+                className="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 font-semibold"
+              >
+                Reset
+              </button>
+            )}
           </div>
         </div>
 
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
-          <h3 className="text-xl font-semibold mb-3 text-gray-800">
-            Suggested Trades (Heuristic)
-          </h3>
+        {rebalanceLoading && (
+          <div className="no-print bg-gray-50 border border-gray-200 rounded-lg p-4 animate-pulse text-sm text-gray-600">
+            Recomputing trade suggestions…
+          </div>
+        )}
 
-          {trades.length === 0 ? (
-            <p className="text-gray-600">No trades suggested within drift bands.</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-gray-200">
-                    <th className="text-left py-3 px-4 font-semibold text-gray-700">
-                      Symbol
-                    </th>
-                    <th className="text-left py-3 px-4 font-semibold text-gray-700">
-                      Action
-                    </th>
-                    <th className="text-right py-3 px-4 font-semibold text-gray-700">
-                      Est. Value
-                    </th>
-                    <th className="text-right py-3 px-4 font-semibold text-gray-700">
-                      Est. Qty
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {trades.map((t, idx) => (
-                    <tr
-                      key={`${t.symbol}-${idx}`}
-                      className="border-b border-gray-100 hover:bg-gray-50 transition-colors"
-                    >
-                      <td className="py-3 px-4 font-medium">{t.symbol}</td>
-                      <td className="py-3 px-4">
-                        <span
-                          className={`inline-flex px-2 py-1 rounded text-xs font-semibold ${
-                            t.action === "sell"
-                              ? "bg-red-50 text-red-700"
-                              : "bg-green-50 text-green-700"
-                          }`}
-                        >
-                          {String(t.action || "").toUpperCase()}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        {formatCurrency(Number(t.estimated_value || 0), currency)}
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        {t.estimated_quantity != null
-                          ? Number(t.estimated_quantity).toLocaleString("en-US", {
-                              maximumFractionDigits: 6,
-                            })
-                          : "—"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {notes.length > 0 && (
-            <div className="mt-4 text-sm text-gray-600 space-y-1">
-              {notes.map((n, i) => (
-                <p key={i}>{n}</p>
-              ))}
-            </div>
-          )}
-        </div>
+        <MarkdownPanel content={md} />
       </div>
     );
   };
@@ -1039,10 +1772,124 @@ export default function Analysis() {
 
             {/* Tab Content */}
             <div className="bg-white rounded-lg shadow px-8 py-6">
-              {activeTab === "overview" && renderOverview()}
-              {activeTab === "charts" && renderCharts()}
-              {activeTab === "retirement" && renderRetirement()}
-              {activeTab === "rebalance" && renderRebalance()}
+                <div className="flex items-center justify-between gap-4 mb-6 no-print">
+                <div className="text-sm text-gray-500">
+                  Export this tab (or all tabs) via your browser: Save to PDF.
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => triggerPrint("tab")}
+                    className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-blue-600 font-semibold"
+                  >
+                    Export Tab PDF
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => triggerPrint("all")}
+                    className="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 font-semibold"
+                  >
+                    Export All Tabs
+                  </button>
+                </div>
+              </div>
+
+              <div id="print-area">
+                <div className="print-only mb-6">
+                  <div className="print-header">
+                    <div className="text-xs text-gray-600">
+                      Alex AI Financial Advisor
+                    </div>
+                    <div className="text-sm font-semibold text-gray-900">
+                      {TAB_TITLES[activeTab]}
+                    </div>
+                    <div className="text-xs text-gray-600">
+                      Job {job.id} · Completed {formatDate(job.created_at)}
+                    </div>
+                  </div>
+                  <div className="print-footer">
+                    <div className="text-xs text-gray-500">
+                      For informational purposes only · Not financial advice
+                    </div>
+                  </div>
+                  <div className="print-page-content">
+                    <h1 className="text-2xl font-bold text-gray-900">
+                      {TAB_TITLES[activeTab]}
+                    </h1>
+                    <p className="text-sm text-gray-600">
+                      Completed on {formatDate(job.created_at)}
+                    </p>
+                  </div>
+                </div>
+
+                {renderTabSummary(activeTab)}
+                {renderAuditPanel(activeTab)}
+
+                {activeTab === "overview" && renderOverview()}
+                {activeTab === "charts" && renderCharts()}
+                {activeTab === "retirement" && renderRetirement()}
+                {activeTab === "rebalance" && renderRebalance()}
+              </div>
+
+              <div id="print-all-area" className="print-only">
+                <div className="print-header">
+                  <div className="text-xs text-gray-600">
+                    Alex AI Financial Advisor
+                  </div>
+                  <div className="text-sm font-semibold text-gray-900">
+                    Portfolio Analysis Report
+                  </div>
+                  <div className="text-xs text-gray-600">
+                    Job {job.id} · Completed {formatDate(job.created_at)}
+                  </div>
+                </div>
+                <div className="print-footer">
+                  <div className="text-xs text-gray-500">
+                    For informational purposes only · Not financial advice
+                  </div>
+                </div>
+
+                <div className="print-page-content">
+                  <h1 className="text-2xl font-bold text-gray-900">
+                    Portfolio Analysis Report
+                  </h1>
+                  <p className="text-sm text-gray-600">
+                    Completed on {formatDate(job.created_at)}
+                  </p>
+
+                  <div className="page-break" />
+
+                  <h1 className="text-2xl font-bold text-gray-900">Overview</h1>
+                  {renderTabSummary("overview")}
+                  {renderAuditPanel("overview")}
+                  {renderOverview()}
+
+                  <div className="page-break" />
+
+                  <h1 className="text-2xl font-bold text-gray-900">Charts</h1>
+                  {renderTabSummary("charts")}
+                  {renderAuditPanel("charts")}
+                  {renderCharts()}
+
+                  <div className="page-break" />
+
+                  <h1 className="text-2xl font-bold text-gray-900">
+                    Retirement Projection
+                  </h1>
+                  {renderTabSummary("retirement")}
+                  {renderAuditPanel("retirement")}
+                  {renderRetirement()}
+
+                  <div className="page-break" />
+
+                  <h1 className="text-2xl font-bold text-gray-900">
+                    Rebalancing
+                  </h1>
+                  {renderTabSummary("rebalance")}
+                  {renderAuditPanel("rebalance")}
+                  {renderRebalance()}
+                </div>
+              </div>
             </div>
           </div>
         </div>
