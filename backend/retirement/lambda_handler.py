@@ -175,6 +175,58 @@ def _replace_html_breaks(text: str) -> str:
     return re.sub(r"<br\\s*/?>", "; ", text, flags=re.IGNORECASE)
 
 
+def _extract_action_items(markdown: str) -> list[dict[str, str]]:
+    """
+    Extract action items from a markdown table that has Timeframe/Action columns.
+    """
+    if not markdown:
+        return []
+
+    lines = markdown.splitlines()
+
+    def _split_row(line: str) -> list[str]:
+        return [p.strip() for p in line.strip().strip("|").split("|")]
+
+    for i in range(len(lines) - 2):
+        header = lines[i].strip()
+        if "|" not in header:
+            continue
+        header_cells = [c.lower() for c in _split_row(header)]
+        if "timeframe" not in header_cells:
+            continue
+        if not any(h in header_cells for h in ["action", "action items", "actions"]):
+            continue
+
+        separator = lines[i + 1].strip()
+        if "|" not in separator or not re.search(r"-{3,}", separator):
+            continue
+
+        tf_idx = header_cells.index("timeframe")
+        action_idx = None
+        for name in ["action items", "actions", "action"]:
+            if name in header_cells:
+                action_idx = header_cells.index(name)
+                break
+        if action_idx is None:
+            continue
+
+        out: list[dict[str, str]] = []
+        for j in range(i + 2, len(lines)):
+            row_line = lines[j].strip()
+            if not row_line or "|" not in row_line:
+                break
+            row = _split_row(row_line)
+            if max(tf_idx, action_idx) >= len(row):
+                continue
+            timeframe = row[tf_idx].strip()
+            action = row[action_idx].strip()
+            if timeframe or action:
+                out.append({"timeframe": timeframe, "action": action})
+        return out
+
+    return []
+
+
 # ============================================================
 # Custom Error Types
 # ============================================================
@@ -343,7 +395,7 @@ async def run_retirement_agent(
     )
 
     # Create configured agent (model, tools, and task prompt)
-    model, tools, task = create_agent(
+    model, tools, task, metrics = create_agent(
         job_id,
         portfolio_data,
         user_preferences,
@@ -403,10 +455,25 @@ async def run_retirement_agent(
             title="Retirement Readiness Assessment",
         )
         markdown = _replace_html_breaks(markdown)
+
+        action_items = _extract_action_items(markdown)
+        end_time = datetime.now(timezone.utc)
+        duration_ms = int((end_time - start_time).total_seconds() * 1000)
+        model_id = os.getenv(
+            "BEDROCK_MODEL_ID",
+            "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        )
+
         retirement_payload = {
             "analysis": markdown,
+            "metrics": metrics,
+            "action_items": action_items,
             "generated_at": datetime.utcnow().isoformat(),
             "agent": "retirement",
+            "audit": {
+                "model_used": f"bedrock/{model_id}",
+                "duration_ms": duration_ms,
+            },
         }
 
         success = db.jobs.update_retirement(job_id, retirement_payload)
@@ -432,7 +499,6 @@ async def run_retirement_agent(
                 )
             )
 
-        end_time = datetime.now(timezone.utc)
         logger.info(
             json.dumps(
                 {

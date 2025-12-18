@@ -140,10 +140,14 @@ def get_migration_statements() -> List[str]:
             target_retirement_income DECIMAL(12,2),
             asset_class_targets JSONB DEFAULT '{"equity": 70, "fixed_income": 30}',
             region_targets JSONB DEFAULT '{"north_america": 50, "international": 50}',
+            user_preferences JSONB DEFAULT '{}'::jsonb,
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
         )
         """,
+
+        # Backfill newer columns for already-provisioned databases (idempotent)
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS user_preferences JSONB DEFAULT '{}'::jsonb",
 
         # Instruments table
         """

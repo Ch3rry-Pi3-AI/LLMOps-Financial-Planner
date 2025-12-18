@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -91,6 +92,76 @@ def _normalize_markdown_report(text: str) -> str:
             return "\n".join(lines[idx:]).lstrip()
 
     return stripped
+
+
+def _parse_markdown_table_rows(
+    text: str,
+    *,
+    required_headers: list[str],
+) -> list[dict[str, str]]:
+    """
+    Extract rows from the first markdown table that contains all required headers.
+
+    This is intentionally lightweight: it is used to surface structured data in
+    the UI while still rendering the full markdown report.
+    """
+    if not text:
+        return []
+
+    lines = text.splitlines()
+    headers_lower = [h.strip().lower() for h in required_headers if h.strip()]
+    if not headers_lower:
+        return []
+
+    def _split_row(line: str) -> list[str]:
+        parts = [p.strip() for p in line.strip().strip("|").split("|")]
+        return [p for p in parts if p != ""]
+
+    for i in range(len(lines) - 2):
+        header_line = lines[i].strip()
+        if "|" not in header_line:
+            continue
+
+        header_cells = [c.strip().lower() for c in _split_row(header_line)]
+        if not header_cells:
+            continue
+
+        if not all(h in header_cells for h in headers_lower):
+            continue
+
+        separator = lines[i + 1].strip()
+        if "|" not in separator or not re.search(r"-{3,}", separator):
+            continue
+
+        # Map required headers to their indices (best-effort).
+        index: dict[str, int] = {}
+        for h in required_headers:
+            h_l = h.strip().lower()
+            if h_l in header_cells:
+                index[h_l] = header_cells.index(h_l)
+
+        out: list[dict[str, str]] = []
+        for j in range(i + 2, len(lines)):
+            row_line = lines[j].strip()
+            if not row_line or "|" not in row_line:
+                break
+            row_cells = _split_row(row_line)
+            if len(row_cells) < len(header_cells):
+                continue
+
+            row: dict[str, str] = {}
+            for h in required_headers:
+                key = h.strip().lower()
+                idx = index.get(key)
+                if idx is None or idx >= len(row_cells):
+                    row[h] = ""
+                else:
+                    row[h] = row_cells[idx].strip()
+            out.append(row)
+
+        return out
+
+    return []
 
 
 @retry(
@@ -252,6 +323,21 @@ async def run_reporter_agent(
             duration_ms=duration_ms,
         )
 
+        # Best-effort structured extraction for the UI.
+        rec_rows = _parse_markdown_table_rows(
+            response,
+            required_headers=["Recommendation", "Reasoning", "Priority"],
+        )
+        recommendations = [
+            {
+                "recommendation": r.get("Recommendation", "").strip(),
+                "reasoning": r.get("Reasoning", "").strip(),
+                "priority": r.get("Priority", "").strip(),
+            }
+            for r in rec_rows
+            if (r.get("Recommendation") or "").strip()
+        ]
+
         if observability:
             observability.create_event(
                 name="Reporter Audit Log",
@@ -266,6 +352,12 @@ async def run_reporter_agent(
             "content": response,
             "generated_at": datetime.utcnow().isoformat(),
             "agent": "reporter",
+            "recommendations": recommendations,
+            "audit": {
+                "model_used": audit_entry.get("model"),
+                "duration_ms": audit_entry.get("duration_ms"),
+                "input_hash": audit_entry.get("input_hash"),
+            },
         }
 
         success = bool(db and db.jobs.update_report(job_id, report_payload))

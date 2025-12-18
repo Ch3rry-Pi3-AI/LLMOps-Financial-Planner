@@ -97,25 +97,46 @@ def _default_symbol_for_asset_class(asset_class: str, *, jurisdiction: str) -> s
 @dataclass(frozen=True)
 class RebalanceOptions:
     drift_band_pct: float = 5.0
+    drift_band_pct_by_class: Dict[str, float] | None = None
     max_turnover_pct: float = 20.0
     transaction_cost_bps: float = 10.0
     cash_only: bool = True
     jurisdiction: str = "US"
+    allow_taxable_sells: bool = True
+    excluded_accounts: Tuple[str, ...] = ()
 
 
 def _parse_options(options: Dict[str, Any] | None) -> RebalanceOptions:
     raw = options or {}
     drift = _safe_float(raw.get("drift_band_pct"), default=5.0)
+    drift_by_class = raw.get("drift_band_pct_by_class")
+    drift_by_class_clean: Dict[str, float] | None = None
+    if isinstance(drift_by_class, dict):
+        drift_by_class_clean = {
+            str(k): _safe_float(v, default=0.0)
+            for k, v in drift_by_class.items()
+            if k is not None and _safe_float(v, default=0.0) > 0
+        } or None
     turnover = _safe_float(raw.get("max_turnover_pct"), default=20.0)
     tc = _safe_float(raw.get("transaction_cost_bps"), default=10.0)
     cash_only = bool(raw.get("cash_only", True))
     jurisdiction = str(raw.get("jurisdiction") or "US").upper()
+    allow_taxable_sells = bool(raw.get("allow_taxable_sells", True))
+    excluded_accounts_raw = raw.get("excluded_accounts") or []
+    excluded_accounts: Tuple[str, ...] = ()
+    if isinstance(excluded_accounts_raw, list):
+        excluded_accounts = tuple(
+            str(x).strip().lower() for x in excluded_accounts_raw if str(x).strip()
+        )
     return RebalanceOptions(
         drift_band_pct=max(0.0, drift),
+        drift_band_pct_by_class=drift_by_class_clean,
         max_turnover_pct=max(0.0, turnover),
         transaction_cost_bps=max(0.0, tc),
         cash_only=cash_only,
         jurisdiction=jurisdiction,
+        allow_taxable_sells=allow_taxable_sells,
+        excluded_accounts=excluded_accounts,
     )
 
 
@@ -164,6 +185,7 @@ def compute_rebalance_recommendation(
     symbol_prices: Dict[str, float] = {}
     symbol_asset_class: Dict[str, str] = {}
     symbol_company: Dict[str, str] = {}
+    symbol_locations: Dict[str, List[Dict[str, Any]]] = {}
     holdings_by_class: Dict[str, List[Tuple[str, float]]] = {}
     tax_buckets: Dict[str, int] = {"tax_free": 0, "tax_deferred": 0, "taxable": 0, "unknown": 0}
 
@@ -174,6 +196,13 @@ def compute_rebalance_recommendation(
         label = str(account.get("name") or account.get("type") or account.get("account_name") or "")
         bucket = _infer_account_tax_bucket(label, jurisdiction=opts.jurisdiction)
         tax_buckets[bucket] = tax_buckets.get(bucket, 0) + 1
+        account_name = str(account.get("name") or account.get("account_name") or "").strip() or label
+
+        # Account-level exclusions (applied to trade generation and metrics).
+        if opts.excluded_accounts:
+            haystack = f"{account_name} {label}".strip().lower()
+            if any(excl in haystack for excl in opts.excluded_accounts):
+                continue
 
         for pos in (account.get("positions") or []):
             symbol = str(pos.get("symbol") or "").strip().upper()
@@ -197,6 +226,14 @@ def compute_rebalance_recommendation(
             if price > 0 and symbol not in symbol_prices:
                 symbol_prices[symbol] = price
             symbol_asset_class[symbol] = _classify_asset_class(instrument)
+            symbol_locations.setdefault(symbol, []).append(
+                {
+                    "account": account_name,
+                    "tax_bucket": bucket,
+                    "value": value,
+                    "cash_balance": max(0.0, cash),
+                }
+            )
 
     total_invested = sum(symbol_values.values())
     total_value = total_invested + total_cash
@@ -216,15 +253,47 @@ def compute_rebalance_recommendation(
     for cls in set(list(current_class_values.keys()) + list(target_class_values.keys())):
         deltas[cls] = target_class_values.get(cls, 0.0) - current_class_values.get(cls, 0.0)
 
-    drift_band_value = (opts.drift_band_pct / 100.0) * total_value
-    buys_needed = {cls: amt for cls, amt in deltas.items() if amt > drift_band_value}
-    sells_excess = {cls: -amt for cls, amt in deltas.items() if amt < -drift_band_value}
+    def _band_value(asset_class: str) -> float:
+        if opts.drift_band_pct_by_class and asset_class in opts.drift_band_pct_by_class:
+            return (opts.drift_band_pct_by_class[asset_class] / 100.0) * total_value
+        return (opts.drift_band_pct / 100.0) * total_value
+
+    buys_needed = {cls: amt for cls, amt in deltas.items() if amt > _band_value(cls)}
+    sells_excess = {cls: -amt for cls, amt in deltas.items() if amt < -_band_value(cls)}
 
     trades: List[Dict[str, Any]] = []
     placeholders_used: Dict[str, str] = {}
     cash_to_spend = total_cash
     turnover_cap_value = (opts.max_turnover_pct / 100.0) * total_value
     turnover_used = 0.0
+
+    def _preferred_account_for_symbol(symbol: str, *, action: str) -> Tuple[str | None, str]:
+        locations = symbol_locations.get(symbol) or []
+        if not locations:
+            return None, "unknown"
+
+        if action == "sell":
+            bucket_order = ["tax_deferred", "tax_free", "unknown", "taxable"]
+            if not opts.allow_taxable_sells:
+                bucket_order = ["tax_deferred", "tax_free", "unknown"]
+        else:
+            bucket_order = ["tax_deferred", "tax_free", "taxable", "unknown"]
+
+        best: Dict[str, Any] | None = None
+        for b in bucket_order:
+            candidates = [l for l in locations if l.get("tax_bucket") == b]
+            if not candidates:
+                continue
+            if action == "sell":
+                best = max(candidates, key=lambda l: float(l.get("value") or 0.0))
+            else:
+                best = max(candidates, key=lambda l: float(l.get("cash_balance") or 0.0))
+            break
+
+        if not best:
+            best = max(locations, key=lambda l: float(l.get("value") or 0.0))
+
+        return best.get("account"), str(best.get("tax_bucket") or "unknown")
 
     def add_trade(symbol: str, action: str, value_amount: float) -> None:
         price = symbol_prices.get(symbol, 0.0)
@@ -237,16 +306,45 @@ def compute_rebalance_recommendation(
             "CASH": "Cash",
         }
         company = symbol_company.get(symbol) or placeholder_company.get(symbol.upper()) or symbol
+        preferred_account, tax_bucket = _preferred_account_for_symbol(symbol, action=action)
         trades.append(
             {
                 "company": company,
                 "symbol": symbol,
+                "account": preferred_account,
+                "tax_bucket": tax_bucket,
                 "action": action,
                 "estimated_value": round(value_amount, 2),
                 "estimated_price": round(price, 4) if price else None,
                 "estimated_quantity": round(qty, 6) if qty is not None else None,
             }
         )
+
+    def pick_sell_symbol(asset_class: str) -> str | None:
+        items = holdings_by_class.get(asset_class, [])
+        if not items:
+            return None
+
+        bucket_order = ["tax_deferred", "tax_free", "unknown", "taxable"]
+        if not opts.allow_taxable_sells:
+            bucket_order = ["tax_deferred", "tax_free", "unknown"]
+
+        # Build quick lookup: symbol -> best bucket rank + total value.
+        symbol_total = {sym: val for sym, val in items}
+
+        def _best_rank(sym: str) -> int:
+            locs = symbol_locations.get(sym) or []
+            buckets = {str(l.get("tax_bucket") or "unknown") for l in locs}
+            for idx, b in enumerate(bucket_order):
+                if b in buckets:
+                    return idx
+            return len(bucket_order)
+
+        # Prefer lowest rank (most tax-advantaged), then largest value.
+        return sorted(
+            symbol_total.keys(),
+            key=lambda s: (_best_rank(s), -float(symbol_total.get(s) or 0.0)),
+        )[0]
 
     # 1) Cash-first buys
     total_buy_need = sum(buys_needed.values())
@@ -279,13 +377,9 @@ def compute_rebalance_recommendation(
                 sell_amount = min(excess, remaining_buy, turnover_cap_value - turnover_used)
                 if sell_amount <= 0:
                     continue
-                sell_symbol, used_placeholder = _pick_symbol(
-                    holdings_by_class,
-                    sell_cls,
-                    jurisdiction=opts.jurisdiction,
-                )
-                if used_placeholder and sell_symbol:
-                    placeholders_used[sell_symbol] = sell_cls
+                sell_symbol = pick_sell_symbol(sell_cls)
+                if not sell_symbol:
+                    continue
                 add_trade(sell_symbol, "sell", sell_amount)
                 turnover_used += sell_amount
 
@@ -341,20 +435,37 @@ def compute_rebalance_recommendation(
             if desc:
                 placeholder_notes.append(f"- {symbol.upper()}: {desc}")
 
+    confidence_reasons: List[str] = []
+    confidence = "high"
+    if placeholders_used:
+        confidence = "low"
+        confidence_reasons.append("Used placeholder symbols for missing asset-class holdings.")
+    if not opts.cash_only:
+        confidence = "medium" if confidence == "high" else confidence
+        confidence_reasons.append("Includes sells; tax impact may vary by account and holding period.")
+    if any(t.get("tax_bucket") == "unknown" for t in trades):
+        confidence = "medium" if confidence == "high" else confidence
+        confidence_reasons.append("Some trades have unknown tax bucket classification.")
+
     return {
         "enabled": True,
         "jurisdiction": opts.jurisdiction,
         "options": {
             "drift_band_pct": opts.drift_band_pct,
+            "drift_band_pct_by_class": opts.drift_band_pct_by_class,
             "max_turnover_pct": opts.max_turnover_pct,
             "transaction_cost_bps": opts.transaction_cost_bps,
             "cash_only": opts.cash_only,
+            "allow_taxable_sells": opts.allow_taxable_sells,
+            "excluded_accounts": list(opts.excluded_accounts),
         },
         "portfolio": {
             "total_value": round(total_value, 2),
             "total_cash": round(total_cash, 2),
         },
         "tax_buckets_detected": tax_buckets,
+        "confidence": confidence,
+        "confidence_reasons": confidence_reasons,
         "asset_class_allocation": {
             "current_pct": {k: round(v, 2) for k, v in current_alloc.items()},
             "target_pct": {k: round(v, 2) for k, v in target_alloc.items()},

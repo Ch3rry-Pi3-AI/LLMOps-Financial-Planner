@@ -476,7 +476,15 @@ class Positions(BaseModel):
             Positions joined with instrument metadata.
         """
         sql = """
-            SELECT p.*, i.name AS instrument_name, i.instrument_type, i.current_price
+            SELECT
+                p.*,
+                i.name AS instrument_name,
+                i.instrument_type,
+                i.current_price,
+                i.allocation_regions,
+                i.allocation_sectors,
+                i.allocation_asset_class,
+                i.updated_at AS instrument_updated_at
             FROM positions p
             JOIN instruments i ON p.symbol = i.symbol
             WHERE p.account_id = :account_id::uuid
