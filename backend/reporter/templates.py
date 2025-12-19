@@ -67,7 +67,7 @@ Portfolio Composition Analysis requirements:
   - Shares = shares held.
   - Price = current price per share (if provided).
   - Value = shares × price (if price is provided).
-  - Sector = primary sector (best-guess from the provided allocations).
+  - Sector = primary sector (best-guess from the provided allocations), formatted as a human-readable label (no underscores; e.g., "Consumer Discretionary", "Real Estate").
 - If any field is missing, write "Unknown" (or "N/A" for Price/Value) rather than omitting it.
 """
 

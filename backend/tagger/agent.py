@@ -48,7 +48,7 @@ import asyncio
 import logging
 import os
 from decimal import Decimal
-from typing import List
+from typing import Any, Dict, List
 
 from dotenv import load_dotenv
 from litellm.exceptions import RateLimitError
@@ -69,6 +69,32 @@ load_dotenv(override=True)
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# ============================================================
+# Known Instrument Overrides
+# ============================================================
+#
+# When users add tickers outside the default market-data universe (Polygon US),
+# the LLM may misidentify the instrument (especially if an exchange suffix is
+# omitted). For a small set of common tickers, we hardcode metadata so the
+# resulting reports stay accurate and deterministic.
+KNOWN_INSTRUMENT_OVERRIDES: Dict[str, Dict[str, Any]] = {
+    # Vanguard S&P 500 UCITS ETF USD Acc (UK / LSE). Users often enter "VUAG"
+    # without an exchange suffix like ".L", which can lead to misidentification.
+    "VUAG": {
+        "name": "Vanguard S&P 500 UCITS ETF USD Acc",
+        "instrument_type": "etf",
+        # Approximate; kept stable if Planner cannot fetch a live price.
+        "current_price": 97.5,
+        "allocation_asset_class": {"equity": 100.0},
+        "allocation_regions": {"north_america": 100.0},
+        "allocation_sectors": {"diversified": 100.0},
+        "rationale": (
+            "Hardcoded override for a commonly used UCITS ETF ticker (VUAG) "
+            "to avoid misclassification when exchange suffixes are omitted."
+        ),
+    },
+}
 
 # Model configuration for Bedrock via LiteLLM
 BEDROCK_MODEL_ID = os.getenv(
@@ -510,6 +536,65 @@ async def tag_instruments(instruments: List[dict]) -> List[InstrumentClassificat
         instrument_type = instrument.get("instrument_type", "etf")
 
         try:
+            override = KNOWN_INSTRUMENT_OVERRIDES.get(str(symbol).upper())
+            if override:
+                asset = override.get("allocation_asset_class") or {}
+                regions = override.get("allocation_regions") or {}
+                sectors = override.get("allocation_sectors") or {}
+
+                classification = InstrumentClassification(
+                    symbol=str(symbol).upper(),
+                    name=str(override.get("name") or name or symbol),
+                    instrument_type=str(override.get("instrument_type") or instrument_type),
+                    current_price=float(override.get("current_price") or 1.0),
+                    rationale=str(override.get("rationale") or "Hardcoded override."),
+                    allocation_asset_class=AllocationBreakdown(
+                        equity=float(asset.get("equity", 0.0)),
+                        fixed_income=float(asset.get("fixed_income", 0.0)),
+                        real_estate=float(asset.get("real_estate", 0.0)),
+                        commodities=float(asset.get("commodities", 0.0)),
+                        cash=float(asset.get("cash", 0.0)),
+                        alternatives=float(asset.get("alternatives", 0.0)),
+                    ),
+                    allocation_regions=RegionAllocation(
+                        north_america=float(regions.get("north_america", 0.0)),
+                        europe=float(regions.get("europe", 0.0)),
+                        asia=float(regions.get("asia", 0.0)),
+                        latin_america=float(regions.get("latin_america", 0.0)),
+                        africa=float(regions.get("africa", 0.0)),
+                        middle_east=float(regions.get("middle_east", 0.0)),
+                        oceania=float(regions.get("oceania", 0.0)),
+                        global_=float(regions.get("global", 0.0)),
+                        international=float(regions.get("international", 0.0)),
+                    ),
+                    allocation_sectors=SectorAllocation(
+                        technology=float(sectors.get("technology", 0.0)),
+                        healthcare=float(sectors.get("healthcare", 0.0)),
+                        financials=float(sectors.get("financials", 0.0)),
+                        consumer_discretionary=float(
+                            sectors.get("consumer_discretionary", 0.0),
+                        ),
+                        consumer_staples=float(sectors.get("consumer_staples", 0.0)),
+                        industrials=float(sectors.get("industrials", 0.0)),
+                        materials=float(sectors.get("materials", 0.0)),
+                        energy=float(sectors.get("energy", 0.0)),
+                        utilities=float(sectors.get("utilities", 0.0)),
+                        real_estate=float(sectors.get("real_estate", 0.0)),
+                        communication=float(sectors.get("communication", 0.0)),
+                        treasury=float(sectors.get("treasury", 0.0)),
+                        corporate=float(sectors.get("corporate", 0.0)),
+                        mortgage=float(sectors.get("mortgage", 0.0)),
+                        government_related=float(sectors.get("government_related", 0.0)),
+                        commodities=float(sectors.get("commodities", 0.0)),
+                        diversified=float(sectors.get("diversified", 0.0)),
+                        other=float(sectors.get("other", 0.0)),
+                    ),
+                )
+
+                logger.info("Tagger: Used override classification for %s", symbol)
+                results.append(classification)
+                continue
+
             classification = await classify_with_retry(
                 symbol=symbol,
                 name=name,

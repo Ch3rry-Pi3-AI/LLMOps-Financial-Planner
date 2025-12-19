@@ -716,7 +716,7 @@ export default function Accounts() {
                       setNewAccount({ name: "", purpose: "", cash_balance: "" });
                       setMessage(null);
                     }}
-                    className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-700 px-4 py-2 rounded-lg transition-colors"
+                    className="flex-1 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors"
                   >
                     Cancel
                   </button>

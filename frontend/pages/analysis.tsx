@@ -13,7 +13,7 @@
  *  - A retirement projection view rendered from Markdown
  */
 
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
 import { useAuth } from "@clerk/nextjs";
 import ReactMarkdown from "react-markdown";
@@ -176,6 +176,9 @@ const formatLabelName = (name: string): string =>
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
   .join(" ");
 
+const humanizeUnderscoreTokens = (text: string): string =>
+  text.replace(/\b[a-z]+(?:_[a-z]+)+\b/g, (match) => formatLabelName(match));
+
 /**
  * Shared Markdown renderer styles.
  *
@@ -313,7 +316,6 @@ export default function Analysis() {
   const [retirementPreview, setRetirementPreview] = useState<any | null>(null);
   const [scenarioLoading, setScenarioLoading] = useState(false);
   const [rebalanceLoading, setRebalanceLoading] = useState(false);
-  const [printScope, setPrintScope] = useState<"tab" | "all">("tab");
   const [rebalanceForm, setRebalanceForm] = useState({
     cashOnly: true,
     allowSells: false,
@@ -335,28 +337,362 @@ export default function Analysis() {
     numSimulations: 500,
   });
 
-  useEffect(() => {
-    const handleBefore = () => {
-      document.body.dataset.printScope = printScope;
-    };
-
-    const handleAfter = () => {
-      document.body.dataset.printScope = "tab";
-      setPrintScope("tab");
-    };
-
-    window.addEventListener("beforeprint", handleBefore);
-    window.addEventListener("afterprint", handleAfter);
-    return () => {
-      window.removeEventListener("beforeprint", handleBefore);
-      window.removeEventListener("afterprint", handleAfter);
-    };
-  }, [printScope]);
-
-  const triggerPrint = (scope: "tab" | "all") => {
-    document.body.dataset.printScope = scope;
-    setPrintScope(scope);
+  const triggerPrint = () => {
     requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
+  };
+
+  const escapeMd = (value: string): string =>
+    value.replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim();
+
+  const buildSummaryMarkdown = (tab: TabType): string => {
+    if (!job) return "";
+
+    const charts = job.charts_payload || {};
+    const assetClass = charts.asset_class_allocation?.data || [];
+    const topHoldings = charts.top_holdings?.data || [];
+    const accountValues = charts.account_values?.data || [];
+
+    const totalValue = assetClass.reduce(
+      (sum: number, item: any) => sum + safeNumber(item?.value),
+      0,
+    );
+    const cashValue =
+      assetClass.find((d: any) => String(d?.name || "").toLowerCase() === "cash")
+        ?.value ?? 0;
+    const equityValue =
+      assetClass.find(
+        (d: any) => String(d?.name || "").toLowerCase() === "equity",
+      )?.value ?? 0;
+    const topHoldingValue = safeNumber(topHoldings?.[0]?.value);
+    const numAccounts = Array.isArray(accountValues) ? accountValues.length : 0;
+
+    const overviewRecs = job.report_payload?.recommendations || [];
+    const retirementMetrics =
+      (retirementPreview?.metrics as any) ?? job.retirement_payload?.metrics ?? null;
+    const retirementActions = job.retirement_payload?.action_items || [];
+    const rebalance = rebalancePreview ?? job.summary_payload?.rebalance ?? null;
+    const rebalanceTrades: any[] = Array.isArray(rebalance?.trades)
+      ? rebalance.trades
+      : [];
+
+    const takeaways: string[] = [];
+    const nextActions: string[] = [];
+
+    if (tab === "overview") {
+      takeaways.push(`Cash: ${pct(safeNumber(cashValue), totalValue)}`);
+      takeaways.push(`Equity: ${pct(safeNumber(equityValue), totalValue)}`);
+      takeaways.push(`Top holding concentration: ${pct(topHoldingValue, totalValue)}`);
+      takeaways.push(`Accounts: ${numAccounts}`);
+      if (dataQuality?.confidence) {
+        takeaways.push(
+          `Data quality: ${String(dataQuality.confidence)} (missing prices: ${
+            dataQuality.counts?.missing_prices ?? 0
+          }, missing allocations: ${dataQuality.counts?.missing_allocations ?? 0})`,
+        );
+      }
+      if (dataQuality?.latest?.instrument_updated_at) {
+        takeaways.push(
+          `Prices updated: ${new Date(
+            dataQuality.latest.instrument_updated_at,
+          ).toLocaleString("en-US")}`,
+        );
+      }
+
+      for (const r of overviewRecs.slice(0, 6)) {
+        nextActions.push(`${r.priority || "-"}: ${r.recommendation}`);
+      }
+      if (overviewRecs.length === 0) nextActions.push("No structured recommendations found in this report.");
+    } else if (tab === "retirement") {
+      const successRate = safeNumber(retirementMetrics?.monte_carlo?.success_rate);
+      const expectedAtRet = safeNumber(
+        retirementMetrics?.monte_carlo?.expected_value_at_retirement,
+      );
+      const gap = safeNumber(retirementMetrics?.safe_withdrawal?.gap);
+      takeaways.push(`Success rate: ${successRate.toFixed(1)}%`);
+      takeaways.push(`Expected value at retirement: ${expectedAtRet ? expectedAtRet.toLocaleString("en-US") : "-"}`);
+      takeaways.push(`4% rule income gap: ${gap ? gap.toLocaleString("en-US") : "-"}`);
+      if (dataQuality?.confidence) takeaways.push(`Data quality: ${String(dataQuality.confidence)}`);
+
+      for (const a of retirementActions.slice(0, 6)) {
+        nextActions.push(`${a.timeframe}: ${a.action}`);
+      }
+      if (retirementActions.length === 0) nextActions.push("Review the timeline section in the report.");
+    } else if (tab === "rebalance") {
+      const currency: CurrencyCode =
+        String(rebalance?.jurisdiction || "").toUpperCase() === "US" ? "USD" : "GBP";
+      const estCost = safeNumber(rebalance?.estimated_transaction_cost);
+      takeaways.push(`Suggested trades: ${rebalanceTrades.length}`);
+      takeaways.push(`Estimated transaction cost: ${estCost ? formatCurrency(estCost, currency) : "-"}`);
+      takeaways.push(
+        `Approach: ${
+          rebalance?.options?.cash_only === false ? "May include sells" : "Cash-first"
+        }`,
+      );
+      if (rebalance?.confidence) takeaways.push(`Confidence: ${String(rebalance.confidence)}`);
+
+      for (const t of rebalanceTrades.slice(0, 8)) {
+        nextActions.push(
+          `${String(t.action || "").toUpperCase()} ${t.symbol} (${t.company || "-"})`,
+        );
+      }
+      if (rebalanceTrades.length === 0) nextActions.push("No trades suggested.");
+    } else if (tab === "charts") {
+      takeaways.push(`Top holding concentration: ${pct(topHoldingValue, totalValue)}`);
+      takeaways.push(`Cash: ${pct(safeNumber(cashValue), totalValue)}`);
+      takeaways.push(`Charts available: ${Object.keys(charts || {}).length}`);
+      nextActions.push("Review concentration and diversification charts.");
+      nextActions.push("Use the Overview tab to act on recommendations.");
+    }
+
+    const summaryMd = [
+      "## Summary",
+      "",
+      "### Key Takeaways",
+      ...(takeaways.length ? takeaways.map((t) => `- ${t}`) : ["- -"]),
+      "",
+      "### Next Actions",
+      ...(nextActions.length ? nextActions.map((t) => `- ${t}`) : ["- -"]),
+      "",
+    ].join("\n");
+
+    return summaryMd;
+  };
+
+  const buildSummaryData = (
+    tab: TabType,
+  ): { takeaways: string[]; nextActions: string[] } => {
+    if (!job) return { takeaways: [], nextActions: [] };
+
+    // Parse the markdown generated by buildSummaryMarkdown so we don't duplicate business logic.
+    const md = buildSummaryMarkdown(tab);
+    const lines = md.split("\n").map((l) => l.trim());
+
+    const takeaways: string[] = [];
+    const nextActions: string[] = [];
+    let mode: "takeaways" | "actions" | null = null;
+
+    for (const line of lines) {
+      const lower = line.toLowerCase();
+      if (lower === "### key takeaways") {
+        mode = "takeaways";
+        continue;
+      }
+      if (lower === "### next actions") {
+        mode = "actions";
+        continue;
+      }
+      if (!line.startsWith("- ")) continue;
+      const item = line.slice(2).trim();
+      if (!item || item === "-") continue;
+      if (mode === "takeaways") takeaways.push(item);
+      if (mode === "actions") nextActions.push(item);
+    }
+
+    return { takeaways, nextActions };
+  };
+
+  const SummaryCards = ({ tab }: { tab: TabType }) => {
+    const { takeaways, nextActions } = buildSummaryData(tab);
+
+    return (
+      <div className="mb-8">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="rounded-xl border border-gray-700 bg-gray-900/30 p-6">
+            <h3 className="text-xl font-semibold mb-3 text-gray-100">Key Takeaways</h3>
+            <ul className="list-disc pl-6 space-y-2 text-gray-200">
+              {takeaways.length ? takeaways.map((t, idx) => <li key={`tk-${idx}`}>{t}</li>) : <li>-</li>}
+            </ul>
+          </div>
+          <div className="rounded-xl border border-gray-700 bg-gray-900/30 p-6">
+            <h3 className="text-xl font-semibold mb-3 text-gray-100">Next Actions</h3>
+            <ul className="list-disc pl-6 space-y-2 text-gray-200">
+              {nextActions.length ? nextActions.map((t, idx) => <li key={`na-${idx}`}>{t}</li>) : <li>-</li>}
+            </ul>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const snakeToTitle = (value: string): string =>
+    value
+      .replace(/_/g, " ")
+      .split(" ")
+      .filter(Boolean)
+      .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+      .join(" ");
+
+  const formatAuditKey = (key: string): string => {
+    const parts = key.split(".").filter(Boolean);
+    const fixups: Record<string, string> = {
+      id: "ID",
+      ms: "ms",
+      url: "URL",
+      jwt: "JWT",
+      jwks: "JWKS",
+      sqs: "SQS",
+      aws: "AWS",
+      cors: "CORS",
+    };
+    return parts
+      .map((p) => {
+        const raw = snakeToTitle(p);
+        const words = raw.split(" ").map((w) => fixups[w.toLowerCase()] ?? w);
+        return words.join(" ");
+      })
+      .join(" / ");
+  };
+
+  const normalizeSectionHeadings = (md: string, tab: TabType): string => {
+    if (!md) return md;
+
+    const common = [
+      "Executive Summary",
+      "Portfolio Composition Analysis",
+      "Diversification Assessment",
+      "Risk Profile Evaluation",
+      "Retirement Readiness",
+      "Market Context",
+      "Specific Recommendations",
+      "Conclusion",
+    ];
+
+    const retirement = [
+      "Retirement Readiness Summary",
+      "Current Situation",
+      "Retirement Income Projections",
+      "Monte Carlo Simulation Results",
+      "Safe Withdrawal Rate Analysis",
+      "Specific Recommendations to Improve the Success Rate",
+      "Risk Mitigation Strategies",
+      "Action Items with a Realistic Timeline",
+    ];
+
+    const rebalance = ["Allocation (Asset Class)", "Suggested Trades", "Notes"];
+
+    const headings =
+      tab === "retirement"
+        ? [...retirement, ...common]
+        : tab === "rebalance"
+          ? [...rebalance]
+          : [...common];
+
+    const set = new Set(headings.map((h) => h.toLowerCase()));
+    const lines = md.split("\n");
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = String(line ?? "").trim();
+      if (!trimmed) continue;
+      if (trimmed.startsWith("#")) continue;
+
+      const lower = trimmed.replace(/:$/, "").toLowerCase();
+      if (!set.has(lower)) continue;
+
+      const prevBlank = i === 0 ? true : !String(lines[i - 1] ?? "").trim();
+      if (!prevBlank) continue;
+
+      lines[i] = `## ${trimmed.replace(/:$/, "")}`;
+    }
+
+    return lines.join("\n");
+  };
+
+  const splitForEmbeddedSummary = (md: string): { before: string; after: string } => {
+    if (!md) return { before: "", after: "" };
+
+    const execIdx = md.search(/^##\s+.*(executive\s+summary|summary).*$/im);
+    const anchorIdx = execIdx >= 0 ? execIdx : md.search(/^#\s+/m);
+    if (anchorIdx < 0) return { before: "", after: md };
+    const lineEnd = md.indexOf("\n", anchorIdx);
+    if (lineEnd < 0) return { before: md, after: "" };
+    const splitAt = lineEnd + 1;
+    return { before: md.slice(0, splitAt), after: md.slice(splitAt) };
+  };
+
+  const buildAuditMarkdown = (tab: TabType): string => {
+    if (!job) return "";
+
+    const base = {
+      job_created_at: job.created_at,
+      job_id: job.id,
+    };
+
+    const payload =
+      tab === "overview"
+        ? {
+            generated_at: job.report_payload?.generated_at,
+            agent: job.report_payload?.agent,
+            audit: job.report_payload?.audit,
+            ...base,
+          }
+        : tab === "retirement"
+          ? {
+              generated_at: job.retirement_payload?.generated_at,
+              agent: job.retirement_payload?.agent,
+              audit: job.retirement_payload?.audit,
+              assumptions:
+                (retirementPreview?.metrics as any)?.assumptions ??
+                job.retirement_payload?.metrics?.assumptions,
+              scenario_preview_applied: Boolean(retirementPreview),
+              ...base,
+            }
+          : tab === "rebalance"
+            ? {
+                agent: "rebalancer",
+                rebalance_options:
+                  (rebalancePreview as any)?.options ??
+                  job.summary_payload?.rebalance?.options,
+                preview_applied: Boolean(rebalancePreview),
+                ...base,
+              }
+            : {
+                agent: "charter",
+                chart_keys: Object.keys(job.charts_payload || {}),
+                ...base,
+              };
+
+    const flatten = (
+      obj: Record<string, any>,
+      prefix = "",
+    ): Array<[string, string]> => {
+      const rows: Array<[string, string]> = [];
+      for (const [k, v] of Object.entries(obj || {})) {
+        const key = prefix ? `${prefix}.${k}` : k;
+        if (v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length <= 12) {
+          // Expand a few known nested structures for readability.
+          if (k === "audit" || k === "assumptions" || k === "rebalance_options") {
+            rows.push(...flatten(v as Record<string, any>, key));
+            continue;
+          }
+        }
+        const val =
+          v == null
+            ? "-"
+            : typeof v === "string" || typeof v === "number" || typeof v === "boolean"
+              ? String(v)
+              : Array.isArray(v)
+                ? v.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(", ")
+                : JSON.stringify(v);
+        rows.push([key, val]);
+      }
+      return rows;
+    };
+
+    const rows = flatten(payload as Record<string, any>)
+      .map(([k, v]) => `| ${escapeMd(formatAuditKey(k))} | ${escapeMd(v)} |`)
+      .join("\n");
+
+    const auditMd = [
+      "## Assumptions & Audit",
+      "",
+      "| Item | Value |",
+      "|---|---|",
+      rows || "| - | - |",
+      "",
+    ].join("\n");
+
+    return auditMd;
   };
 
   const readSessionJson = <T,>(key: string): T | null => {
@@ -669,7 +1005,8 @@ export default function Analysis() {
    * financial planner agent's report payload.
    */
   const renderOverview = () => {
-    const report = job?.report_payload?.content;
+    const reportRaw = job?.report_payload?.content;
+    const report = reportRaw ? humanizeUnderscoreTokens(reportRaw) : reportRaw;
     if (!report) {
       return (
         <div className="text-center py-12 text-gray-500">
@@ -678,269 +1015,15 @@ export default function Analysis() {
       );
     }
 
-    return <MarkdownPanel content={report} />;
-  };
-
-  const renderTabSummary = (tab: TabType = activeTab) => {
-    if (!job) return null;
-
-    const charts = job.charts_payload || {};
-    const assetClass = charts.asset_class_allocation?.data || [];
-    const topHoldings = charts.top_holdings?.data || [];
-    const accountValues = charts.account_values?.data || [];
-
-    const totalValue = assetClass.reduce(
-      (sum: number, item: any) => sum + safeNumber(item?.value),
-      0,
-    );
-    const cashValue =
-      assetClass.find((d: any) => String(d?.name || "").toLowerCase() === "cash")
-        ?.value ?? 0;
-    const equityValue =
-      assetClass.find(
-        (d: any) => String(d?.name || "").toLowerCase() === "equity",
-      )?.value ?? 0;
-    const topHoldingValue = safeNumber(topHoldings?.[0]?.value);
-    const numAccounts = Array.isArray(accountValues) ? accountValues.length : 0;
-
-    const overviewRecs = job.report_payload?.recommendations || [];
-    const retirementMetrics =
-      (retirementPreview?.metrics as any) ?? job.retirement_payload?.metrics ?? null;
-    const retirementActions = job.retirement_payload?.action_items || [];
-    const rebalance = rebalancePreview ?? job.summary_payload?.rebalance ?? null;
-    const rebalanceTrades: any[] = Array.isArray(rebalance?.trades)
-      ? rebalance.trades
-      : [];
-
-    const card = (title: string, body: ReactNode, key: string) => (
-      <div
-        key={key}
-        className="bg-white rounded-lg border border-gray-200 p-6"
-      >
-        <h3 className="text-xl font-semibold mb-3 text-gray-800">{title}</h3>
-        {body}
-      </div>
-    );
-
-    if (tab === "overview") {
-      return (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-          {card(
-            "Key Takeaways",
-            <ul className="list-disc ml-6 text-gray-600 space-y-1">
-              <li>Cash: {pct(safeNumber(cashValue), totalValue)}</li>
-              <li>Equity: {pct(safeNumber(equityValue), totalValue)}</li>
-              <li>Top holding concentration: {pct(topHoldingValue, totalValue)}</li>
-              <li>Accounts: {numAccounts}</li>
-              {dataQuality?.confidence && (
-                <li>
-                  Data quality:{" "}
-                  <span className="font-medium">{dataQuality.confidence}</span>{" "}
-                  (missing prices: {dataQuality.counts?.missing_prices ?? 0}, missing
-                  allocations: {dataQuality.counts?.missing_allocations ?? 0})
-                </li>
-              )}
-              {dataQuality?.latest?.instrument_updated_at && (
-                <li>
-                  Prices updated:{" "}
-                  {new Date(dataQuality.latest.instrument_updated_at).toLocaleString(
-                    "en-US",
-                  )}
-                </li>
-              )}
-            </ul>,
-            "overview-kpis",
-          )}
-          {card(
-            "Next Actions",
-            <ul className="list-disc ml-6 text-gray-600 space-y-1">
-              {overviewRecs.slice(0, 3).map((r, i) => (
-                <li key={i}>
-                  <span className="font-medium">{r.priority || "—"}:</span>{" "}
-                  {r.recommendation}
-                </li>
-              ))}
-              {overviewRecs.length === 0 && (
-                <li>No structured recommendations found in this report.</li>
-              )}
-            </ul>,
-            "overview-actions",
-          )}
-        </div>
-      );
-    }
-
-    if (tab === "retirement") {
-      const successRate = safeNumber(retirementMetrics?.monte_carlo?.success_rate);
-      const expectedAtRet = safeNumber(
-        retirementMetrics?.monte_carlo?.expected_value_at_retirement,
-      );
-      const gap = safeNumber(retirementMetrics?.safe_withdrawal?.gap);
-
-      return (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-          {card(
-            "Key Takeaways",
-            <ul className="list-disc ml-6 text-gray-600 space-y-1">
-              <li>Success rate: {successRate.toFixed(1)}%</li>
-              <li>
-                Expected value at retirement:{" "}
-                {expectedAtRet ? expectedAtRet.toLocaleString("en-US") : "-"}
-              </li>
-              <li>
-                4% rule income gap: {gap ? gap.toLocaleString("en-US") : "-"}
-              </li>
-              {dataQuality?.confidence && (
-                <li>
-                  Data quality:{" "}
-                  <span className="font-medium">{dataQuality.confidence}</span>
-                </li>
-              )}
-            </ul>,
-            "retirement-kpis",
-          )}
-          {card(
-            "Next Actions",
-            <ul className="list-disc ml-6 text-gray-600 space-y-1">
-              {retirementActions.slice(0, 4).map((a, i) => (
-                <li key={i}>
-                  <span className="font-medium">{a.timeframe}:</span> {a.action}
-                </li>
-              ))}
-              {retirementActions.length === 0 && (
-                <li>Review the timeline section in the report.</li>
-              )}
-            </ul>,
-            "retirement-actions",
-          )}
-        </div>
-      );
-    }
-
-    if (tab === "rebalance") {
-      const currency: CurrencyCode =
-        String(rebalance?.jurisdiction || "").toUpperCase() === "US" ? "USD" : "GBP";
-      const estCost = safeNumber(rebalance?.estimated_transaction_cost);
-      return (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-          {card(
-            "Key Takeaways",
-            <ul className="list-disc ml-6 text-gray-600 space-y-1">
-              <li>Suggested trades: {rebalanceTrades.length}</li>
-              <li>
-                Estimated transaction cost:{" "}
-                {estCost ? formatCurrency(estCost, currency) : "-"}
-              </li>
-              <li>
-                Approach:{" "}
-                {rebalance?.options?.cash_only === false
-                  ? "May include sells"
-                  : "Cash-first"}
-              </li>
-              {rebalance?.confidence && (
-                <li>
-                  Confidence:{" "}
-                  <span className="font-medium">{String(rebalance.confidence)}</span>
-                </li>
-              )}
-            </ul>,
-            "rebalance-kpis",
-          )}
-          {card(
-            "Next Actions",
-            <ul className="list-disc ml-6 text-gray-600 space-y-1">
-              {rebalanceTrades.slice(0, 4).map((t, i) => (
-                <li key={i}>
-                  {String(t.action || "").toUpperCase()} {t.symbol} (
-                  {t.company || "—"})
-                </li>
-              ))}
-              {rebalanceTrades.length === 0 && <li>No trades suggested.</li>}
-            </ul>,
-            "rebalance-actions",
-          )}
-        </div>
-      );
-    }
-
-    if (tab === "charts") {
-      return (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-          {card(
-            "Key Takeaways",
-            <ul className="list-disc ml-6 text-gray-600 space-y-1">
-              <li>Top holding concentration: {pct(topHoldingValue, totalValue)}</li>
-              <li>Cash: {pct(safeNumber(cashValue), totalValue)}</li>
-              <li>Charts available: {Object.keys(charts || {}).length}</li>
-            </ul>,
-            "charts-kpis",
-          )}
-          {card(
-            "Next Actions",
-            <ul className="list-disc ml-6 text-gray-600 space-y-1">
-              <li>Review concentration and diversification charts.</li>
-              <li>Use the Overview tab to act on recommendations.</li>
-            </ul>,
-            "charts-actions",
-          )}
-        </div>
-      );
-    }
-
-    return null;
-  };
-
-  const renderAuditPanel = (tab: TabType = activeTab) => {
-    if (!job) return null;
-
-    const base = {
-      job_created_at: job.created_at,
-      job_id: job.id,
-    };
-
-    const payload =
-      tab === "overview"
-        ? {
-            generated_at: job.report_payload?.generated_at,
-            agent: job.report_payload?.agent,
-            audit: job.report_payload?.audit,
-            ...base,
-          }
-        : tab === "retirement"
-          ? {
-              generated_at: job.retirement_payload?.generated_at,
-              agent: job.retirement_payload?.agent,
-              audit: job.retirement_payload?.audit,
-              assumptions:
-                (retirementPreview?.metrics as any)?.assumptions ??
-                job.retirement_payload?.metrics?.assumptions,
-              scenario_preview_applied: Boolean(retirementPreview),
-              ...base,
-            }
-          : tab === "rebalance"
-            ? {
-                agent: "rebalancer",
-                rebalance_options: (rebalancePreview as any)?.options ?? job.summary_payload?.rebalance?.options,
-                preview_applied: Boolean(rebalancePreview),
-                ...base,
-              }
-            : {
-                agent: "charter",
-                chart_keys: Object.keys(job.charts_payload || {}),
-                ...base,
-              };
-
+    const finalMd = `${report}\n\n${buildAuditMarkdown("overview")}`;
+    const normalized = normalizeSectionHeadings(finalMd, "overview");
+    const { before, after } = splitForEmbeddedSummary(normalized);
     return (
-      <details className="bg-white rounded-lg border border-gray-200 p-6 mb-6">
-        <summary className="cursor-pointer text-gray-700 font-semibold">
-          Assumptions & Audit
-        </summary>
-        <div className="mt-4 overflow-x-auto">
-          <pre className="text-xs text-gray-600 whitespace-pre-wrap">
-            {JSON.stringify(payload, null, 2)}
-          </pre>
-        </div>
-      </details>
+      <div className="space-y-6">
+        {before ? <MarkdownPanel content={before} /> : null}
+        <SummaryCards tab="overview" />
+        {after ? <MarkdownPanel content={after} /> : null}
+      </div>
     );
   };
 
@@ -962,6 +1045,8 @@ export default function Analysis() {
         </div>
       );
     }
+
+    const summaryMd = `# Charts\n\n## Executive Summary\n`;
 
     // Helper to turn a key like "sector_allocation" into "Sector Allocation"
     const formatTitle = (key: string): string => formatLabelName(key);
@@ -1031,16 +1116,19 @@ export default function Analysis() {
     ];
 
     return (
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        {orderedCharts.map(({ key, chartData, chartType, title, isBar }) => {
-          const plotHeight = isBar ? 320 : 300;
-          return (
-            <div
-              key={key}
-              className={`bg-white rounded-lg p-6 border border-gray-200 ${
-                isBar ? "lg:col-span-2" : ""
-              }`}
-            >
+      <div className="space-y-6">
+        <MarkdownPanel content={summaryMd} />
+        <SummaryCards tab="charts" />
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          {orderedCharts.map(({ key, chartData, chartType, title, isBar }) => {
+            const plotHeight = isBar ? 320 : 300;
+            return (
+              <div
+                key={key}
+                className={`bg-white rounded-lg p-6 border border-gray-200 ${
+                  isBar ? "lg:col-span-2" : ""
+                }`}
+              >
               <h3 className="text-xl font-semibold mb-4 text-gray-800">
                 {title}
               </h3>
@@ -1229,9 +1317,11 @@ export default function Analysis() {
                   })()}
                 </div>
               )}
-            </div>
-          );
-        })}
+              </div>
+            );
+          })}
+        </div>
+        <MarkdownPanel content={buildAuditMarkdown("charts")} />
       </div>
     );
   };
@@ -1252,20 +1342,89 @@ export default function Analysis() {
       );
     }
 
-    const retirementAnalysis = retirement.analysis;
+    const retirementAnalysis =
+      typeof (retirement as any)?.analysis === "string"
+        ? humanizeUnderscoreTokens((retirement as any).analysis)
+        : "";
+    const headerMatch = retirementAnalysis.match(/^#\s+.*$/m);
+    const headerLine = headerMatch?.[0] || "# Retirement Readiness Assessment";
+    const bodyWithoutHeader = headerMatch
+      ? retirementAnalysis.replace(headerMatch[0], "").trimStart()
+      : retirementAnalysis;
+
+    const introMd = `${headerLine}`;
+    const reportBodyMd = bodyWithoutHeader;
+    const auditMd = buildAuditMarkdown("retirement");
     const effectiveMetrics =
       (retirementPreview?.metrics as any) ?? job?.retirement_payload?.metrics ?? null;
 
+    const normalizedReport = normalizeSectionHeadings(
+      `${introMd}\n\n${reportBodyMd}`,
+      "retirement",
+    );
+
+    const execIdx = normalizedReport.search(/^##\s+.*(executive\s+summary|summary).*$/im);
+    const execLineEnd = execIdx >= 0 ? normalizedReport.indexOf("\n", execIdx) : -1;
+    const afterExecStart = execLineEnd >= 0 ? execLineEnd + 1 : -1;
+    const nextH2Idx =
+      afterExecStart >= 0
+        ? (() => {
+            const tail = normalizedReport.slice(afterExecStart);
+            const rel = tail.search(/^##\s+/m);
+            return rel >= 0 ? afterExecStart + rel : -1;
+          })()
+        : -1;
+
+    const mdBeforeExecLine =
+      execIdx >= 0 && execLineEnd >= 0 ? normalizedReport.slice(0, execLineEnd + 1) : introMd;
+    const mdExecBody =
+      execIdx >= 0 && execLineEnd >= 0
+        ? normalizedReport.slice(execLineEnd + 1, nextH2Idx >= 0 ? nextH2Idx : normalizedReport.length)
+        : "";
+    const mdAfterExec =
+      nextH2Idx >= 0 ? normalizedReport.slice(nextH2Idx) : execIdx >= 0 ? "" : normalizedReport.slice(introMd.length);
+
     return (
       <div className="space-y-8">
+        <MarkdownPanel content={mdBeforeExecLine} />
+        <SummaryCards tab="retirement" />
+        {mdExecBody ? <MarkdownPanel content={mdExecBody} /> : null}
+
+        <div className="no-print">
+          <h2 className="text-2xl font-semibold text-gray-800 mb-2">
+            Interactive Tools
+          </h2>
+          <p className="text-gray-600">
+            Use these controls to stress-test assumptions and see the impact instantly.
+          </p>
+        </div>
+
         <div className="bg-white rounded-lg border border-gray-200 p-6 no-print">
           <h3 className="text-xl font-semibold mb-3 text-gray-800">
             Scenario Planning (Instant)
           </h3>
-          <p className="text-gray-600 mb-4">
-            Adjust a few assumptions and recompute retirement success metrics instantly
-            (this does not regenerate the narrative text).
+          <p className="text-gray-600 mb-3">
+            Adjust assumptions and recompute retirement success metrics instantly (this
+            does not regenerate the narrative text).
           </p>
+          <ul className="list-disc ml-6 text-sm text-gray-600 space-y-1 mb-4">
+            <li>
+              <span className="font-medium">Return shift</span>: adds/subtracts a
+              constant from the expected return each year (e.g. -0.02 = -2%/yr).
+            </li>
+            <li>
+              <span className="font-medium">Volatility multiplier</span>: scales
+              volatility up/down (e.g. 1.2 = 20% more volatile).
+            </li>
+            <li>
+              <span className="font-medium">Shock year</span>: applies a one-time
+              market shock in that simulation year.
+            </li>
+            <li>
+              <span className="font-medium">Shock pct</span>: shock magnitude as a
+              fraction (0.25 = -25% drop in that year).
+            </li>
+          </ul>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             <label className="text-sm text-gray-600">
@@ -1433,7 +1592,7 @@ export default function Analysis() {
               <button
                 type="button"
                 onClick={() => setRetirementPreview(null)}
-                className="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 font-semibold"
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-semibold"
               >
                 Reset
               </button>
@@ -1457,10 +1616,13 @@ export default function Analysis() {
         )}
 
         {retirementAnalysis ? (
-          <MarkdownPanel content={retirementAnalysis} />
+          <>
+            {mdAfterExec ? <MarkdownPanel content={mdAfterExec} /> : null}
+            <MarkdownPanel content={auditMd} />
+          </>
         ) : (
           <div className="text-center py-12 text-gray-500">
-            No retirement projection available.
+            No retirement narrative available (agent may have failed). Check CloudWatch logs for `alex-retirement`.
           </div>
         )}
       </div>
@@ -1546,15 +1708,52 @@ export default function Analysis() {
       "",
     ].join("\n");
 
+    const headerMatch = md.match(/^#\s+.*$/m);
+    const headerLine = headerMatch?.[0] || "# Rebalancing Recommendation";
+    const bodyWithoutHeader = headerMatch ? md.replace(headerMatch[0], "").trimStart() : md;
+
+    const introMd = `${headerLine}\n\n## Executive Summary\n`;
+    const reportMd = `${bodyWithoutHeader}\n\n${buildAuditMarkdown("rebalance")}`;
+
     return (
       <div className="space-y-6">
+        <MarkdownPanel content={introMd} />
+        <SummaryCards tab="rebalance" />
+
+        <div className="no-print">
+          <h2 className="text-2xl font-semibold text-gray-800 mb-2">
+            Interactive Tools
+          </h2>
+          <p className="text-gray-600">
+            Adjust constraints and instantly recompute suggested trades.
+          </p>
+        </div>
+
         <div className="bg-white rounded-lg border border-gray-200 p-6 no-print">
           <h3 className="text-xl font-semibold mb-3 text-gray-800">
             Rebalance Settings (Instant)
           </h3>
           <p className="text-gray-600 mb-4">
-            Tune the heuristic options and recompute trade suggestions instantly.
+            Tune rebalancing constraints and recompute suggested trades instantly.
           </p>
+          <ul className="list-disc ml-6 text-sm text-gray-600 space-y-1 mb-4">
+            <li>
+              <span className="font-medium">Cash-only</span>: suggests buys using cash
+              only (no sells).
+            </li>
+            <li>
+              <span className="font-medium">Allow sells</span>: permits sells when
+              needed to reduce drift.
+            </li>
+            <li>
+              <span className="font-medium">Drift band</span>: rebalances only when an
+              asset class is outside this % band from target.
+            </li>
+            <li>
+              <span className="font-medium">Max turnover</span>: caps total trade size
+              vs portfolio value.
+            </li>
+          </ul>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             <label className="text-sm text-gray-600 flex items-center gap-2">
@@ -1674,7 +1873,7 @@ export default function Analysis() {
               <button
                 type="button"
                 onClick={() => setRebalancePreview(null)}
-                className="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 font-semibold"
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-semibold"
               >
                 Reset
               </button>
@@ -1688,7 +1887,7 @@ export default function Analysis() {
           </div>
         )}
 
-        <MarkdownPanel content={md} />
+        <MarkdownPanel content={reportMd} />
       </div>
     );
   };
@@ -1772,26 +1971,17 @@ export default function Analysis() {
 
             {/* Tab Content */}
             <div className="bg-white rounded-lg shadow px-8 py-6">
-                <div className="flex items-center justify-between gap-4 mb-6 no-print">
+              <div className="flex items-center justify-between gap-4 mb-6 no-print">
                 <div className="text-sm text-gray-500">
-                  Export this tab (or all tabs) via your browser: Save to PDF.
+                  Export this tab via your browser: Save to PDF.
                 </div>
-                <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => triggerPrint("tab")}
-                    className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-blue-600 font-semibold"
-                  >
-                    Export Tab PDF
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => triggerPrint("all")}
-                    className="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 font-semibold"
-                  >
-                    Export All Tabs
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => triggerPrint()}
+                  className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-blue-600 font-semibold"
+                >
+                  Export Tab PDF
+                </button>
               </div>
 
               <div id="print-area">
@@ -1822,73 +2012,10 @@ export default function Analysis() {
                   </div>
                 </div>
 
-                {renderTabSummary(activeTab)}
-                {renderAuditPanel(activeTab)}
-
                 {activeTab === "overview" && renderOverview()}
                 {activeTab === "charts" && renderCharts()}
                 {activeTab === "retirement" && renderRetirement()}
                 {activeTab === "rebalance" && renderRebalance()}
-              </div>
-
-              <div id="print-all-area" className="print-only">
-                <div className="print-header">
-                  <div className="text-xs text-gray-600">
-                    Alex AI Financial Advisor
-                  </div>
-                  <div className="text-sm font-semibold text-gray-900">
-                    Portfolio Analysis Report
-                  </div>
-                  <div className="text-xs text-gray-600">
-                    Job {job.id} · Completed {formatDate(job.created_at)}
-                  </div>
-                </div>
-                <div className="print-footer">
-                  <div className="text-xs text-gray-500">
-                    For informational purposes only · Not financial advice
-                  </div>
-                </div>
-
-                <div className="print-page-content">
-                  <h1 className="text-2xl font-bold text-gray-900">
-                    Portfolio Analysis Report
-                  </h1>
-                  <p className="text-sm text-gray-600">
-                    Completed on {formatDate(job.created_at)}
-                  </p>
-
-                  <div className="page-break" />
-
-                  <h1 className="text-2xl font-bold text-gray-900">Overview</h1>
-                  {renderTabSummary("overview")}
-                  {renderAuditPanel("overview")}
-                  {renderOverview()}
-
-                  <div className="page-break" />
-
-                  <h1 className="text-2xl font-bold text-gray-900">Charts</h1>
-                  {renderTabSummary("charts")}
-                  {renderAuditPanel("charts")}
-                  {renderCharts()}
-
-                  <div className="page-break" />
-
-                  <h1 className="text-2xl font-bold text-gray-900">
-                    Retirement Projection
-                  </h1>
-                  {renderTabSummary("retirement")}
-                  {renderAuditPanel("retirement")}
-                  {renderRetirement()}
-
-                  <div className="page-break" />
-
-                  <h1 className="text-2xl font-bold text-gray-900">
-                    Rebalancing
-                  </h1>
-                  {renderTabSummary("rebalance")}
-                  {renderAuditPanel("rebalance")}
-                  {renderRebalance()}
-                </div>
               </div>
             </div>
           </div>

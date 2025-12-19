@@ -15,3 +15,9 @@ variable "clerk_issuer" {
   type        = string
   default     = "" # Not actually used but kept for backwards compatibility
 }
+
+variable "polygon_api_key" {
+  description = "Polygon.io API key for market data (used by /api/market/timeseries)"
+  type        = string
+  default     = ""
+}

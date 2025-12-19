@@ -28,6 +28,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import cast
 from contextvars import ContextVar
+from urllib.request import Request as UrlRequest, urlopen
+from urllib.parse import urlencode
 
 import uuid
 
@@ -289,6 +291,7 @@ sqs_client = boto3.client(
 
 # Read the SQS queue URL from environment (may be empty if queue is not configured)
 SQS_QUEUE_URL: str = os.getenv("SQS_QUEUE_URL", "")
+POLYGON_API_KEY: str = os.getenv("POLYGON_API_KEY", "")
 
 # =========================
 # Portfolio Snapshot Helpers
@@ -434,6 +437,21 @@ def _compute_data_quality(snapshot_accounts: List[Dict[str, Any]]) -> Dict[str, 
             "stale_prices": sorted(stale_prices, key=lambda x: x.get("age_days") or 0, reverse=True)[:50],
         },
     }
+
+
+def _polygon_get_json(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Minimal Polygon REST helper (no external dependencies).
+    """
+    if not POLYGON_API_KEY:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="POLYGON_API_KEY not configured")
+
+    q = {**params, "apiKey": POLYGON_API_KEY}
+    url = f"https://api.polygon.io{path}?{urlencode(q)}"
+    req = UrlRequest(url, headers={"Accept": "application/json"})
+    with urlopen(req, timeout=20) as resp:  # noqa: S310
+        raw = resp.read().decode("utf-8")
+    return json.loads(raw)
 
 # =========================
 # Clerk Authentication Setup
@@ -1285,6 +1303,84 @@ async def list_instruments(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
         ) from e
 
+
+# =========================
+# Market Data Endpoints (Polygon)
+# =========================
+
+
+@app.get("/api/market/timeseries")
+async def get_market_timeseries(
+    symbol: str,
+    range: str = "1M",
+    clerk_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    """
+    Fetch a price time series from Polygon for charting.
+
+    Notes
+    -----
+    Polygon's default coverage is US equities. For indices you may need the
+    Polygon index prefix format (e.g. "I:SPX"). Non-US tickers may not be
+    available depending on your Polygon plan.
+    """
+    _ = clerk_user_id  # auth required; no per-user data returned
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Missing symbol")
+
+    r = (range or "1M").strip().upper()
+    now = datetime.now(timezone.utc)
+
+    # Default aggregation settings by range.
+    if r == "1D":
+        timespan, multiplier = "minute", 5
+        start = now - timedelta(days=1)
+    elif r == "5D":
+        timespan, multiplier = "hour", 1
+        start = now - timedelta(days=5)
+    elif r == "1M":
+        timespan, multiplier = "day", 1
+        start = now - timedelta(days=31)
+    elif r == "6M":
+        timespan, multiplier = "day", 1
+        start = now - timedelta(days=183)
+    elif r == "YTD":
+        timespan, multiplier = "day", 1
+        start = datetime(now.year, 1, 1, tzinfo=timezone.utc)
+    elif r == "1Y":
+        timespan, multiplier = "day", 1
+        start = now - timedelta(days=366)
+    elif r == "5Y":
+        timespan, multiplier = "week", 1
+        start = now - timedelta(days=365 * 5 + 2)
+    elif r == "MAX":
+        timespan, multiplier = "month", 1
+        start = now - timedelta(days=365 * 20)
+    else:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsupported range")
+
+    path = f"/v2/aggs/ticker/{sym}/range/{multiplier}/{timespan}/{start.date().isoformat()}/{now.date().isoformat()}"
+    data = _polygon_get_json(path, {"adjusted": "true", "sort": "asc", "limit": 50000})
+
+    results = data.get("results") or []
+    points = []
+    for item in results:
+        try:
+            ts = int(item.get("t"))
+            close = float(item.get("c"))
+        except (TypeError, ValueError):
+            continue
+        points.append({"t": ts, "c": close})
+
+    return {
+        "symbol": sym,
+        "range": r,
+        "timespan": timespan,
+        "multiplier": multiplier,
+        "points": points,
+        "count": len(points),
+    }
 
 # =========================
 # Analysis / Job Endpoints

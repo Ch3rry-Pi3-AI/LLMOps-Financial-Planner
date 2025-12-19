@@ -52,6 +52,22 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
+# Numeric parsing helpers
+# ============================================================
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str) and not value.strip():
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+# ============================================================
 # Guardrail Helpers – Input & Response Controls
 # ============================================================
 
@@ -150,13 +166,14 @@ def calculate_portfolio_value(portfolio_data: Dict[str, Any]) -> float:
     total_value = 0.0
 
     for account in portfolio_data.get("accounts", []):
-        cash = float(account.get("cash_balance", 0))
+        cash = _safe_float(account.get("cash_balance"), 0.0)
         total_value += cash
 
         for position in account.get("positions", []):
-            quantity = float(position.get("quantity", 0))
+            quantity = _safe_float(position.get("quantity"), 0.0)
             instrument = position.get("instrument", {})
-            price = float(instrument.get("current_price", 100))
+            # Missing prices should not crash the retirement agent nor inflate the value.
+            price = _safe_float(instrument.get("current_price"), 0.0)
             total_value += quantity * price
 
     return total_value
@@ -193,23 +210,23 @@ def calculate_asset_allocation(portfolio_data: Dict[str, Any]) -> Dict[str, floa
     total_value = 0.0
 
     for account in portfolio_data.get("accounts", []):
-        cash = float(account.get("cash_balance", 0))
+        cash = _safe_float(account.get("cash_balance"), 0.0)
         total_cash += cash
         total_value += cash
 
         for position in account.get("positions", []):
-            quantity = float(position.get("quantity", 0))
+            quantity = _safe_float(position.get("quantity"), 0.0)
             instrument = position.get("instrument", {})
-            price = float(instrument.get("current_price", 100))
+            price = _safe_float(instrument.get("current_price"), 0.0)
             value = quantity * price
             total_value += value
 
             asset_allocation = instrument.get("allocation_asset_class", {})
             if asset_allocation:
-                total_equity += value * asset_allocation.get("equity", 0) / 100
-                total_bonds += value * asset_allocation.get("fixed_income", 0) / 100
-                total_real_estate += value * asset_allocation.get("real_estate", 0) / 100
-                total_commodities += value * asset_allocation.get("commodities", 0) / 100
+                total_equity += value * _safe_float(asset_allocation.get("equity"), 0.0) / 100
+                total_bonds += value * _safe_float(asset_allocation.get("fixed_income"), 0.0) / 100
+                total_real_estate += value * _safe_float(asset_allocation.get("real_estate"), 0.0) / 100
+                total_commodities += value * _safe_float(asset_allocation.get("commodities"), 0.0) / 100
 
     if total_value == 0:
         return {

@@ -46,6 +46,12 @@ const formatDate = (dateString: string) =>
     minute: "2-digit",
   });
 
+const formatTime = (dateString: string) =>
+  new Date(dateString).toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
 const titleCase = (name: string): string =>
   name
     .replace(/_/g, " ")
@@ -111,6 +117,7 @@ export default function History() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [filterDate, setFilterDate] = useState("");
   const [leftId, setLeftId] = useState<string>("");
   const [rightId, setRightId] = useState<string>("");
 
@@ -158,11 +165,21 @@ export default function History() {
 
   const completed = useMemo(() => {
     const q = query.trim().toLowerCase();
+    const dateFilter = filterDate.trim();
     return jobs
       .filter((j) => j.status === "completed" && j.job_type === "portfolio_analysis")
+      .filter((j) => {
+        if (!dateFilter) return true;
+        try {
+          const d = new Date(j.created_at).toISOString().slice(0, 10);
+          return d === dateFilter;
+        } catch {
+          return false;
+        }
+      })
       .filter((j) => (q ? `${j.id} ${j.created_at}`.toLowerCase().includes(q) : true))
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-  }, [jobs, query]);
+  }, [jobs, query, filterDate]);
 
   const leftJob = useMemo(
     () => completed.find((j) => j.id === leftId) || null,
@@ -182,18 +199,31 @@ export default function History() {
   }, [completed, leftId, rightId]);
 
   const trend = useMemo(() => {
-    return completed
+    const points = completed
       .map((j) => ({
         id: j.id,
-        date: new Date(j.created_at).toLocaleDateString("en-US", {
-          month: "short",
-          day: "numeric",
-        }),
+        created_at: j.created_at,
+        ts: new Date(j.created_at).getTime(),
         successRate: getSuccessRate(j),
       }))
       .filter((d) => d.successRate != null)
-      .reverse();
-  }, [completed]);
+      .sort((a, b) => a.ts - b.ts);
+
+    const spanMs =
+      points.length >= 2 ? points[points.length - 1].ts - points[0].ts : 0;
+    const showTime = Boolean(filterDate) || spanMs <= 24 * 60 * 60 * 1000;
+
+    return points.map((p) => ({
+      ...p,
+      xLabel: showTime ? formatTime(p.created_at) : formatDate(p.created_at),
+    }));
+  }, [completed, filterDate]);
+
+  const trendUseTimeAxis = useMemo(() => {
+    if (trend.length <= 1) return Boolean(filterDate);
+    const spanMs = trend[trend.length - 1].ts - trend[0].ts;
+    return Boolean(filterDate) || spanMs <= 24 * 60 * 60 * 1000;
+  }, [trend, filterDate]);
 
   const recDiff = useMemo(() => diffRecommendations(leftJob, rightJob), [leftJob, rightJob]);
   const leftAlloc = useMemo(() => getAssetClassPct(leftJob), [leftJob]);
@@ -242,16 +272,44 @@ export default function History() {
             <div className="space-y-8">
               <div className="bg-white rounded-lg shadow p-6">
                 <div className="flex flex-col md:flex-row md:items-center gap-4 justify-between">
-                  <div className="flex-1">
-                    <label className="block text-sm text-gray-600 mb-2">
-                      Search jobs
-                    </label>
-                    <input
-                      value={query}
-                      onChange={(e) => setQuery(e.target.value)}
-                      className="w-full rounded border border-gray-300 px-3 py-2"
-                      placeholder="Search by job id or date…"
-                    />
+                  <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm text-gray-600 mb-2">
+                        Search jobs
+                      </label>
+                      <input
+                        list="job-suggestions"
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        className="w-full rounded border border-gray-300 px-3 py-2"
+                        placeholder="Type a job id (or partial)…"
+                      />
+                      <datalist id="job-suggestions">
+                        {completed.slice(0, 50).map((j) => (
+                          <option
+                            key={j.id}
+                            value={j.id}
+                          >{`${j.id} · ${formatDate(j.created_at)}`}</option>
+                        ))}
+                      </datalist>
+                      <div className="mt-1 text-xs text-gray-400">
+                        Pick from suggestions or paste a job id.
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-gray-600 mb-2">
+                        Filter by date
+                      </label>
+                      <input
+                        type="date"
+                        value={filterDate}
+                        onChange={(e) => setFilterDate(e.target.value)}
+                        className="w-full rounded border border-gray-300 px-3 py-2"
+                      />
+                      <div className="mt-1 text-xs text-gray-400">
+                        Uses your browser’s calendar picker.
+                      </div>
+                    </div>
                   </div>
                   <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
                     <label className="block text-sm text-gray-600">
@@ -306,15 +364,41 @@ export default function History() {
                       <ResponsiveContainer width="100%" height="100%">
                         <LineChart data={trend}>
                           <CartesianGrid strokeDasharray="3 3" />
-                          <XAxis dataKey="date" />
+                          <XAxis
+                            dataKey="ts"
+                            type="number"
+                            domain={["dataMin", "dataMax"]}
+                            tickFormatter={(value) => {
+                              const d = new Date(Number(value));
+                              return trendUseTimeAxis
+                                ? d.toLocaleTimeString("en-US", {
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                  })
+                                : d.toLocaleDateString("en-US", {
+                                    month: "short",
+                                    day: "numeric",
+                                  });
+                            }}
+                          />
                           <YAxis domain={[0, 100]} />
-                          <Tooltip />
+                          <Tooltip
+                            labelFormatter={(value) =>
+                              new Date(Number(value)).toLocaleString("en-US", {
+                                month: "short",
+                                day: "numeric",
+                                year: "numeric",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })
+                            }
+                          />
                           <Line
                             type="monotone"
                             dataKey="successRate"
                             stroke="#627eff"
                             strokeWidth={2}
-                            dot={false}
+                            dot={{ r: 3 }}
                           />
                         </LineChart>
                       </ResponsiveContainer>
@@ -333,38 +417,42 @@ export default function History() {
                   ) : (
                     <div className="text-sm text-gray-600 space-y-2">
                       <div>
-                        Latest:{" "}
+                        Baseline:{" "}
                         <Link
                           className="text-primary hover:underline"
-                          href={`/analysis?job_id=${completed[0].id}`}
+                          href={`/analysis?job_id=${(leftJob ?? completed[1]).id}`}
                         >
-                          {completed[0].id.slice(0, 8)}
+                          {(leftJob ?? completed[1]).id.slice(0, 8)}
                         </Link>{" "}
-                        · {formatDate(completed[0].created_at)}
+                        · {formatDate((leftJob ?? completed[1]).created_at)}
                       </div>
                       <div>
-                        Previous:{" "}
+                        Compare to:{" "}
                         <Link
                           className="text-primary hover:underline"
-                          href={`/analysis?job_id=${completed[1].id}`}
+                          href={`/analysis?job_id=${(rightJob ?? completed[0]).id}`}
                         >
-                          {completed[1].id.slice(0, 8)}
+                          {(rightJob ?? completed[0]).id.slice(0, 8)}
                         </Link>{" "}
-                        · {formatDate(completed[1].created_at)}
+                        · {formatDate((rightJob ?? completed[0]).created_at)}
                       </div>
                       <div className="pt-2 border-t border-gray-200">
                         {(() => {
-                          const d = diffRecommendations(completed[1], completed[0]);
+                          const baseline = leftJob ?? completed[1];
+                          const compare = rightJob ?? completed[0];
+                          const d = diffRecommendations(baseline, compare);
                           const added = d.added.length;
                           const removed = d.removed.length;
+                          const baseSr = getSuccessRate(baseline);
+                          const compSr = getSuccessRate(compare);
                           return (
                             <ul className="list-disc ml-6 space-y-1">
                               <li>Recommendations added: {added}</li>
                               <li>Recommendations removed: {removed}</li>
                               <li>
                                 Retirement success rate:{" "}
-                                {getSuccessRate(completed[1])?.toFixed(1) ?? "-"}% →{" "}
-                                {getSuccessRate(completed[0])?.toFixed(1) ?? "-"}%
+                                {baseSr != null ? baseSr.toFixed(1) : "-"}% →{" "}
+                                {compSr != null ? compSr.toFixed(1) : "-"}%
                               </li>
                             </ul>
                           );
@@ -473,9 +561,11 @@ export default function History() {
                             </thead>
                             <tbody>
                               {allAllocKeys.map((k) => {
-                                const a = safeNumber(leftAlloc[k]);
-                                const b = safeNumber(rightAlloc[k]);
-                                const d = b - a;
+                                const aRaw = safeNumber(leftAlloc[k]);
+                                const bRaw = safeNumber(rightAlloc[k]);
+                                const a = Math.round(aRaw * 10) / 10;
+                                const b = Math.round(bRaw * 10) / 10;
+                                const d = Math.round((b - a) * 10) / 10;
                                 return (
                                   <tr key={k} className="hover:bg-gray-50">
                                     <td className="p-3 border border-gray-700">
