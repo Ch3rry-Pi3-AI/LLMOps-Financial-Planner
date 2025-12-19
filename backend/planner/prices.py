@@ -14,7 +14,6 @@ This module provides helper functions for fetching **real-time** and
 from __future__ import annotations
 
 import os
-import random
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Dict, Optional
@@ -27,6 +26,7 @@ load_dotenv(override=True)
 
 polygon_api_key = os.getenv("POLYGON_API_KEY")
 polygon_plan = os.getenv("POLYGON_PLAN")
+dev_random_prices = os.getenv("DEV_RANDOM_PRICES", "").strip().lower() in {"1", "true", "yes"}
 
 # Flag used to decide between minute-level and EOD APIs
 is_paid_polygon = polygon_plan == "paid"
@@ -196,8 +196,14 @@ def get_share_price(symbol: str) -> float:
         except Exception as exc:  # noqa: BLE001
             print(
                 f"Polygon API unavailable for {symbol} due to: {exc}; "
-                "using a random fallback price."
+                "leaving price unchanged (returning 0.0)."
             )
 
-    # Development fallback
-    return float(random.randint(1, 100))
+    if dev_random_prices:
+        # Development-only fallback to keep demo flows alive without market data.
+        import random  # noqa: PLC0415
+
+        return float(random.randint(1, 100))
+
+    # Default behaviour: return 0.0 so callers can choose to keep existing DB values.
+    return 0.0

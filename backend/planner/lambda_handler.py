@@ -48,7 +48,7 @@ from typing import Any, Dict, List
 import boto3  # ✅ added
 
 from agents import Agent, Runner, trace
-from litellm.exceptions import RateLimitError
+from litellm.exceptions import RateLimitError, ServiceUnavailableError
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -151,7 +151,7 @@ def _extract_correlation(event: Any, context: Any) -> tuple[str | None, str | No
 # ============================================================
 
 @retry(
-    retry=retry_if_exception_type(RateLimitError),
+    retry=retry_if_exception_type((RateLimitError, ServiceUnavailableError)),
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=4, max=60),
     before_sleep=lambda state: logger.info(
@@ -370,6 +370,23 @@ async def run_orchestrator(
         )
 
     except Exception as exc:  # noqa: BLE001
+        # Transient Bedrock/LiteLLM capacity errors should be retried by tenacity,
+        # without permanently failing the job on the first attempt.
+        if isinstance(exc, (RateLimitError, ServiceUnavailableError)):
+            logger.warning("Planner: Transient LLM capacity/rate-limit error: %s", exc)
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "PLANNER_TRANSIENT_LLM_ERROR",
+                        "job_id": job_id,
+                        "request_id": request_id,
+                        "error": str(exc),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
+            raise
+
         logger.error("Planner: Error in orchestration: %s", exc, exc_info=True)
         db.jobs.update_status(job_id, "failed", error_message=str(exc))
         logger.error(
@@ -525,6 +542,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     }
                 )
             )
+
+            # For SQS triggers, Lambda must raise to ensure the message is retried (return values are ignored).
+            if isinstance(event, dict) and event.get("Records"):
+                raise
+
             return {
                 "statusCode": 500,
                 "body": json.dumps(

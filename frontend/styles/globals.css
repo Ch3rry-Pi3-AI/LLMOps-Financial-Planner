@@ -102,31 +102,7 @@ body {
     visibility: visible !important;
   }
 
-  #print-all-area,
-  #print-all-area * {
-    visibility: visible !important;
-  }
-
-  /* Default to printing the current tab unless explicitly exporting all tabs. */
-  body[data-print-scope="all"] #print-area {
-    display: none !important;
-  }
-  body[data-print-scope="tab"] #print-all-area {
-    display: none !important;
-  }
-
   #print-area {
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 100%;
-    padding: 0 !important;
-    margin: 0 !important;
-    background: #ffffff !important;
-    color: #000000 !important;
-  }
-
-  #print-all-area {
     position: absolute;
     left: 0;
     top: 0;
