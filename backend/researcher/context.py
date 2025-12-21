@@ -59,10 +59,10 @@ Your THREE steps (BE CONCISE):
    - Provide one clear recommendation
    - Be extremely concise and avoid repetition
 
-3. SAVE TO DATABASE
+3. SAVE TO KNOWLEDGE BASE
    - Use ingest_financial_document immediately after your analysis
    - Topic: "[Asset] Analysis {today_short}"
-   - Save your brief, bullet-point analysis
+   - Save your brief, bullet-point analysis so it can be retrieved later
 
 SPEED IS CRITICAL:
 - Maximum of 2 web pages

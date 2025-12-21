@@ -68,11 +68,12 @@ def _build_research_url(app_runner_url: str) -> str:
     elif app_runner_url.startswith("http://"):
         app_runner_url = app_runner_url.replace("http://", "")
 
-    return f"https://{app_runner_url}/research"
+    # Use the scheduler-optimized endpoint (fast/no-web execution in the service).
+    return f"https://{app_runner_url}/research/auto"
 
 
 def _invoke_research_endpoint(url: str, timeout_seconds: int = 180) -> Dict[str, Any]:
-    """Perform a POST request to the research endpoint.
+    """Perform a request to the research endpoint.
 
     Parameters
     ----------
@@ -88,18 +89,9 @@ def _invoke_research_endpoint(url: str, timeout_seconds: int = 180) -> Dict[str,
 
     Notes
     -----
-    * Sends an empty JSON body: ``{}``
-    * Assumes the App Runner backend will select the research topic.
+    * Uses the `/research/auto` endpoint which chooses the topic.
     """
-    # Empty JSON payload – backend agent decides what to research
-    payload_bytes = json.dumps({}).encode("utf-8")
-
-    request = urllib.request.Request(
-        url,
-        data=payload_bytes,
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
+    request = urllib.request.Request(url, method="GET")
 
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         raw_body = response.read().decode("utf-8")

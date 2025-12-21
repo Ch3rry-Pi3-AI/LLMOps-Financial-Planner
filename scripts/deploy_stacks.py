@@ -83,7 +83,7 @@ def _env_has(keys: Iterable[str]) -> bool:
     return all(bool(os.getenv(k)) for k in keys)
 
 
-def deploy_researcher(*, auto_approve: bool, scheduler_enabled: bool) -> None:
+def deploy_researcher(*, auto_approve: bool) -> None:
     """
     Deploy Part 4 with the same two-step flow as the guide:
       1) terraform apply targets (ECR + IAM role)
@@ -97,7 +97,7 @@ def deploy_researcher(*, auto_approve: bool, scheduler_enabled: bool) -> None:
     print("\n=== Part 4: Researcher (App Runner) ===")
     if not _env_has(["ALEX_API_ENDPOINT", "ALEX_API_KEY"]):
         print(
-            "⚠️  ALEX_API_ENDPOINT/ALEX_API_KEY are not set; researcher can deploy but won't ingest into S3 Vectors."
+            "[WARN] ALEX_API_ENDPOINT/ALEX_API_KEY are not set; researcher can deploy but won't ingest into S3 Vectors."
         )
 
     _terraform_init_if_needed(terraform_dir)
@@ -123,12 +123,10 @@ def deploy_researcher(*, auto_approve: bool, scheduler_enabled: bool) -> None:
     # Step 2: build + push image, update App Runner service
     run_command(["uv", "run", "deploy.py"], cwd=PROJECT_ROOT / "backend" / "researcher")
 
-    # Step 3: apply full infra (optionally enabling scheduler)
+    # Step 3: apply full infra. Scheduler is controlled via terraform/4_researcher/terraform.tfvars
     apply_cmd = ["terraform", "apply"]
     if auto_approve:
         apply_cmd.append("-auto-approve")
-    if scheduler_enabled:
-        apply_cmd.append("-var=scheduler_enabled=true")
     run_command(apply_cmd, cwd=terraform_dir)
 
 
@@ -234,19 +232,9 @@ def parse_args() -> argparse.Namespace:
 
     # Options
     p.add_argument(
-        "--yes",
-        action="store_true",
-        help="Auto-approve Terraform applies where supported",
-    )
-    p.add_argument(
         "--package-agents",
         action="store_true",
         help="Force repackaging of all agent Lambda ZIPs before deploy (slower)",
-    )
-    p.add_argument(
-        "--research-scheduler",
-        action="store_true",
-        help="Enable the optional Part 4 EventBridge scheduler (adds scheduler Lambda + schedule)",
     )
 
     return p.parse_args()
@@ -266,11 +254,14 @@ def main() -> None:
     agents = bool(args.agents or args.core or args.all)
     frontend = bool(args.frontend or args.core or args.all)
 
-    auto_approve = bool(args.yes)
+    # Non-interactive by default: selecting a stack flag implies consent to apply.
+    auto_approve = True
 
     # Follow course order when multiple flags are provided.
     if research:
-        deploy_researcher(auto_approve=auto_approve, scheduler_enabled=bool(args.research_scheduler))
+        # Researcher + optional scheduler are both defined in terraform/4_researcher.
+        # Toggle scheduler via terraform/4_researcher/terraform.tfvars (scheduler_enabled=true/false).
+        deploy_researcher(auto_approve=auto_approve)
 
     if db:
         deploy_database(auto_approve=auto_approve)

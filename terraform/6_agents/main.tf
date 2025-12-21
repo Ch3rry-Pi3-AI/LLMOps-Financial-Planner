@@ -245,6 +245,7 @@ resource "aws_lambda_function" "planner" {
       SAGEMAKER_ENDPOINT = var.sagemaker_endpoint
       POLYGON_API_KEY    = var.polygon_api_key
       POLYGON_PLAN       = var.polygon_plan
+      RESEARCHER_SERVICE_URL = var.researcher_service_url
       # LangFuse observability (optional)
       LANGFUSE_PUBLIC_KEY = var.langfuse_public_key
       LANGFUSE_SECRET_KEY = var.langfuse_secret_key
