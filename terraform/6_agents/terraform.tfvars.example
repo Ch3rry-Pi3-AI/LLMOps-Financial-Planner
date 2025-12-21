@@ -32,6 +32,10 @@ sagemaker_endpoint = "alex-embedding-endpoint"
 polygon_api_key = "your_polygon_api_key_here"
 polygon_plan    = "free"
 
+# App Runner URL for the Researcher service (Part 4). Example:
+# researcher_service_url = "https://zuf2mm4zrj.us-east-1.awsapprunner.com"
+researcher_service_url = ""
+
 # LangFuse observability configuration (optional)
 # Leave commented out until we use LangFuse - we start LangFuse in Part 8 / Day 4
 

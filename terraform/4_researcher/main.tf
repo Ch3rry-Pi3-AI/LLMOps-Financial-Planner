@@ -6,6 +6,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.4"
+    }
   }
   
   # Using local backend - state will be stored in terraform.tfstate in this directory
@@ -165,6 +169,14 @@ resource "aws_apprunner_service" "researcher" {
 # EventBridge Scheduler (Optional)
 # ========================================
 
+# Build the scheduler Lambda ZIP from source so changes deploy reliably.
+data "archive_file" "scheduler_zip" {
+  count       = var.scheduler_enabled ? 1 : 0
+  type        = "zip"
+  source_file = "${path.module}/../../backend/scheduler/lambda_function.py"
+  output_path = "${path.module}/../../backend/scheduler/lambda_function.zip"
+}
+
 # IAM role for EventBridge
 resource "aws_iam_role" "eventbridge_role" {
   count = var.scheduler_enabled ? 1 : 0
@@ -195,9 +207,8 @@ resource "aws_lambda_function" "scheduler_lambda" {
   function_name = "alex-researcher-scheduler"
   role          = aws_iam_role.lambda_scheduler_role[0].arn
   
-  # Note: The deployment package will be created by the guide instructions
-  filename         = "${path.module}/../../backend/scheduler/lambda_function.zip"
-  source_code_hash = fileexists("${path.module}/../../backend/scheduler/lambda_function.zip") ? filebase64sha256("${path.module}/../../backend/scheduler/lambda_function.zip") : null
+  filename         = data.archive_file.scheduler_zip[0].output_path
+  source_code_hash = data.archive_file.scheduler_zip[0].output_base64sha256
   
   handler     = "lambda_function.handler"
   runtime     = "python3.12"

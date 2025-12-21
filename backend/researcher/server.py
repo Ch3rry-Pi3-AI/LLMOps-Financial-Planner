@@ -20,6 +20,7 @@ Key endpoints
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import UTC, datetime
@@ -59,13 +60,14 @@ class ResearchRequest(BaseModel):
         If omitted, the agent will select a trending / interesting topic itself.
     """
     topic: Optional[str] = None
+    fast: bool = False
 
 
 # ============================================================
 # Core Agent Runner
 # ============================================================
 
-async def run_research_agent(topic: Optional[str] = None) -> str:
+async def run_research_agent(topic: Optional[str] = None, *, automated: bool = False) -> str:
     """
     Execute the investment research agent and return its final output.
 
@@ -91,6 +93,8 @@ async def run_research_agent(topic: Optional[str] = None) -> str:
     if topic:
         query = f"Research this investment topic: {topic}"
     else:
+        # Automated runs should be fast and predictable; pick a topic quickly.
+        # (Still allows the agent to browse a small amount, but keeps overall runtime tight.)
         query = DEFAULT_RESEARCH_PROMPT
 
     # ------------------------------------------------------------------
@@ -121,19 +125,61 @@ async def run_research_agent(topic: Optional[str] = None) -> str:
     # ------------------------------------------------------------------
     # Create and run the agent with MCP server
     # ------------------------------------------------------------------
-    with trace("Researcher"):
-        async with create_playwright_mcp_server(timeout_seconds=60) as playwright_mcp:
-            agent = Agent(
-                name="Alex Investment Researcher",
-                instructions=get_agent_instructions(),
-                model=model,
-                tools=[ingest_financial_document],
-                mcp_servers=[playwright_mcp],
+    async def _run(*, with_web: bool) -> str:
+        agent = Agent(
+            name="Alex Investment Researcher",
+            instructions=get_agent_instructions(),
+            model=model,
+            tools=[ingest_financial_document],
+            mcp_servers=[],
+        )
+
+        max_turns = 6 if automated else 10
+        timeout_seconds = 55 if automated else 85
+
+        if not with_web:
+            query_no_web = (
+                f"{query}\n\nNote: Web browsing is unavailable right now. "
+                "Proceed with a concise, best-effort analysis and still save it."
             )
+            try:
+                result = await asyncio.wait_for(
+                    Runner.run(agent, input=query_no_web, max_turns=max_turns),
+                    timeout=timeout_seconds,
+                )
+                return result.final_output
+            except asyncio.TimeoutError:
+                return (
+                    "Research timed out before completion. Please try again later "
+                    "or provide a narrower topic."
+                )
 
-            result = await Runner.run(agent, input=query, max_turns=15)
+        # With web (Playwright MCP). This can be resource-heavy; fall back to no-web
+        # if Playwright/MCP fails in App Runner.
+        try:
+            mcp_timeout = 30 if automated else 45
+            async with create_playwright_mcp_server(timeout_seconds=mcp_timeout) as playwright_mcp:
+                agent.mcp_servers = [playwright_mcp]
+                result = await asyncio.wait_for(
+                    Runner.run(agent, input=query, max_turns=max_turns),
+                    timeout=timeout_seconds,
+                )
+                return result.final_output
+        except asyncio.TimeoutError:
+            return (
+                "Research timed out before completion. Please try again later "
+                "or provide a narrower topic."
+            )
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "Researcher: web browsing failed; falling back to no-web mode: %s",
+                exc,
+            )
+            return await _run(with_web=False)
 
-    return result.final_output
+    with trace("Researcher"):
+        # Automated scheduler calls should be fast and stable: skip web browsing by default.
+        return await _run(with_web=not automated)
 
 
 # ============================================================
@@ -173,7 +219,7 @@ async def research(request: ResearchRequest) -> str:
     3. Store the analysis in the knowledge base
     """
     try:
-        response = await run_research_agent(request.topic)
+        response = await run_research_agent(request.topic, automated=bool(request.fast))
         return response
     except Exception as exc:  # noqa: BLE001
         print(f"Error in research endpoint: {exc}")
@@ -195,7 +241,7 @@ async def research_auto() -> dict:
     """
     try:
         # Always use agent's choice for automated runs
-        response = await run_research_agent(topic=None)
+        response = await run_research_agent(topic=None, automated=True)
         preview = response[:200] + "..." if len(response) > 200 else response
 
         return {

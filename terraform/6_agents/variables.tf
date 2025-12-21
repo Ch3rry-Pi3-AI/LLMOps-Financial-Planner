@@ -45,6 +45,12 @@ variable "polygon_plan" {
   default     = "free"
 }
 
+variable "researcher_service_url" {
+  description = "App Runner URL for the Researcher service (used for portfolio-targeted research)"
+  type        = string
+  default     = ""
+}
+
 # LangFuse observability variables (optional)
 variable "langfuse_public_key" {
   description = "LangFuse public key for observability (optional)"

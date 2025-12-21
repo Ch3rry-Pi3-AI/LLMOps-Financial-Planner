@@ -124,18 +124,13 @@ def parse_args() -> argparse.Namespace:
         help="Destroy Parts 4–8. Use --db if you also want to drop Aurora.",
     )
 
-    p.add_argument(
-        "--yes",
-        action="store_true",
-        help="Auto-approve Terraform destroys where supported",
-    )
-
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    auto_approve = bool(args.yes)
+    # Non-interactive by default: selecting a stack flag implies consent to destroy.
+    auto_approve = True
 
     research = bool(args.research or args.all)
     enterprise = bool(args.enterprise or args.core or args.all)
@@ -158,13 +153,6 @@ def main() -> None:
         destroy_agents(auto_approve=auto_approve)
 
     if db:
-        if not auto_approve:
-            response = input(
-                "WARNING: This will destroy Aurora and delete all data. Type 'delete' to confirm: "
-            )
-            if response.strip().lower() != "delete":
-                print("Aborted database destroy.")
-                sys.exit(1)
         destroy_database(auto_approve=auto_approve)
 
     if research:
@@ -175,4 +163,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
