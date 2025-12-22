@@ -1,0 +1,4 @@
+account_name,account_type,ticker,isin,quantity,currency
+My ISA,ISA,VUAG.L,IE00B3XXRP09,120,GBP
+My SIPP,SIPP,SPY,,50,USD
+My GIA,GIA,AAPL,,25,USD

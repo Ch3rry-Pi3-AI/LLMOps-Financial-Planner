@@ -21,6 +21,80 @@ import { apiRequest } from "../lib/api";
 import { SkeletonTable } from "../components/Skeleton";
 import Head from "next/head";
 
+type HoldingsImportRow = {
+  rowNumber: number;
+  accountName: string;
+  accountType: string;
+  ticker: string;
+  isin?: string;
+  quantity: number;
+  currency?: string;
+  errors: string[];
+};
+
+const ACCOUNT_TYPES = ["GIA", "ISA", "JISA", "LISA", "SIPP"] as const;
+type AccountType = (typeof ACCOUNT_TYPES)[number];
+
+function normalizeHeader(header: string): string {
+  return header.trim().toLowerCase().replace(/\s+/g, "_");
+}
+
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let current: string[] = [];
+  let field = "";
+  let inQuotes = false;
+
+  const pushField = () => {
+    current.push(field);
+    field = "";
+  };
+
+  const pushRow = () => {
+    // ignore completely empty rows
+    if (current.some((c) => c.trim() !== "")) {
+      rows.push(current.map((c) => c.trim()));
+    }
+    current = [];
+  };
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+
+    if (ch === '"') {
+      const next = text[i + 1];
+      if (inQuotes && next === '"') {
+        field += '"';
+        i += 1;
+        continue;
+      }
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (!inQuotes && ch === ",") {
+      pushField();
+      continue;
+    }
+
+    if (!inQuotes && (ch === "\n" || ch === "\r")) {
+      // handle CRLF
+      if (ch === "\r" && text[i + 1] === "\n") i += 1;
+      pushField();
+      pushRow();
+      continue;
+    }
+
+    field += ch;
+  }
+
+  // final field/row
+  pushField();
+  pushRow();
+
+  return rows;
+}
+
 const formatCurrencyGBP = (
   value: number,
   options: Intl.NumberFormatOptions = {},
@@ -81,6 +155,7 @@ export default function Accounts() {
   const [resettingAccounts, setResettingAccounts] = useState(false);
   const [savingAccount, setSavingAccount] = useState(false);
   const [deletingAccountId, setDeletingAccountId] = useState<string | null>(null);
+  const [importingHoldings, setImportingHoldings] = useState(false);
 
   // User-facing message (success / error)
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(
@@ -94,6 +169,12 @@ export default function Accounts() {
     purpose: "",
     cash_balance: "",
   });
+
+  // Holdings CSV import modal state
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importFileName, setImportFileName] = useState<string | null>(null);
+  const [importRows, setImportRows] = useState<HoldingsImportRow[] | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
 
   // Confirmation modal state (for reset / delete)
   const [confirmModal, setConfirmModal] = useState<{
@@ -114,7 +195,7 @@ export default function Accounts() {
       const token = await getToken();
       if (!token) {
         setMessage({ type: "error", text: "Missing auth token" });
-        return;
+        return null;
       }
 
       const data = await apiRequest<Account[]>("/api/accounts", token);
@@ -155,9 +236,11 @@ export default function Accounts() {
 
       console.log("Final accounts with positions:", accountsWithPositions);
       setAccounts(accountsWithPositions);
+      return accountsWithPositions;
     } catch (error) {
       console.error("Error loading accounts:", error);
       setMessage({ type: "error", text: "Failed to load accounts" });
+      return null;
     } finally {
       setLoading(false);
     }
@@ -366,6 +449,183 @@ export default function Accounts() {
     return parts.join(".");
   };
 
+  const resetHoldingsImportState = () => {
+    setImportFileName(null);
+    setImportRows(null);
+    setImportError(null);
+  };
+
+  const parseHoldingsImportRows = (csvText: string): HoldingsImportRow[] => {
+    const rawRows = parseCsv(csvText);
+    if (rawRows.length === 0) return [];
+
+    const headers = rawRows[0].map(normalizeHeader);
+    const headerIndex = new Map<string, number>();
+    headers.forEach((h, idx) => headerIndex.set(h, idx));
+
+    const getCell = (row: string[], header: string): string => {
+      const idx = headerIndex.get(header);
+      if (idx === undefined) return "";
+      return row[idx] ?? "";
+    };
+
+    const requiredHeaders = ["account_name", "account_type", "ticker", "quantity"];
+    const missing = requiredHeaders.filter((h) => !headerIndex.has(h));
+    if (missing.length > 0) {
+      throw new Error(
+        `Missing required column(s): ${missing.join(", ")}. Download the template CSV and try again.`,
+      );
+    }
+
+    return rawRows.slice(1).map((row, idx) => {
+      const rowNumber = idx + 2; // 1-based, including header row
+      const accountName = getCell(row, "account_name").trim();
+      const accountTypeRaw = getCell(row, "account_type").trim();
+      const accountTypeUpper = accountTypeRaw.toUpperCase();
+      const ticker = getCell(row, "ticker").trim().toUpperCase();
+      const isin = getCell(row, "isin").trim().toUpperCase();
+      const currency = getCell(row, "currency").trim().toUpperCase();
+
+      const quantityRaw = getCell(row, "quantity").trim().replace(/,/g, "");
+      const quantity = Number(quantityRaw);
+
+      const errors: string[] = [];
+      if (!accountName) errors.push("Missing account_name");
+      if (!accountTypeRaw) errors.push("Missing account_type");
+      if (accountTypeRaw && !ACCOUNT_TYPES.includes(accountTypeUpper as AccountType)) {
+        errors.push(`Unknown account_type '${accountTypeRaw}' (expected e.g. ISA/SIPP/GIA)`);
+      }
+      if (!ticker) errors.push("Missing ticker");
+      if (!Number.isFinite(quantity) || quantity <= 0) errors.push("Invalid quantity");
+
+      return {
+        rowNumber,
+        accountName,
+        accountType: accountTypeRaw,
+        ticker,
+        isin: isin || undefined,
+        quantity,
+        currency: currency || undefined,
+        errors,
+      };
+    });
+  };
+
+  const handleHoldingsCsvSelected = async (file: File) => {
+    resetHoldingsImportState();
+    setImportFileName(file.name);
+
+    try {
+      const text = await file.text();
+      const parsed = parseHoldingsImportRows(text);
+      if (parsed.length === 0) {
+        setImportError("No rows found in CSV.");
+        return;
+      }
+      setImportRows(parsed);
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : "Failed to parse CSV.");
+    }
+  };
+
+  const importHoldingsFromCsv = async () => {
+    if (!importRows || importRows.length === 0) return;
+
+    const hasErrors = importRows.some((r) => r.errors.length > 0);
+    if (hasErrors) {
+      setMessage({ type: "error", text: "Fix CSV errors before importing." });
+      return;
+    }
+
+    setImportingHoldings(true);
+    setMessage(null);
+
+    try {
+      const token = await getToken();
+      if (!token) {
+        setMessage({ type: "error", text: "Missing auth token" });
+        return;
+      }
+
+      const accountKey = (name: string, purpose: string) =>
+        `${name.trim().toLowerCase()}|${purpose.trim().toLowerCase()}`;
+
+      // Use local state to avoid extra network calls.
+      const existingAccountByKey = new Map<string, Account>();
+      accounts.forEach((a) =>
+        existingAccountByKey.set(accountKey(a.account_name, a.account_purpose), a),
+      );
+
+      // Create missing accounts first.
+      const resolvedAccountIdByKey = new Map<string, string>();
+      for (const row of importRows) {
+        const key = accountKey(row.accountName, row.accountType);
+        if (resolvedAccountIdByKey.has(key)) continue;
+
+        const existing = existingAccountByKey.get(key);
+        if (existing) {
+          resolvedAccountIdByKey.set(key, existing.id);
+          continue;
+        }
+
+        const created = await apiRequest<Account>("/api/accounts", token, {
+          method: "POST",
+          body: JSON.stringify({
+            account_name: row.accountName,
+            account_purpose: row.accountType || "Investment Account",
+            cash_balance: 0,
+          }),
+        });
+        resolvedAccountIdByKey.set(key, created.id);
+      }
+
+      // Re-load accounts so we can upsert positions reliably.
+      const refreshedAccounts = await loadAccounts();
+      const accountsForUpsert = refreshedAccounts ?? accounts;
+
+      // Import positions (upsert quantity if symbol already exists in that account)
+      for (const row of importRows) {
+        const key = accountKey(row.accountName, row.accountType);
+        const accountId = resolvedAccountIdByKey.get(key);
+        if (!accountId) continue;
+
+        const account = accountsForUpsert.find((a) => a.id === accountId);
+        const existingPosition = account?.positions?.find(
+          (p) => p.symbol.toUpperCase() === row.ticker.toUpperCase(),
+        );
+
+        if (existingPosition) {
+          await apiRequest(`/api/positions/${existingPosition.id}`, token, {
+            method: "PUT",
+            body: JSON.stringify({ quantity: row.quantity }),
+          });
+        } else {
+          await apiRequest("/api/positions", token, {
+            method: "POST",
+            body: JSON.stringify({
+              account_id: accountId,
+              symbol: row.ticker,
+              quantity: row.quantity,
+            }),
+          });
+        }
+      }
+
+      setMessage({
+        type: "success",
+        text: `Imported ${importRows.length} holding${importRows.length === 1 ? "" : "s"} successfully.`,
+      });
+      setShowImportModal(false);
+      resetHoldingsImportState();
+      await loadAccounts();
+    } catch (error) {
+      console.error("Error importing holdings:", error);
+      setMessage({ type: "error", text: "Failed to import holdings from CSV" });
+    } finally {
+      setImportingHoldings(false);
+    }
+  };
+
   return (
     <>
       <Head>
@@ -404,6 +664,16 @@ export default function Accounts() {
                     />
                   </svg>
                   Add Account
+                </button>
+
+                <button
+                  onClick={() => {
+                    setShowImportModal(true);
+                    resetHoldingsImportState();
+                  }}
+                  className="bg-gray-800 hover:bg-gray-900 text-white px-4 py-2 rounded-lg transition-colors"
+                >
+                  Import CSV
                 </button>
 
                 {/* Populate test data button (shown only when there are no accounts) */}
@@ -629,6 +899,143 @@ export default function Accounts() {
               </>
             )}
           </div>
+
+          {/* Import Holdings Modal */}
+          {showImportModal && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-lg shadow-lg p-6 w-full max-w-3xl">
+                <h3 className="text-xl font-bold text-dark mb-1">
+                  Import Holdings (CSV)
+                </h3>
+                <p className="text-sm text-gray-600">
+                  Download the template, fill it in, and upload it back here. For UK/EU instruments, include an exchange suffix when possible (e.g.{" "}
+                  <span className="font-mono">VUAG.L</span>).
+                </p>
+
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <a
+                    href="/holdings_template.csv"
+                    download
+                    className="text-primary hover:underline text-sm"
+                  >
+                    Download template CSV
+                  </a>
+                  <div className="text-xs text-gray-500">
+                    Supported account types: {ACCOUNT_TYPES.join(", ")}
+                  </div>
+                </div>
+
+                <div className="mt-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    CSV file
+                  </label>
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) void handleHoldingsCsvSelected(file);
+                    }}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                  />
+                  {importFileName && (
+                    <div className="mt-2 text-xs text-gray-600">
+                      Selected: <span className="font-mono">{importFileName}</span>
+                    </div>
+                  )}
+                </div>
+
+                {importError && (
+                  <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                    {importError}
+                  </div>
+                )}
+
+                {importRows && (
+                  <div className="mt-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="text-sm font-semibold text-dark">
+                        Preview ({importRows.length} rows)
+                      </div>
+                      <div className="text-xs text-gray-600">
+                        Rows with errors:{" "}
+                        {importRows.filter((r) => r.errors.length > 0).length}
+                      </div>
+                    </div>
+
+                    <div className="max-h-72 overflow-auto border border-gray-200 rounded-lg">
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr className="border-b border-gray-200">
+                            <th className="text-left py-2 px-3">Row</th>
+                            <th className="text-left py-2 px-3">Account</th>
+                            <th className="text-left py-2 px-3">Type</th>
+                            <th className="text-left py-2 px-3">Ticker</th>
+                            <th className="text-left py-2 px-3">ISIN</th>
+                            <th className="text-right py-2 px-3">Qty</th>
+                            <th className="text-left py-2 px-3">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {importRows.slice(0, 50).map((r) => (
+                            <tr key={r.rowNumber} className="border-b border-gray-100">
+                              <td className="py-2 px-3 font-mono">{r.rowNumber}</td>
+                              <td className="py-2 px-3">{r.accountName}</td>
+                              <td className="py-2 px-3">{r.accountType}</td>
+                              <td className="py-2 px-3 font-mono">{r.ticker}</td>
+                              <td className="py-2 px-3 font-mono">{r.isin ?? ""}</td>
+                              <td className="py-2 px-3 text-right font-mono">
+                                {Number.isFinite(r.quantity) ? r.quantity : ""}
+                              </td>
+                              <td className="py-2 px-3">
+                                {r.errors.length === 0 ? (
+                                  <span className="text-green-700">OK</span>
+                                ) : (
+                                  <span className="text-red-700">
+                                    {r.errors.join("; ")}
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {importRows.length > 50 && (
+                      <div className="mt-2 text-xs text-gray-600">
+                        Showing first 50 rows.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="flex gap-3 mt-6">
+                  <button
+                    onClick={importHoldingsFromCsv}
+                    disabled={
+                      importingHoldings ||
+                      !importRows ||
+                      importRows.length === 0 ||
+                      importRows.some((r) => r.errors.length > 0)
+                    }
+                    className="flex-1 bg-primary hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    {importingHoldings ? "Importing..." : "Import Holdings"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowImportModal(false);
+                      resetHoldingsImportState();
+                    }}
+                    className="flex-1 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Add Account Modal */}
           {showAddModal && (

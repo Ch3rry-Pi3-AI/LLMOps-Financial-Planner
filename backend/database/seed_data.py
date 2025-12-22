@@ -366,6 +366,25 @@ INSTRUMENTS: List[Dict[str, Any]] = [
         "allocation_sectors": {"commodities": 100},
         "allocation_asset_class": {"commodities": 100},
     },
+    # Crypto (modelled as commodities)
+    {
+        "symbol": "BTCUSD",
+        "name": "Bitcoin (BTC/USD)",
+        "instrument_type": "commodity",
+        "current_price": 42000.00,
+        "allocation_regions": {"global": 100},
+        "allocation_sectors": {"commodities": 100},
+        "allocation_asset_class": {"commodities": 100},
+    },
+    {
+        "symbol": "ETHUSD",
+        "name": "Ethereum (ETH/USD)",
+        "instrument_type": "commodity",
+        "current_price": 2200.00,
+        "allocation_regions": {"global": 100},
+        "allocation_sectors": {"commodities": 100},
+        "allocation_asset_class": {"commodities": 100},
+    },
     # Mixed/Balanced
     {
         "symbol": "AOR",

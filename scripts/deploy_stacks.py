@@ -16,13 +16,14 @@ packaging, DB migrations/seeding). This script runs those steps when requested.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -83,6 +84,113 @@ def _env_has(keys: Iterable[str]) -> bool:
     return all(bool(os.getenv(k)) for k in keys)
 
 
+def _load_dotenv(path: Path) -> None:
+    """
+    Lightweight .env loader to keep deploy automation self-contained.
+
+    We intentionally avoid external deps (python-dotenv) in scripts.
+    """
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ[key] = value
+
+
+def _upsert_env_file(path: Path, updates: Mapping[str, str]) -> None:
+    """
+    Update (or append) KEY=VALUE pairs in a .env file.
+
+    Keeps unrelated lines intact and normalises updated lines to KEY=VALUE.
+    """
+    lines: list[str] = []
+    existing: dict[str, int] = {}
+
+    if path.exists():
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for idx, raw in enumerate(lines):
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#") or "=" not in raw:
+                continue
+            key = raw.split("=", 1)[0].strip()
+            if key:
+                existing[key] = idx
+
+    for key, value in updates.items():
+        new_line = f"{key}={value}"
+        if key in existing:
+            lines[existing[key]] = new_line
+        else:
+            lines.append(new_line)
+
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _upsert_tfvars_file(path: Path, updates: Mapping[str, str]) -> None:
+    """
+    Update (or append) key = "value" lines in terraform.tfvars.
+
+    Keeps unrelated lines intact and normalises updated lines.
+    """
+    lines: list[str] = []
+    existing: dict[str, int] = {}
+
+    if path.exists():
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for idx, raw in enumerate(lines):
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#") or "=" not in raw:
+                continue
+            key = raw.split("=", 1)[0].strip()
+            if key:
+                existing[key] = idx
+
+    for key, value in updates.items():
+        new_line = f'{key} = "{value}"'
+        if key in existing:
+            lines[existing[key]] = new_line
+        else:
+            lines.append(new_line)
+
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _terraform_output_json(terraform_dir: Path) -> dict[str, Any]:
+    """
+    Return `terraform output -json` as a dict.
+
+    Assumes terraform has been initialised already for the directory.
+    """
+    printable = "terraform output -json"
+    print(f"Running: {printable}")
+    result = subprocess.run(
+        ["terraform", "output", "-json"],
+        cwd=str(terraform_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout or "{}")
+
+
+def _read_tf_output_value(outputs: Mapping[str, Any], key: str) -> str | None:
+    raw = outputs.get(key)
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get("value")
+    if isinstance(value, str):
+        return value
+    return None
+
 def deploy_researcher(*, auto_approve: bool) -> None:
     """
     Deploy Part 4 with the same two-step flow as the guide:
@@ -134,6 +242,35 @@ def deploy_database(*, auto_approve: bool) -> None:
     terraform_dir = TERRAFORM_ROOT / "5_database"
     print("\n=== Part 5: Database (Aurora) ===")
     terraform_apply(terraform_dir, auto_approve=auto_approve)
+
+    # After DB deploy, propagate ARNs into local runtime + agent terraform vars.
+    _terraform_init_if_needed(terraform_dir)
+    outputs = _terraform_output_json(terraform_dir)
+    cluster_arn = _read_tf_output_value(outputs, "aurora_cluster_arn")
+    secret_arn = _read_tf_output_value(outputs, "aurora_secret_arn")
+
+    if not cluster_arn or not secret_arn:
+        print("[WARN] Could not read aurora_cluster_arn/aurora_secret_arn from terraform output.")
+        return
+
+    env_updates = {
+        "AURORA_CLUSTER_ARN": cluster_arn,
+        "AURORA_SECRET_ARN": secret_arn,
+    }
+    _upsert_env_file(PROJECT_ROOT / ".env", env_updates)
+    os.environ.update(env_updates)
+
+    agents_tfvars = TERRAFORM_ROOT / "6_agents" / "terraform.tfvars"
+    if agents_tfvars.exists():
+        _upsert_tfvars_file(
+            agents_tfvars,
+            {
+                "aurora_cluster_arn": cluster_arn,
+                "aurora_secret_arn": secret_arn,
+            },
+        )
+    else:
+        print(f"[WARN] Missing {agents_tfvars}; skipping agent tfvars update.")
 
 
 def migrate_database() -> None:
@@ -202,7 +339,7 @@ def deploy_enterprise(*, auto_approve: bool) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Deploy Alex stacks (Parts 4–8)")
+    p = argparse.ArgumentParser(description="Deploy Alex stacks (Parts 4-8)")
 
     # Primary flags
     p.add_argument("--research", action="store_true", help="Deploy Part 4 (Researcher/App Runner)")
@@ -222,7 +359,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--core",
         action="store_true",
-        help="Deploy Parts 5–7 (db+migrate+seed+agents+frontend)",
+        help="Deploy Parts 5-7 (db+db-testdata+agents+frontend)",
     )
     p.add_argument(
         "--all",
@@ -243,14 +380,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    # Load .env once so DB/test scripts can run without manual export.
+    _load_dotenv(PROJECT_ROOT / ".env")
+
     # Expand convenience flags
     research = bool(args.research or args.all)
     enterprise = bool(args.enterprise or args.all)
 
     db = bool(args.db or args.core or args.all)
-    migrate = bool(args.migrate or args.core or args.all)
-    seed = bool(args.seed or args.core or args.all)
-    db_testdata = bool(args.db_testdata)
+    migrate = bool(args.migrate)
+    seed = bool(args.seed)
+    db_testdata = bool(args.db_testdata or args.core or args.all)
     agents = bool(args.agents or args.core or args.all)
     frontend = bool(args.frontend or args.core or args.all)
 
@@ -266,14 +406,14 @@ def main() -> None:
     if db:
         deploy_database(auto_approve=auto_approve)
 
-    if migrate:
-        migrate_database()
-
-    if seed:
-        seed_database()
-
+    # If you requested db-testdata, it includes migrations + seed already.
     if db_testdata:
         setup_database_testdata()
+    else:
+        if migrate:
+            migrate_database()
+        if seed:
+            seed_database()
 
     if agents:
         deploy_agents(auto_approve=auto_approve, package=bool(args.package_agents))
