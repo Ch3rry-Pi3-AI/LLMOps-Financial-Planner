@@ -42,6 +42,8 @@ import json
 import logging
 import os
 import uuid
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -87,6 +89,101 @@ logger.setLevel(logging.INFO)
 
 # Single shared database instance for this Lambda runtime
 db = Database()
+
+RESEARCHER_SERVICE_URL = os.getenv("RESEARCHER_SERVICE_URL", "").strip()
+
+
+def _get_top_symbols_for_user(clerk_user_id: str, *, limit: int = 5) -> list[str]:
+    """
+    Compute the user's top held symbols by current estimated value.
+
+    This is used for portfolio-targeted research ingestion to improve the
+    relevance of the "Market Context" section on subsequent analysis runs.
+    """
+    try:
+        accounts = db.accounts.find_by_user(clerk_user_id) or []
+        values: dict[str, float] = {}
+        for account in accounts:
+            positions = db.positions.find_by_account(account["id"]) or []
+            for position in positions:
+                symbol = str(position.get("symbol") or "").strip().upper()
+                if not symbol:
+                    continue
+                instrument = db.instruments.find_by_symbol(symbol) or {}
+                try:
+                    price = float(instrument.get("current_price") or 0.0)
+                    qty = float(position.get("quantity") or 0.0)
+                except (TypeError, ValueError):
+                    price = 0.0
+                    qty = 0.0
+                values[symbol] = values.get(symbol, 0.0) + price * qty
+
+        ordered = sorted(values.items(), key=lambda kv: kv[1], reverse=True)
+        out: list[str] = []
+        for symbol, _v in ordered:
+            if symbol not in out:
+                out.append(symbol)
+            if len(out) >= limit:
+                break
+        return out
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Planner: Failed to compute top symbols: %s", exc)
+        return []
+
+
+def _trigger_portfolio_targeted_research(*, clerk_user_id: str, job_id: str, request_id: str) -> None:
+    """
+    Best-effort: trigger the Researcher service to ingest portfolio-targeted market context.
+
+    This is designed to improve the relevance of S3 Vectors retrieval on the *next* analysis run.
+    """
+    if not RESEARCHER_SERVICE_URL:
+        return
+
+    symbols = _get_top_symbols_for_user(clerk_user_id, limit=5)
+    if not symbols:
+        return
+
+    topic = (
+        "Portfolio market context: "
+        + ", ".join(symbols)
+        + ". Provide a concise near-term outlook and key risks/drivers; then save to the knowledge base."
+    )
+
+    url = RESEARCHER_SERVICE_URL.rstrip("/") + "/research"
+    payload = json.dumps({"topic": topic, "fast": True}).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            body = resp.read().decode("utf-8")[:500]
+        logger.info(
+            json.dumps(
+                {
+                    "event": "PLANNER_TARGETED_RESEARCH_TRIGGERED",
+                    "job_id": job_id,
+                    "request_id": request_id,
+                    "symbols": symbols,
+                    "status": "ok",
+                    "response_preview": body,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        )
+    except urllib.error.HTTPError as exc:
+        logger.warning(
+            "Planner: Targeted researcher HTTPError (%s): %s",
+            exc.code,
+            exc.read().decode("utf-8", errors="ignore")[:200],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Planner: Targeted researcher call failed: %s", exc)
 
 # Lambda client for Tagger.
 # In CI/offline contexts, boto3 can raise `NoRegionError` if no default region is set.
@@ -353,6 +450,18 @@ async def run_orchestrator(
         # Step 6: Mark job as completed if everything succeeded
         db.jobs.update_status(job_id, "completed")
         logger.info("Planner: Job %s completed successfully", job_id)
+
+        # Step 7 (best-effort): ingest portfolio-targeted market context for the next run.
+        try:
+            if clerk_user_id:
+                await asyncio.to_thread(
+                    _trigger_portfolio_targeted_research,
+                    clerk_user_id=clerk_user_id,
+                    job_id=job_id,
+                    request_id=request_id,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Planner: Portfolio-targeted research step failed: %s", exc)
 
         end_time = datetime.now(timezone.utc)
         logger.info(

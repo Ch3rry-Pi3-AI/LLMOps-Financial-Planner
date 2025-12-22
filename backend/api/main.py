@@ -1862,6 +1862,23 @@ async def populate_test_data(
                 "allocation_sectors": {"technology": 100},
                 "allocation_asset_class": {"equity": 100},
             },
+            # Crypto (modelled as commodities)
+            "BTCUSD": {
+                "name": "Bitcoin (BTC/USD)",
+                "type": "commodity",
+                "current_price": 42000.00,
+                "allocation_regions": {"global": 100},
+                "allocation_sectors": {"commodities": 100},
+                "allocation_asset_class": {"commodities": 100},
+            },
+            "ETHUSD": {
+                "name": "Ethereum (ETH/USD)",
+                "type": "commodity",
+                "current_price": 2200.00,
+                "allocation_regions": {"global": 100},
+                "allocation_sectors": {"commodities": 100},
+                "allocation_asset_class": {"commodities": 100},
+            },
         }
 
         # Ensure each instrument exists, creating it if necessary
@@ -1927,6 +1944,8 @@ async def populate_test_data(
                     ("NVDA", 25),
                     ("MSFT", 30),
                     ("GOOGL", 20),
+                    ("BTCUSD", 0.25),
+                    ("ETHUSD", 2),
                 ],
             },
         ]

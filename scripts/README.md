@@ -79,13 +79,12 @@ Deploy each “part” with flags (mirrors the guides):
 * `uv run deploy_stacks.py --enterprise` — Part 8 (CloudWatch dashboards)
 
 Convenience:
-* `uv run deploy_stacks.py --core` — Parts 5–7 (db+migrate+seed+agents+frontend)
-* `uv run deploy_stacks.py --all` — Parts 4–8 (research + core + enterprise)
+* `uv run deploy_stacks.py --core` - Parts 5-7 (db+db-testdata+agents+frontend)
+* `uv run deploy_stacks.py --all` - Parts 4-8 (research + core + enterprise)
 
 Options:
-* `--yes` auto-approves Terraform applies where supported
 * `--package-agents` forces rebuilding all agent ZIPs (slower)
-* `--research-scheduler` enables the optional researcher EventBridge scheduler
+* Research scheduler is toggled via `terraform/4_researcher/terraform.tfvars` (`scheduler_enabled=true/false`)
 
 ### `destroy_stacks.py` — **Part 4–8 Stack Teardown**
 
@@ -96,7 +95,7 @@ Selective teardown (cost control) with safe defaults:
 * `uv run destroy_stacks.py --all` — destroys 4–8 (use `--db` if you also want to drop Aurora)
 
 Options:
-* `--yes` auto-approves Terraform destroys and auto-confirms the Part 7 destroy prompt
+* Destruction is non-interactive by default (selecting a stack flag implies consent)
 
 
 

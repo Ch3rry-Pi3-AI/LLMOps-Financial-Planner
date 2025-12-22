@@ -121,6 +121,16 @@ export default function Layout({ children }: LayoutProps) {
                   >
                     Market
                   </Link>
+                  <Link
+                    href="/getting-started"
+                    className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                      isActive("/getting-started")
+                        ? "bg-surface text-foreground shadow-sm"
+                        : "text-muted hover:text-foreground hover:bg-surface/60"
+                    }`}
+                  >
+                    How To
+                  </Link>
                 </div>
               </div>
 
@@ -194,6 +204,16 @@ export default function Layout({ children }: LayoutProps) {
                 }`}
               >
                 Market
+              </Link>
+              <Link
+                href="/getting-started"
+                className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                  isActive("/getting-started")
+                    ? "bg-surface text-foreground shadow-sm"
+                    : "text-muted hover:text-foreground hover:bg-surface/60"
+                }`}
+              >
+                How To
               </Link>
             </div>
           </div>
