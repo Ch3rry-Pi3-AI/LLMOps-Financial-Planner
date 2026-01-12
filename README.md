@@ -1,4 +1,4 @@
-# Alex Financial Planner (LLMOps on AWS)
+# LLMOps | Alex Financial Planner
 
 Terraform-first, multi-agent financial planning platform that pairs a Next.js frontend with serverless AI services on AWS.
 
