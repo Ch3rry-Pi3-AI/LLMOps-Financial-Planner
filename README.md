@@ -6,7 +6,7 @@ Terraform-first, multi-agent financial planning platform that pairs a Next.js fr
 flowchart LR
     U[User] --> CF[CloudFront]
     CF --> S3["S3 Static Site (Next.js)"]
-    CF -->|/api/*| APIGW[API Gateway]
+    CF --> APIGW[API Gateway]
     APIGW --> API[FastAPI Lambda]
     API --> SQS[SQS Queue]
     SQS --> Planner[Planner Lambda]
