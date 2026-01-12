@@ -5,13 +5,13 @@ Terraform-first, multi-agent financial planning platform that pairs a Next.js fr
 ```mermaid
 flowchart LR
     U[User] --> CF[CloudFront]
-    CF --> S3[S3 Static Site (Next.js)]
+    CF --> S3["S3 Static Site (Next.js)"]
     CF -->|/api/*| APIGW[API Gateway]
     APIGW --> API[FastAPI Lambda]
     API --> SQS[SQS Queue]
     SQS --> Planner[Planner Lambda]
     Planner --> Agents[Tagger / Reporter / Charter / Retirement]
-    Agents --> DB[(Aurora Serverless v2)]
+    Agents --> DB["(Aurora Serverless v2)"]
     Planner --> Vectors[(S3 Vectors)]
     Ingest[Ingest Lambda] --> SageMaker[SageMaker Embeddings]
     Ingest --> Vectors
